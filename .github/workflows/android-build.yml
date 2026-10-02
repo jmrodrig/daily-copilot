@@ -26,6 +26,9 @@ jobs:
     - name: Grant execute permission for gradlew
       run: chmod +x android/gradlew
 
+    - name: Set up local.properties
+      run: echo 'BACKEND_URL="http://100.125.227.113:8000"' > android/local.properties
+
     - name: Build Debug APK
       working-directory: ./android
       run: ./gradlew assembleDebug
