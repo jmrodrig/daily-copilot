@@ -26,3 +26,6 @@ local.properties
 *.db-wal
 *.db-shm
 *.db-journal
+
+# Local notes (user data)
+backend/notes/

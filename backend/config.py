@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     # Database
     db_path: Path = Path("copilot.db")
 
+    # Markdown file layer (wiki notes, emails)
+    notes_dir: Path = Path("notes")
+
     # Model endpoints
     ollama_base_url: str = "http://localhost:11434"
 
@@ -31,9 +34,9 @@ class Settings(BaseSettings):
     gemini_api_key: SecretStr | None = None
     anthropic_api_key: SecretStr | None = None
 
-    @field_validator("db_path")
+    @field_validator("db_path", "notes_dir")
     @classmethod
-    def _resolve_db_path(cls, value: Path) -> Path:
+    def _resolve_path(cls, value: Path) -> Path:
         """Resolve relative paths against backend/, not the current working directory."""
         value = value.expanduser()
         if not value.is_absolute():

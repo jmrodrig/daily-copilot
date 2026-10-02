@@ -22,6 +22,7 @@ Settings are read from system environment variables and from `backend/.env`
 | Variable                    | Default                  | Notes                                             |
 |-----------------------------|--------------------------|---------------------------------------------------|
 | `COPILOT_DB_PATH`           | `copilot.db`             | Relative paths resolve against `backend/`         |
+| `COPILOT_NOTES_DIR`         | `notes`                  | Markdown notes root; relative to `backend/`       |
 | `COPILOT_HOST`              | `127.0.0.1`              | Used by `python main.py`                          |
 | `COPILOT_PORT`              | `8000`                   | Used by `python main.py`                          |
 | `COPILOT_OLLAMA_BASE_URL`   | `http://localhost:11434` | Local model endpoint                              |
