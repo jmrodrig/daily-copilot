@@ -1,0 +1,33 @@
+{
+  "colors": {
+    "background": "#0C1216",
+    "surface": {
+      "raised": "#131B21",
+      "panel": "#0F171C"
+    },
+    "border": {
+      "default": "#25323B",
+      "light": "#2F3E48"
+    },
+    "text": {
+      "primary": "#E8EEF1",
+      "secondary": "#C5D0D6",
+      "muted": "#97A5AE"
+    },
+    "accent": {
+      "primary": "#F2B544"
+    },
+    "project": {
+      "c7801": "#6CB6EA",
+      "r5301": "#B7A3F2",
+      "p5002": "#56C8A8",
+      "neutral": "#6B7A84"
+    }
+  },
+  "typography": {
+    "fontFamily": {
+      "ui": "IBM Plex Sans, sans-serif",
+      "mono": "IBM Plex Mono, monospace"
+    }
+  }
+}

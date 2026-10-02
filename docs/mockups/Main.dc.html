@@ -1,0 +1,1661 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Desktop app</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#0C1216;color-scheme:dark}
+*{scrollbar-width:thin;scrollbar-color:#2F3E48 transparent}
+::-webkit-scrollbar{width:5px;height:5px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:#2F3E48;border-radius:3px}
+::-webkit-scrollbar-thumb:hover{background:#43555F}
+::-webkit-scrollbar-corner{background:transparent}
+a{color:inherit;text-decoration:none}
+button,input,textarea{font-family:inherit}
+input::placeholder,textarea::placeholder{color:#8797A1}
+.chip{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border:1px solid #2F3E48;border-radius:999px;font-size:12px;color:#C5D0D6;white-space:nowrap}
+.dot{width:8px;height:8px;border-radius:50%;display:inline-block}
+.btn{min-height:40px;padding:0 14px;border-radius:8px;border:1px solid #34434D;background:transparent;color:#E8EEF1;font-size:13px;font-weight:500;cursor:pointer}
+.btn-primary{min-height:40px;padding:0 16px;border-radius:8px;border:0;background:#F2B544;color:#10161A;font-size:13px;font-weight:600;cursor:pointer}
+.mono{font-family:'IBM Plex Mono',monospace}
+.nb{display:flex;align-items:center;gap:6px;width:100%;min-height:28px;padding:0 8px;border:0;border-radius:6px;font-size:13px;text-align:left;cursor:pointer;background:transparent;color:#97A5AE}
+.fold{display:flex;align-items:center;gap:8px;width:100%;min-height:28px;padding:0 8px;border:0;border-radius:6px;background:transparent;color:#C5D0D6;font-size:13px;font-weight:600;text-align:left;cursor:pointer}
+.iconbtn{width:40px;height:40px;flex-shrink:0;display:flex;align-items:center;justify-content:center;border-radius:8px;border:1px solid #2F3E48;background:#131B21;color:#C5D0D6;cursor:pointer}
+.ta{width:100%;box-sizing:border-box;padding:10px 12px;border-radius:8px;border:1px solid #2F3E48;background:#0F171C;color:#E8EEF1;font-size:14px;line-height:1.5;resize:vertical}
+.code{font-family:'IBM Plex Mono',monospace;font-size:13px;line-height:1.6;white-space:pre-wrap}
+.seg{min-height:36px;padding:0 14px;border-radius:999px;border:1px solid #34434D;background:#0F171C;color:#C5D0D6;font-size:13px;cursor:pointer}
+.seg-on{min-height:36px;padding:0 14px;border-radius:999px;border:1px solid #F2B544;background:rgba(242,181,68,0.16);color:#F6C96A;font-size:13px;font-weight:600;cursor:pointer}
+.tb{min-height:32px;padding:0 10px;border-radius:6px;border:1px solid #2F3E48;background:#131B21;color:#C5D0D6;font-size:12px;font-weight:500;cursor:pointer}
+.tbw{min-height:32px;padding:0 10px;border-radius:6px;border:1px dashed #3A4A55;background:transparent;color:#C5D0D6;font-size:12px;cursor:pointer;font-family:'IBM Plex Mono',monospace}
+.panel{background:#131B21;border:1px solid #25323B;border-radius:12px;padding:20px 22px}
+.fbtn{min-width:32px;height:32px;padding:0;border:0;border-radius:6px;background:transparent;color:#E8EEF1;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center}
+.fbtn:hover{background:#2A3842}
+.mi{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;min-height:34px;padding:0 12px;border:0;border-radius:6px;background:transparent;color:#E8EEF1;font-size:13px;text-align:left;cursor:pointer}
+.mi:hover{background:#2A3842}
+.mi:disabled{color:#6B7A84;cursor:default;background:transparent}
+.mk{font-size:11px;color:#97A5AE}
+.msep{height:1px;background:#34434D;margin:4px 6px}
+.fsep{width:1px;height:20px;background:#3A4A55;margin:0 4px}
+.trow{display:flex;align-items:center;min-height:28px;border-radius:6px}
+.trow:hover,.trow:focus-within{background:#151F26}
+.tact{display:flex;gap:2px;flex-shrink:0;padding-right:4px;opacity:0}
+.trow:hover .tact,.trow:focus-within .tact{opacity:1}
+.chev{width:20px;height:24px;padding:0;border:0;background:transparent;color:#97A5AE;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.tbtn{width:24px;height:24px;padding:0;border:0;border-radius:5px;background:transparent;color:#C5D0D6;cursor:pointer;display:flex;align-items:center;justify-content:center}
+.tbtn:hover{background:#25323B;color:#F2B544}
+</style>
+</helmet>
+<div style="height:100vh;min-height:720px;display:flex;background:#0C1216;color:#E8EEF1;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;overflow:hidden">
+
+<!-- LEFT PANE: page tree -->
+<nav aria-label="Page tree" style="width:{{leftW}};transition:width 0.2s;flex-shrink:0;background:#0F171C;border-right:1px solid #25323B;display:flex;flex-direction:column;overflow:hidden">
+
+<sc-if value="{{leftOpen}}" hint-placeholder-val="{{ true }}">
+<div style="display:flex;flex-direction:column;height:100%;min-width:264px">
+<div style="display:flex;align-items:center;justify-content:space-between;padding:14px 12px 10px 18px">
+<span style="font-weight:600;font-size:17px">Co-Pilot</span>
+<button type="button" class="iconbtn" onClick="{{toggleLeft}}" aria-label="Collapse page tree" aria-expanded="true">
+<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg>
+</button>
+</div>
+<div style="flex:1;min-height:0;overflow:auto;padding:0 10px 10px;display:flex;flex-direction:column;gap:0">
+<button type="button" class="nb" onClick="{{goToday}}" style="{{navToday}}">Today</button>
+<button type="button" class="nb" onClick="{{goTasks}}" style="{{navTasks}}">All tasks</button>
+<button type="button" class="nb" onClick="{{goEmails}}" style="{{navEmails}}">Forwarded emails</button>
+<button type="button" class="nb" onClick="{{goGraph}}" style="{{navGraph}}">Notes graph</button>
+<button type="button" class="nb" onClick="{{goPeople}}" style="{{navPeople}}">People</button>
+
+<sc-for list="{{treeRows}}" as="r" hint-placeholder-count="16">
+<sc-if value="{{r.isHeader}}" hint-placeholder-val="{{ false }}">
+<div style="margin:12px 0 4px;padding:12px 8px 0;border-top:1px solid #25323B;font-size:11px;font-weight:600;letter-spacing:0.1em;color:#97A5AE">{{r.label}}</div>
+</sc-if>
+<sc-if value="{{r.isRow}}" hint-placeholder-val="{{ true }}">
+<div class="trow" style="padding-left:{{r.pad}}px">
+<button type="button" class="chev" onClick="{{r.toggle}}" aria-label="{{r.toggleLabel}}" aria-expanded="{{r.exp}}" style="{{r.chevVis}}"><span style="display:inline-flex;{{r.rot}}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></span></button>
+<button type="button" class="nb" onClick="{{r.open}}" style="flex:1;min-width:0;padding-left:4px;{{r.style}}"><span class="dot" style="{{r.dotStyle}}"></span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{r.title}}</span></button>
+<span class="tact">
+<sc-if value="{{r.canAdd}}" hint-placeholder-val="{{ true }}">
+<button type="button" class="tbtn" onClick="{{r.add}}" aria-label="{{r.addLabel}}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
+</sc-if>
+<sc-if value="{{r.canDel}}" hint-placeholder-val="{{ true }}">
+<button type="button" class="tbtn" onClick="{{r.del}}" aria-label="{{r.delLabel}}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg></button>
+</sc-if>
+</span>
+</div>
+</sc-if>
+</sc-for>
+
+</div>
+<div style="padding:12px 18px;border-top:1px solid #25323B;display:flex;flex-direction:column;gap:2px">
+<div style="display:flex;align-items:center;gap:8px;font-size:12px;color:#C5D0D6"><span class="dot" style="background:#56C8A8"></span>Backend online</div>
+<div class="mono" style="font-size:11px;color:#97A5AE">Work PC · Tailscale</div>
+</div>
+</div>
+</sc-if>
+
+<sc-if value="{{leftClosed}}" hint-placeholder-val="{{ false }}">
+<div style="display:flex;flex-direction:column;align-items:center;gap:12px;padding:14px 0">
+<button type="button" class="iconbtn" onClick="{{toggleLeft}}" aria-label="Expand page tree" aria-expanded="false">
+<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
+</button>
+</div>
+</sc-if>
+</nav>
+
+<!-- CENTER: views -->
+<main style="flex:1;min-width:0;overflow:auto">
+
+<sc-if value="{{viewToday}}" hint-placeholder-val="{{ true }}">
+<div style="padding:28px 36px;display:flex;flex-direction:column;gap:20px">
+<header style="display:flex;align-items:flex-end;justify-content:space-between;gap:16px;flex-wrap:wrap">
+<div>
+<div class="mono" style="font-size:12px;color:#97A5AE;letter-spacing:0.06em">WED 30 SEP · WEEK 40</div>
+<h1 style="margin:4px 0 0;font-size:28px;font-weight:600">Today</h1>
+<div style="margin-top:4px;font-size:13px;color:#97A5AE">The plan for the day, built from your tasks, the Gantt and your calendar.</div>
+</div>
+<button class="btn" type="button">Re-plan the day</button>
+</header>
+
+<div style="display:grid;grid-template-columns:minmax(0,1fr) 260px;gap:24px;align-items:start">
+<section class="panel" style="padding:16px 22px">
+<div style="display:flex">
+<div class="mono" style="width:52px;flex-shrink:0;font-size:12px;color:#97A5AE;margin-top:-7px;line-height:1">
+<div style="height:64px">08:00</div><div style="height:64px">09:00</div><div style="height:64px">10:00</div><div style="height:64px">11:00</div><div style="height:64px">12:00</div><div style="height:64px">13:00</div><div style="height:64px">14:00</div><div style="height:64px">15:00</div><div style="height:64px">16:00</div><div style="height:64px">17:00</div>
+</div>
+<div style="flex:1;position:relative;height:640px;border-bottom:1px solid #25323B;background-image:repeating-linear-gradient(to bottom,#25323B 0,#25323B 1px,transparent 1px,transparent 64px)">
+
+<button type="button" onClick="{{goTasks}}" style="position:absolute;left:8px;right:8px;top:34px;height:26px;box-sizing:border-box;padding:0 12px;border-radius:8px;border:1px solid #6B7A84;background:rgba(107,122,132,0.18);color:#E8EEF1;display:flex;align-items:center;justify-content:space-between;cursor:pointer;font-size:13px"><span style="font-weight:600">Triage parked items</span><span class="mono" style="font-size:12px;color:#C5D0D6">08:30</span></button>
+
+<button type="button" onClick="{{openT.t3}}" style="position:absolute;left:8px;right:8px;top:66px;height:90px;box-sizing:border-box;padding:8px 12px;border-radius:8px;border:1px solid #B7A3F2;background:rgba(183,163,242,0.18);color:#E8EEF1;text-align:left;cursor:pointer;display:flex;flex-direction:column;gap:2px;overflow:hidden"><span style="font-size:13px;font-weight:600">Review GA rev C comments</span><span style="font-size:12px;color:#C5D0D6">09:00–10:30 · Project B · blocks Systems installation</span></button>
+
+<button type="button" onClick="{{openT.t2}}" style="position:absolute;left:8px;right:8px;top:162px;height:26px;box-sizing:border-box;padding:0 12px;border-radius:8px;border:1px solid #56C8A8;background:rgba(86,200,168,0.18);color:#E8EEF1;display:flex;align-items:center;justify-content:space-between;cursor:pointer;font-size:13px"><span style="font-weight:600">Reply to notified body query</span><span class="mono" style="font-size:12px;color:#C5D0D6">10:30</span></button>
+
+<button type="button" onClick="{{openT.t5}}" style="position:absolute;left:8px;right:8px;top:194px;height:58px;box-sizing:border-box;padding:8px 12px;border-radius:8px;border:1px solid #97A5AE;background:rgba(151,165,174,0.16);color:#E8EEF1;text-align:left;cursor:pointer;display:flex;flex-direction:column;gap:2px;overflow:hidden"><span style="font-size:13px;font-weight:600">Prep: Friday design review</span><span style="font-size:12px;color:#C5D0D6">11:00–12:00 · brief already drafted</span></button>
+
+<button type="button" onClick="{{openT.t4}}" style="position:absolute;left:8px;right:8px;top:354px;height:122px;box-sizing:border-box;padding:8px 12px;border-radius:8px;border:1px solid #6CB6EA;background:rgba(108,182,234,0.18);color:#E8EEF1;text-align:left;cursor:pointer;display:flex;flex-direction:column;gap:2px;overflow:hidden"><span style="font-size:13px;font-weight:600">Update hull scantling sheet</span><span style="font-size:12px;color:#C5D0D6">13:30–15:30 · Project A · blocks Hatch fitting</span><span class="chip" style="align-self:flex-start;margin-top:6px">Protected on your calendar</span></button>
+
+<button type="button" onClick="{{openT.t6}}" style="position:absolute;left:8px;right:8px;top:482px;height:26px;box-sizing:border-box;padding:0 12px;border-radius:8px;border:1px solid #6B7A84;background:rgba(107,122,132,0.18);color:#E8EEF1;display:flex;align-items:center;justify-content:space-between;cursor:pointer;font-size:13px"><span style="font-weight:600">Call yard about hatch detail</span><span class="mono" style="font-size:12px;color:#C5D0D6">15:30</span></button>
+
+<div style="position:absolute;left:8px;right:8px;top:578px;height:26px;box-sizing:border-box;padding:0 12px;border-radius:8px;border:1px dashed #F2B544;color:#F6C96A;display:flex;align-items:center;justify-content:space-between;font-size:13px"><span style="font-weight:600">Evening check-in</span><span class="mono" style="font-size:12px">17:00</span></div>
+</div>
+</div>
+</section>
+
+<section class="panel">
+<h2 style="margin:0 0 8px;font-size:16px;font-weight:600">Coming up</h2>
+<div style="display:flex;flex-direction:column">
+<button type="button" class="nb" onClick="{{openT.t1a}}" style="height:auto;padding:10px 6px;flex-direction:column;align-items:flex-start;gap:2px;color:#E8EEF1;border-top:1px solid #25323B;border-radius:0"><span class="mono" style="font-size:12px;color:#97A5AE">THU 1 OCT · 09:00</span><span style="font-size:13px">Re-run freeboard calculation</span></button>
+<button type="button" class="nb" onClick="{{openT.t1b}}" style="height:auto;padding:10px 6px;flex-direction:column;align-items:flex-start;gap:2px;color:#E8EEF1;border-top:1px solid #25323B;border-radius:0"><span class="mono" style="font-size:12px;color:#97A5AE">THU 1 OCT · 14:00</span><span style="font-size:13px">Update booklet tables</span></button>
+<button type="button" class="nb" onClick="{{openT.t1c}}" style="height:auto;padding:10px 6px;flex-direction:column;align-items:flex-start;gap:2px;color:#E8EEF1;border-top:1px solid #25323B;border-radius:0"><span class="mono" style="font-size:12px;color:#97A5AE">FRI 2 OCT · 10:00</span><span style="font-size:13px">Send revised figures to class</span></button>
+</div>
+</section>
+</div>
+</div>
+</sc-if>
+
+<sc-if value="{{viewTasks}}" hint-placeholder-val="{{ false }}">
+<div style="padding:28px 36px;display:flex;flex-direction:column;gap:24px">
+<header style="display:flex;align-items:flex-end;justify-content:space-between;gap:16px;flex-wrap:wrap">
+<div>
+<div style="font-size:13px;color:#97A5AE">Tasks</div>
+<h1 style="margin:4px 0 0;font-size:28px;font-weight:600">All tasks</h1>
+<div style="margin-top:4px;font-size:13px;color:#97A5AE;max-width:640px">Every task is a markdown page. Subtasks are children in the tree and link back to their parent automatically.</div>
+</div>
+<button class="btn-primary" type="button" onClick="{{newTask}}">+ New task</button>
+</header>
+
+<div style="display:grid;grid-template-columns:minmax(0,1fr);gap:24px">
+<section class="panel" style="padding:8px 22px">
+<div style="display:grid;grid-template-columns:28px minmax(0,1fr) 110px 110px 190px 120px;gap:12px;padding:12px 0;font-size:12px;font-weight:600;color:#97A5AE;letter-spacing:0.04em"><span>#</span><span>TASK</span><span>PROJECT</span><span>DUE</span><span>BLOCKS (GANTT)</span><span>ASSIGNEE</span></div>
+<sc-for list="{{taskRows}}" as="tr" hint-placeholder-count="9">
+<div style="display:grid;grid-template-columns:28px minmax(0,1fr) 110px 110px 190px 120px;gap:12px;align-items:center;padding:10px 0;border-top:1px solid #25323B;font-size:13px;color:#C5D0D6">
+<span class="mono" style="color:#97A5AE">{{tr.rank}}</span>
+<button type="button" onClick="{{tr.open}}" style="padding-left:{{tr.pad}}px;background:none;border:0;padding-top:0;padding-bottom:0;padding-right:0;text-align:left;cursor:pointer;min-height:28px;{{tr.titleStyle}}">{{tr.title}}</button>
+<span class="chip" style="justify-self:start"><span class="dot" style="{{tr.dot}}"></span>{{tr.project}}</span>
+<span class="mono">{{tr.due}}</span>
+<span>{{tr.blocks}}</span>
+<span style="display:flex;align-items:center;gap:8px"><span style="width:22px;height:22px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;color:#10161A;{{tr.avatar}}">{{tr.initials}}</span>{{tr.assignee}}</span>
+</div>
+</sc-for>
+</section>
+
+<div style="display:flex;flex-direction:column;gap:24px">
+<section class="panel">
+<div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px">
+<h2 style="margin:0;font-size:16px;font-weight:600">Parked</h2>
+<button type="button" onClick="{{goEmails}}" style="background:none;border:0;padding:0;font-size:13px;color:#F2B544;cursor:pointer">All forwarded emails</button>
+</div>
+<ul style="list-style:none;margin:10px 0 0;padding:0">
+<li style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 0;border-top:1px solid #25323B">
+<div style="min-width:0"><div style="font-weight:500">Hatch detail changed</div><div class="mono" style="font-size:12px;color:#97A5AE">Voice note · 2 days ago</div></div>
+<button class="btn" type="button">Assign</button>
+</li>
+<li style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 0;border-top:1px solid #25323B">
+<div style="min-width:0"><div style="font-weight:500">Surveyor asks for drawings</div><div class="mono" style="font-size:12px;color:#97A5AE">Forwarded email · yesterday</div></div>
+<button class="btn" type="button">Assign</button>
+</li>
+<li style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 0;border-top:1px solid #25323B">
+<div style="min-width:0"><div style="font-weight:500">Check rudder bearing supplier</div><div class="mono" style="font-size:12px;color:#97A5AE">Meeting note · Mon</div></div>
+<button class="btn" type="button">Assign</button>
+</li>
+<li style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 0;border-top:1px solid #25323B">
+<div style="min-width:0"><div style="font-weight:500">Owner query on deck layout</div><div class="mono" style="font-size:12px;color:#97A5AE">Forwarded email · Mon</div></div>
+<button class="btn" type="button">Assign</button>
+</li>
+</ul>
+</section>
+
+<section class="panel">
+<div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px">
+<h2 style="margin:0;font-size:16px;font-weight:600">This week</h2>
+<span style="font-size:12px;color:#97A5AE">Timesheet draft</span>
+</div>
+<div style="display:flex;height:14px;border-radius:7px;overflow:hidden;gap:2px;margin:14px 0 12px">
+<div style="flex:26;background:#6CB6EA"></div>
+<div style="flex:20;background:#B7A3F2"></div>
+<div style="flex:8;background:#56C8A8"></div>
+<div style="flex:46;background:#5B6B76"></div>
+</div>
+<div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px 16px;font-size:13px;color:#C5D0D6">
+<div style="display:flex;align-items:center;gap:8px"><span class="dot" style="background:#6CB6EA"></span>Project A <span class="mono" style="margin-left:auto;color:#97A5AE">26%</span></div>
+<div style="display:flex;align-items:center;gap:8px"><span class="dot" style="background:#B7A3F2"></span>Project B <span class="mono" style="margin-left:auto;color:#97A5AE">20%</span></div>
+<div style="display:flex;align-items:center;gap:8px"><span class="dot" style="background:#56C8A8"></span>P5002 <span class="mono" style="margin-left:auto;color:#97A5AE">8%</span></div>
+<div style="display:flex;align-items:center;gap:8px"><span class="dot" style="background:#5B6B76"></span>Ad hoc <span class="mono" style="margin-left:auto;color:#97A5AE">46%</span></div>
+</div>
+</section>
+</div>
+</div>
+
+</div>
+</sc-if>
+
+<sc-if value="{{viewGantt}}" hint-placeholder-val="{{ false }}">
+<div style="padding:28px 36px;display:flex;flex-direction:column;gap:24px">
+<header>
+<div style="font-size:13px;color:#97A5AE">{{ganttCrumb}}</div>
+<h1 style="margin:4px 0 0;font-size:28px;font-weight:600">{{ganttTitle}}</h1>
+<div style="margin-top:4px;font-size:13px;color:#97A5AE;max-width:640px">Shop floor tasks for this project from the loaded Gantt. Your design tasks link to them as dependencies.</div>
+</header>
+
+<section class="panel">
+<div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-bottom:14px">
+<h2 style="margin:0;font-size:16px;font-weight:600">Plan — next 8 weeks</h2>
+<span style="font-size:12px;color:#97A5AE">Shop floor tasks from the loaded Gantt · amber = your design tasks, linked as dependencies</span>
+</div>
+<div style="position:relative">
+<div style="display:flex;height:28px;align-items:center">
+<div style="width:200px;flex-shrink:0"></div>
+<div class="mono" style="flex:1;display:grid;grid-template-columns:repeat(8,minmax(0,1fr));font-size:12px;color:#97A5AE">
+<div style="padding-left:6px">28 Sep</div><div style="padding-left:6px">5 Oct</div><div style="padding-left:6px">12 Oct</div><div style="padding-left:6px">19 Oct</div><div style="padding-left:6px">26 Oct</div><div style="padding-left:6px">2 Nov</div><div style="padding-left:6px">9 Nov</div><div style="padding-left:6px">16 Nov</div>
+</div>
+</div>
+
+<sc-if value="{{ganttA}}" hint-placeholder-val="{{ true }}">
+<div style="display:flex;height:34px;align-items:center;border-top:1px solid #25323B">
+<div style="width:200px;flex-shrink:0;display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600"><span class="dot" style="background:#6CB6EA"></span>Project A</div>
+<div style="flex:1;position:relative;height:100%;background-image:repeating-linear-gradient(to right,transparent 0,transparent calc(12.5% - 1px),#1F2B33 calc(12.5% - 1px),#1F2B33 12.5%)">
+<div style="position:absolute;left:67.9%;top:10px;width:14px;height:14px;margin-left:-7px;transform:rotate(45deg);background:#F2B544"></div>
+<div class="mono" style="position:absolute;left:calc(67.9% + 14px);top:8px;font-size:12px;color:#F2B544">M3 · 5 Nov</div>
+</div>
+</div>
+<div style="display:flex;height:36px;align-items:center">
+<div style="width:200px;flex-shrink:0;font-size:13px;color:#C5D0D6;padding-left:16px">Hull moulding</div>
+<div style="flex:1;position:relative;height:100%;background-image:repeating-linear-gradient(to right,transparent 0,transparent calc(12.5% - 1px),#1F2B33 calc(12.5% - 1px),#1F2B33 12.5%)">
+<div style="position:absolute;left:0;width:35.7%;top:8px;height:20px;border-radius:5px;border:1px solid #6CB6EA;background:rgba(108,182,234,0.2);box-sizing:border-box;overflow:hidden"><div style="width:60%;height:100%;background:#6CB6EA"></div></div>
+</div>
+</div>
+<div style="display:flex;height:36px;align-items:center">
+<div style="width:200px;flex-shrink:0;font-size:13px;color:#C5D0D6;padding-left:16px">Ballast installation</div>
+<div style="flex:1;position:relative;height:100%;background-image:repeating-linear-gradient(to right,transparent 0,transparent calc(12.5% - 1px),#1F2B33 calc(12.5% - 1px),#1F2B33 12.5%)">
+<div style="position:absolute;left:39.3%;width:14.3%;top:8px;height:20px;border-radius:5px;border:1px solid #6CB6EA;background:rgba(108,182,234,0.2);box-sizing:border-box;overflow:hidden"></div>
+</div>
+</div>
+<div style="display:flex;height:32px;align-items:center">
+<div style="width:200px;flex-shrink:0;display:flex;align-items:center;gap:8px;font-size:12px;color:#C5D0D6;padding-left:32px;white-space:nowrap;overflow:hidden"><span class="mono" style="font-size:11px;color:#F2B544;border:1px solid #F2B544;border-radius:4px;padding:0 4px">DESIGN</span>Stability booklet</div>
+<div style="flex:1;position:relative;height:100%;background-image:repeating-linear-gradient(to right,transparent 0,transparent calc(12.5% - 1px),#1F2B33 calc(12.5% - 1px),#1F2B33 12.5%)">
+<div style="position:absolute;left:9%;width:30.3%;top:16px;height:0;border-top:1px dashed #F2B544"></div>
+<div style="position:absolute;left:3.6%;width:5.4%;top:8px;height:16px;border-radius:4px;border:1px solid #F2B544;background:rgba(242,181,68,0.3);box-sizing:border-box"></div>
+<div style="position:absolute;left:39.3%;top:12px;width:8px;height:8px;margin-left:-4px;border-radius:50%;background:#F2B544"></div>
+</div>
+</div>
+<div style="display:flex;height:36px;align-items:center">
+<div style="width:200px;flex-shrink:0;font-size:13px;color:#C5D0D6;padding-left:16px">Hatch fitting</div>
+<div style="flex:1;position:relative;height:100%;background-image:repeating-linear-gradient(to right,transparent 0,transparent calc(12.5% - 1px),#1F2B33 calc(12.5% - 1px),#1F2B33 12.5%)">
+<div style="position:absolute;left:60.7%;width:17.9%;top:8px;height:20px;border-radius:5px;border:1px solid #6CB6EA;background:rgba(108,182,234,0.2);box-sizing:border-box;overflow:hidden"></div>
+</div>
+</div>
+<div style="display:flex;height:32px;align-items:center">
+<div style="width:200px;flex-shrink:0;display:flex;align-items:center;gap:8px;font-size:12px;color:#C5D0D6;padding-left:32px;white-space:nowrap;overflow:hidden"><span class="mono" style="font-size:11px;color:#F2B544;border:1px solid #F2B544;border-radius:4px;padding:0 4px">DESIGN</span>Hatch detail drawing</div>
+<div style="flex:1;position:relative;height:100%;background-image:repeating-linear-gradient(to right,transparent 0,transparent calc(12.5% - 1px),#1F2B33 calc(12.5% - 1px),#1F2B33 12.5%)">
+<div style="position:absolute;left:53.5%;width:7.2%;top:16px;height:0;border-top:1px dashed #F2B544"></div>
+<div style="position:absolute;left:32.1%;width:21.4%;top:8px;height:16px;border-radius:4px;border:1px solid #F2B544;background:rgba(242,181,68,0.3);box-sizing:border-box"></div>
+<div style="position:absolute;left:60.7%;top:12px;width:8px;height:8px;margin-left:-4px;border-radius:50%;background:#F2B544"></div>
+</div>
+</div>
+
+</sc-if>
+<sc-if value="{{ganttB}}" hint-placeholder-val="{{ false }}">
+<div style="display:flex;height:34px;align-items:center;border-top:1px solid #25323B">
+<div style="width:200px;flex-shrink:0;display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600"><span class="dot" style="background:#B7A3F2"></span>Project B</div>
+<div style="flex:1;position:relative;height:100%;background-image:repeating-linear-gradient(to right,transparent 0,transparent calc(12.5% - 1px),#1F2B33 calc(12.5% - 1px),#1F2B33 12.5%)">
+<div style="position:absolute;left:66%;top:10px;width:14px;height:14px;margin-left:-7px;transform:rotate(45deg);background:#F2B544"></div>
+<div class="mono" style="position:absolute;left:calc(66% + 14px);top:8px;font-size:12px;color:#F2B544">M2 · 4 Nov</div>
+</div>
+</div>
+<div style="display:flex;height:36px;align-items:center">
+<div style="width:200px;flex-shrink:0;font-size:13px;color:#C5D0D6;padding-left:16px">Keel fabrication</div>
+<div style="flex:1;position:relative;height:100%;background-image:repeating-linear-gradient(to right,transparent 0,transparent calc(12.5% - 1px),#1F2B33 calc(12.5% - 1px),#1F2B33 12.5%)">
+<div style="position:absolute;left:7.1%;width:35.7%;top:8px;height:20px;border-radius:5px;border:1px solid #B7A3F2;background:rgba(183,163,242,0.2);box-sizing:border-box;overflow:hidden"><div style="width:30%;height:100%;background:#B7A3F2"></div></div>
+</div>
+</div>
+<div style="display:flex;height:36px;align-items:center">
+<div style="width:200px;flex-shrink:0;font-size:13px;color:#C5D0D6;padding-left:16px">Rig stepping</div>
+<div style="flex:1;position:relative;height:100%;background-image:repeating-linear-gradient(to right,transparent 0,transparent calc(12.5% - 1px),#1F2B33 calc(12.5% - 1px),#1F2B33 12.5%)">
+<div style="position:absolute;left:53.6%;width:17.9%;top:8px;height:20px;border-radius:5px;border:1px solid #B7A3F2;background:rgba(183,163,242,0.2);box-sizing:border-box;overflow:hidden"></div>
+</div>
+</div>
+<div style="display:flex;height:32px;align-items:center">
+<div style="width:200px;flex-shrink:0;display:flex;align-items:center;gap:8px;font-size:12px;color:#C5D0D6;padding-left:32px;white-space:nowrap;overflow:hidden"><span class="mono" style="font-size:11px;color:#F2B544;border:1px solid #F2B544;border-radius:4px;padding:0 4px">DESIGN</span>Rig plan drawings</div>
+<div style="flex:1;position:relative;height:100%;background-image:repeating-linear-gradient(to right,transparent 0,transparent calc(12.5% - 1px),#1F2B33 calc(12.5% - 1px),#1F2B33 12.5%)">
+<div style="position:absolute;left:46.5%;width:7.1%;top:16px;height:0;border-top:1px dashed #F2B544"></div>
+<div style="position:absolute;left:17.9%;width:28.6%;top:8px;height:16px;border-radius:4px;border:1px solid #F2B544;background:rgba(242,181,68,0.3);box-sizing:border-box"></div>
+<div style="position:absolute;left:53.6%;top:12px;width:8px;height:8px;margin-left:-4px;border-radius:50%;background:#F2B544"></div>
+</div>
+</div>
+<div style="display:flex;height:36px;align-items:center">
+<div style="width:200px;flex-shrink:0;font-size:13px;color:#C5D0D6;padding-left:16px">Systems installation</div>
+<div style="flex:1;position:relative;height:100%;background-image:repeating-linear-gradient(to right,transparent 0,transparent calc(12.5% - 1px),#1F2B33 calc(12.5% - 1px),#1F2B33 12.5%)">
+<div style="position:absolute;left:64.3%;width:25%;top:8px;height:20px;border-radius:5px;border:1px solid #B7A3F2;background:rgba(183,163,242,0.2);box-sizing:border-box;overflow:hidden"></div>
+</div>
+</div>
+<div style="display:flex;height:32px;align-items:center">
+<div style="width:200px;flex-shrink:0;display:flex;align-items:center;gap:8px;font-size:12px;color:#C5D0D6;padding-left:32px;white-space:nowrap;overflow:hidden"><span class="mono" style="font-size:11px;color:#F2B544;border:1px solid #F2B544;border-radius:4px;padding:0 4px">DESIGN</span>GA rev C review</div>
+<div style="flex:1;position:relative;height:100%;background-image:repeating-linear-gradient(to right,transparent 0,transparent calc(12.5% - 1px),#1F2B33 calc(12.5% - 1px),#1F2B33 12.5%)">
+<div style="position:absolute;left:16.1%;width:48.2%;top:16px;height:0;border-top:1px dashed #F2B544"></div>
+<div style="position:absolute;left:3.6%;width:12.5%;top:8px;height:16px;border-radius:4px;border:1px solid #F2B544;background:rgba(242,181,68,0.3);box-sizing:border-box"></div>
+<div style="position:absolute;left:64.3%;top:12px;width:8px;height:8px;margin-left:-4px;border-radius:50%;background:#F2B544"></div>
+</div>
+</div>
+
+
+</sc-if>
+<sc-if value="{{ganttEmpty}}" hint-placeholder-val="{{ false }}">
+<div style="padding:40px 0;text-align:center;font-size:14px;color:#97A5AE;border-top:1px solid #25323B">No shop floor tasks loaded for this project yet. Send the project's Gantt PDF and the agent will extract the tasks here.</div>
+</sc-if>
+<div style="position:absolute;top:0;bottom:0;left:calc(200px + (100% - 200px) * 0.045);width:0;border-left:1px dashed #F2B544;pointer-events:none">
+<div class="mono" style="position:absolute;top:-2px;left:6px;font-size:11px;color:#F2B544">TODAY</div>
+</div>
+</div>
+</section>
+</div>
+</sc-if>
+
+<sc-if value="{{viewTask}}" hint-placeholder-val="{{ false }}">
+<div style="padding:24px 36px;display:flex;flex-direction:column;gap:16px">
+
+<div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap">
+<div class="mono" style="font-size:12px;color:#97A5AE">{{tPath}}</div>
+<div style="display:flex;align-items:center;gap:10px">
+<button class="{{tClsPreview}}" type="button" onClick="{{tSetPreview}}" aria-pressed="{{tPvPressed}}">Preview</button>
+<button class="{{tClsSource}}" type="button" onClick="{{tSetSource}}" aria-pressed="{{tSrcPressed}}">Markdown</button>
+<button class="btn" type="button" onClick="{{tAddSub}}">+ Subtask</button>
+</div>
+</div>
+
+<sc-if value="{{tPreview}}" hint-placeholder-val="{{ true }}">
+<div style="display:flex;flex-direction:column;gap:16px">
+
+<div class="panel" style="padding:14px 18px;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px 24px;font-size:13px">
+<div><div class="mono" style="font-size:11px;color:#97A5AE">type</div><div>{{tType}}</div></div>
+<div><div class="mono" style="font-size:11px;color:#97A5AE">project</div><div><span class="chip"><span class="dot" style="{{tDot}}"></span>{{tProject}}</span></div></div>
+<div><div class="mono" style="font-size:11px;color:#97A5AE">status</div><div><span class="chip"><span class="dot" style="{{tStatusDot}}"></span>{{tStatus}}</span></div></div>
+<div><div class="mono" style="font-size:11px;color:#97A5AE">due</div><div>{{tDue}}</div></div>
+<div><div class="mono" style="font-size:11px;color:#97A5AE">estimate</div><div>{{tEst}}</div></div>
+<div><div class="mono" style="font-size:11px;color:#97A5AE">scheduled by agent</div><div>{{tSlot}}</div></div>
+<div><div class="mono" style="font-size:11px;color:#97A5AE;margin-bottom:2px">tags</div><span class="chip">#task</span></div>
+<div style="grid-column:span 3"><div class="mono" style="font-size:11px;color:#97A5AE;margin-bottom:6px">assignee</div>
+<div style="display:flex;flex-wrap:wrap;gap:6px">
+<sc-for list="{{tAssignOpts}}" as="o" hint-placeholder-count="4">
+<button type="button" onClick="{{o.pick}}" aria-pressed="{{o.pressed}}" style="display:flex;align-items:center;gap:6px;min-height:26px;padding:0 9px 0 3px;border-radius:999px;border:1px solid #34434D;color:#E8EEF1;font-size:12px;cursor:pointer;{{o.style}}">
+<span style="width:18px;height:18px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:600;color:#10161A;{{o.avatar}}">{{o.initials}}</span>{{o.name}}
+</button>
+</sc-for>
+</div></div>
+</div>
+
+<article class="panel" style="padding:28px 36px;display:flex;flex-direction:column;gap:16px;max-width:860px">
+<h1 style="margin:0;font-size:28px;font-weight:600">{{tTitle}}</h1>
+<sc-if value="{{tHasParent}}" hint-placeholder-val="{{ false }}">
+<div style="display:flex;align-items:center;gap:8px;font-size:13px;color:#97A5AE">Subtask of <button type="button" onClick="{{tGoParent}}" style="background:none;border:0;padding:0;font-size:13px;color:#F2B544;cursor:pointer;text-decoration:underline">{{tParentTitle}}</button></div>
+</sc-if>
+
+<h2 style="margin:8px 0 0;font-size:18px;font-weight:600">Why it matters</h2>
+<div style="font-size:14px;color:#C5D0D6">{{tWhy}}</div>
+
+<h2 style="margin:8px 0 0;font-size:18px;font-weight:600">Subtasks</h2>
+<div class="mono" style="font-size:12px;color:#97A5AE">Auto-listed from the child pages of this task in the tree. The agent schedules each one.</div>
+<sc-if value="{{tHasSubs}}" hint-placeholder-val="{{ true }}">
+<div style="border:1px solid #2F3E48;border-radius:10px;overflow:hidden;font-size:13px">
+<sc-for list="{{tSubs}}" as="k" hint-placeholder-count="3">
+<div style="display:grid;grid-template-columns:14px minmax(0,1fr) 56px 90px 110px;gap:12px;align-items:center;padding:8px 14px;border-top:1px solid #25323B;color:#C5D0D6">
+<span class="dot" style="{{k.dot}}"></span>
+<button type="button" onClick="{{k.open}}" style="background:none;border:0;padding:0;min-height:28px;text-align:left;font-size:13px;color:#E8EEF1;cursor:pointer">{{k.title}}</button>
+<span class="mono">{{k.est}}</span><span class="mono">{{k.due}}</span><span class="mono" style="color:#F6C96A">{{k.slot}}</span>
+</div>
+</sc-for>
+</div>
+</sc-if>
+<sc-if value="{{tNoSubs}}" hint-placeholder-val="{{ false }}">
+<div style="font-size:14px;color:#8797A1">No subtasks yet. Use the + next to this page in the tree.</div>
+</sc-if>
+
+<h2 style="margin:8px 0 0;font-size:18px;font-weight:600">Linked Gantt tasks</h2>
+<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 16px;border-radius:10px;background:#0F171C;border:1px solid #2F3E48;font-size:13px;color:#C5D0D6">
+<span><span class="mono" style="font-size:11px;color:#F2B544;border:1px solid #F2B544;border-radius:4px;padding:0 4px;margin-right:8px">BLOCKS</span>{{tBlocksText}}</span>
+<button type="button" class="btn" onClick="{{goGantt}}">Show in plan</button>
+</div>
+
+<h2 style="margin:8px 0 0;font-size:18px;font-weight:600">Definition of done</h2>
+<label style="display:flex;align-items:center;gap:10px;min-height:30px;font-size:14px;color:#C5D0D6"><input type="checkbox" style="width:18px;height:18px;accent-color:#F2B544">Checked and sent on</label>
+
+<h2 style="margin:8px 0 0;font-size:18px;font-weight:600">Notes</h2>
+<div style="font-size:14px;color:#8797A1">Drop in images, tables or widgets. Everything here is plain markdown.</div>
+</article>
+</div>
+</sc-if>
+
+<sc-if value="{{tSource}}" hint-placeholder-val="{{ false }}">
+<textarea class="ta code" aria-label="Task markdown source" value="{{tMd}}" onChange="{{onTaskMd}}" style="min-height:640px;resize:vertical"></textarea>
+</sc-if>
+
+</div>
+</sc-if>
+
+<sc-if value="{{viewNote}}" hint-placeholder-val="{{ false }}">
+<div style="padding:24px 36px;display:flex;flex-direction:column;gap:16px">
+<div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap">
+<div class="mono" style="font-size:12px;color:#97A5AE">{{nPath}}</div>
+<div style="display:flex;align-items:center;gap:10px">
+<button class="{{nClsPreview}}" type="button" onClick="{{nSetPreview}}" aria-pressed="{{nPvPressed}}">Preview</button>
+<button class="{{nClsSource}}" type="button" onClick="{{nSetSource}}" aria-pressed="{{nSrcPressed}}">Markdown</button>
+</div>
+</div>
+
+<sc-if value="{{nPreview}}" hint-placeholder-val="{{ true }}">
+<div style="display:flex;flex-direction:column;gap:16px">
+<div class="panel" style="padding:12px 18px;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 24px;font-size:13px">
+<sc-for list="{{nProps}}" as="p" hint-placeholder-count="5">
+<div><div class="mono" style="font-size:11px;color:#97A5AE">{{p.k}}</div><div>{{p.v}}</div></div>
+</sc-for>
+</div>
+
+<article class="panel" style="padding:28px 36px;display:flex;flex-direction:column;gap:12px;max-width:860px">
+<sc-for list="{{nBlocks}}" as="b" hint-placeholder-count="8">
+<div>
+<sc-if value="{{b.isH1}}" hint-placeholder-val="{{ false }}"><h1 style="margin:0;font-size:28px;font-weight:600">{{b.text}}</h1></sc-if>
+<sc-if value="{{b.isH2}}" hint-placeholder-val="{{ false }}"><h2 style="margin:10px 0 0;font-size:18px;font-weight:600">{{b.text}}</h2></sc-if>
+<sc-if value="{{b.isH3}}" hint-placeholder-val="{{ false }}"><h3 style="margin:6px 0 0;font-size:15px;font-weight:600">{{b.text}}</h3></sc-if>
+<sc-if value="{{b.isP}}" hint-placeholder-val="{{ false }}"><div style="font-size:14px;color:#C5D0D6">{{b.text}}</div></sc-if>
+<sc-if value="{{b.isQuote}}" hint-placeholder-val="{{ false }}"><div style="padding:12px 16px;border-radius:10px;background:rgba(242,181,68,0.10);border:1px solid rgba(242,181,68,0.35);font-size:14px;color:#E8EEF1">{{b.text}}</div></sc-if>
+<sc-if value="{{b.isLi}}" hint-placeholder-val="{{ false }}"><div style="display:flex;gap:10px;font-size:14px;color:#C5D0D6"><span style="color:#97A5AE">•</span><span>{{b.text}}</span></div></sc-if>
+<sc-if value="{{b.isCheck}}" hint-placeholder-val="{{ false }}"><label style="display:flex;align-items:center;gap:10px;min-height:28px;font-size:14px;color:#C5D0D6"><input type="checkbox" style="width:18px;height:18px;accent-color:#F2B544">{{b.text}}</label></sc-if>
+<sc-if value="{{b.isCode}}" hint-placeholder-val="{{ false }}"><pre class="code" style="margin:0;padding:14px;border-radius:10px;border:1px solid #25323B;background:#0F171C;color:#C5D0D6;overflow:auto">{{b.text}}</pre></sc-if>
+<sc-if value="{{b.isTr}}" hint-placeholder-val="{{ false }}">
+<div style="display:grid;gap:12px;padding:8px 14px;border:1px solid #25323B;margin-bottom:-1px;font-size:13px;color:#C5D0D6;{{b.trStyle}}">
+<sc-for list="{{b.cells}}" as="c" hint-placeholder-count="3"><div>{{c.t}}</div></sc-for>
+</div>
+</sc-if>
+<sc-if value="{{b.isWidget}}" hint-placeholder-val="{{ false }}"><div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border:1px dashed #3A4A55;border-radius:10px;background:#0F171C"><span class="mono" style="font-size:12px;color:#97A5AE">{{b.text}}</span><span class="chip"><span class="dot" style="background:#56C8A8"></span>Live widget</span></div></sc-if>
+<sc-if value="{{b.isImg}}" hint-placeholder-val="{{ false }}">
+<figure style="margin:0;display:flex;flex-direction:column;gap:6px">
+<div style="height:160px;border:1px dashed #4A5A65;border-radius:10px;background:#0F171C;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;color:#97A5AE">
+<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="M21 16l-5-5-8 8"/></svg>
+<span class="mono" style="font-size:12px">{{b.src}}</span>
+</div>
+<figcaption style="font-size:13px;color:#97A5AE">{{b.text}}</figcaption>
+</figure>
+</sc-if>
+</div>
+</sc-for>
+</article>
+</div>
+</sc-if>
+
+<sc-if value="{{nSource}}" hint-placeholder-val="{{ false }}">
+<textarea class="ta code" aria-label="Note markdown source" value="{{nMd}}" onChange="{{onNoteMd}}" style="min-height:520px;resize:vertical"></textarea>
+</sc-if>
+</div>
+</sc-if>
+
+<sc-if value="{{viewMeeting}}" hint-placeholder-val="{{ false }}">
+<div style="padding:24px 36px;display:flex;flex-direction:column;gap:16px">
+
+<div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap">
+<div class="mono" style="font-size:12px;color:#97A5AE">Meetings / Design review / 2026-10-02.md</div>
+<div style="display:flex;align-items:center;gap:10px">
+<button class="{{clsPreview}}" type="button" onClick="{{setPreview}}" aria-pressed="{{pvPressed}}">Preview</button>
+<button class="{{clsSource}}" type="button" onClick="{{setSource}}" aria-pressed="{{srcPressed}}">Markdown</button>
+<button class="btn" type="button">Regenerate brief</button>
+<button class="btn-primary" type="button">Publish to knowledge base</button>
+</div>
+</div>
+
+<sc-if value="{{modePreview}}" hint-placeholder-val="{{ true }}">
+<div style="display:flex;flex-direction:column;gap:16px">
+
+<div class="panel" style="padding:14px 18px;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 24px;font-size:13px">
+<div><div class="mono" style="font-size:11px;color:#97A5AE">type</div><div>meeting</div></div>
+<div><div class="mono" style="font-size:11px;color:#97A5AE">series</div><div>Design review</div></div>
+<div><div class="mono" style="font-size:11px;color:#97A5AE">date</div><div>2026-10-02</div></div>
+<div><div class="mono" style="font-size:11px;color:#97A5AE">project</div><div>Project A, P5002</div></div>
+<div><div class="mono" style="font-size:11px;color:#97A5AE">tags</div><div style="display:flex;gap:6px;flex-wrap:wrap"><span class="chip">#meeting</span><span class="chip">#hatch</span><span class="chip">#stability</span></div></div>
+<div><div class="mono" style="font-size:11px;color:#97A5AE">status</div><div><span class="chip"><span class="dot" style="background:#F2B544"></span>Draft · not in the knowledge base</span></div></div>
+</div>
+
+<sc-if value="{{ctxOpen}}" hint-placeholder-val="{{ false }}">
+<button type="button" onClick="{{closeCtx}}" aria-label="Close menu" style="position:fixed;left:0;top:0;width:100vw;height:100vh;z-index:9;border:0;padding:0;background:transparent;cursor:default"></button>
+<div style="position:fixed;left:{{ctxX}}px;{{ctxPos}};z-index:10;display:flex;flex-direction:{{ctxDir}};align-items:flex-start;gap:8px">
+<div role="toolbar" aria-label="Text formatting" style="display:flex;align-items:center;gap:2px;padding:6px 8px;border-radius:10px;background:#1A252D;border:1px solid #3A4A55;box-shadow:0 10px 28px rgba(0,0,0,0.5)">
+<button type="button" class="fbtn" aria-label="Bold" onClick="{{closeCtx}}"><b>B</b></button>
+<button type="button" class="fbtn" aria-label="Italic" onClick="{{closeCtx}}"><i>I</i></button>
+<button type="button" class="fbtn" aria-label="Underline" onClick="{{closeCtx}}"><u>U</u></button>
+<button type="button" class="fbtn" aria-label="Strikethrough" onClick="{{closeCtx}}"><s>S</s></button>
+<span class="fsep"></span>
+<button type="button" class="fbtn" aria-label="Text style" style="width:auto;padding:0 6px;gap:4px"><span style="font-size:13px">Aa</span><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
+<span class="fsep"></span>
+<button type="button" class="fbtn" aria-label="Text colour" style="width:auto;padding:0 6px;gap:4px"><span style="border-bottom:3px solid #F2B544;line-height:1;font-weight:600">A</span><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
+<span class="fsep"></span>
+<button type="button" class="fbtn" aria-label="Add comment" onClick="{{closeCtx}}"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5h16v11H9l-5 4z"/><path d="M12 8v5M9.5 10.5h5"/></svg></button>
+</div>
+<div role="menu" aria-label="Text actions" style="width:250px;padding:6px;border-radius:12px;background:#1A252D;border:1px solid #3A4A55;box-shadow:0 12px 32px rgba(0,0,0,0.55)">
+<button type="button" class="mi" onClick="{{closeCtx}}"><span>Undo</span><span class="mono mk">Ctrl+Z</span></button>
+<button type="button" class="mi" disabled><span>Redo</span><span class="mono mk">Ctrl+Y</span></button>
+<div class="msep"></div>
+<button type="button" class="mi" onClick="{{closeCtx}}"><span>Cut</span><span class="mono mk">Ctrl+X</span></button>
+<button type="button" class="mi" onClick="{{closeCtx}}"><span>Copy</span><span class="mono mk">Ctrl+C</span></button>
+<button type="button" class="mi" onClick="{{closeCtx}}"><span>Paste</span><span class="mono mk">Ctrl+V</span></button>
+<div class="msep"></div>
+<button type="button" class="mi" onClick="{{closeCtx}}"><span>Increase indent</span><span class="mono mk">Tab</span></button>
+<button type="button" class="mi" onClick="{{closeCtx}}"><span>Decrease indent</span><span class="mono mk">Shift+Tab</span></button>
+<div class="msep"></div>
+<button type="button" class="mi" onClick="{{closeCtx}}"><span>Turn into task</span></button>
+<button type="button" class="mi" onClick="{{closeCtx}}"><span>Create live widget</span></button>
+<div class="msep"></div>
+<button type="button" class="mi" onClick="{{closeCtx}}"><span>Link</span><span class="mono mk">Ctrl+K</span></button>
+</div>
+</div>
+</sc-if>
+<article class="panel" onContextMenu="{{openCtx}}" style="padding:28px 36px;display:flex;flex-direction:column;gap:18px;max-width:860px">
+<h1 style="margin:0;font-size:28px;font-weight:600">Design review — 2 Oct</h1>
+
+<h2 style="margin:8px 0 0;font-size:18px;font-weight:600">Attendance</h2>
+<div style="display:flex;flex-wrap:wrap;gap:8px">
+<sc-for list="{{attendance}}" as="a" hint-placeholder-count="4">
+<button type="button" onClick="{{a.toggle}}" aria-pressed="{{a.pressed}}" style="display:flex;align-items:center;gap:8px;min-height:40px;padding:0 14px 0 6px;border-radius:999px;border:1px solid #34434D;color:#E8EEF1;font-size:13px;cursor:pointer;{{a.style}}">
+<span style="width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600;color:#10161A;{{a.avatar}}">{{a.initials}}</span>
+<span>{{a.name}}</span><span style="font-size:12px;color:#97A5AE">{{a.label}}</span>
+</button>
+</sc-for>
+</div>
+
+<h2 style="margin:8px 0 0;font-size:18px;font-weight:600">Brief</h2>
+<div style="padding:12px 16px;border-radius:10px;background:rgba(242,181,68,0.10);border:1px solid rgba(242,181,68,0.35);font-size:14px;color:#E8EEF1"><b>Co-pilot brief.</b> Drafted from the 25 Sep notes, the current plan and 2 forwarded emails.</div>
+
+<h2 style="margin:8px 0 0;font-size:18px;font-weight:600">Carried over from 25 Sep</h2>
+<div style="display:flex;flex-direction:column;gap:6px;font-size:14px;color:#C5D0D6">
+<label style="display:flex;align-items:center;gap:10px;min-height:30px"><input type="checkbox" style="width:18px;height:18px;accent-color:#F2B544">Confirm hatch detail with yard</label>
+<label style="display:flex;align-items:center;gap:10px;min-height:30px"><input type="checkbox" style="width:18px;height:18px;accent-color:#F2B544">Send revised freeboard figures</label>
+<label style="display:flex;align-items:center;gap:10px;min-height:30px"><input type="checkbox" style="width:18px;height:18px;accent-color:#F2B544">Reply to notified body query</label>
+</div>
+
+<h2 style="margin:8px 0 0;font-size:18px;font-weight:600">Plan check</h2>
+<div style="position:relative;margin-top:30px">
+<sc-if value="{{fmtOpen}}" hint-placeholder-val="{{ true }}">
+<div role="toolbar" aria-label="Text formatting" style="position:absolute;left:24px;top:-54px;z-index:5;display:flex;align-items:center;gap:2px;padding:6px 8px;border-radius:10px;background:#1A252D;border:1px solid #3A4A55;box-shadow:0 10px 28px rgba(0,0,0,0.5)">
+<button type="button" class="fbtn" aria-label="Bold"><b>B</b></button>
+<button type="button" class="fbtn" aria-label="Italic"><i>I</i></button>
+<button type="button" class="fbtn" aria-label="Underline"><u>U</u></button>
+<button type="button" class="fbtn" aria-label="Strikethrough"><s>S</s></button>
+<span class="fsep"></span>
+<button type="button" class="fbtn" aria-label="Text style" style="width:auto;padding:0 6px;gap:4px"><span style="font-size:13px">Aa</span><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
+<span class="fsep"></span>
+<button type="button" class="fbtn" aria-label="Text colour" style="width:auto;padding:0 6px;gap:4px"><span style="border-bottom:3px solid #F2B544;line-height:1;font-weight:600">A</span><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
+<span class="fsep"></span>
+<button type="button" class="fbtn" aria-label="Add comment"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5h16v11H9l-5 4z"/><path d="M12 8v5M9.5 10.5h5"/></svg></button>
+<span class="fsep"></span>
+<button type="button" class="fbtn" aria-label="More actions" onClick="{{openCtx}}"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg></button>
+</div>
+</sc-if>
+<button type="button" onClick="{{toggleFmt}}" aria-pressed="{{fmtPressed}}" aria-label="Select this paragraph to format it" style="display:block;width:100%;text-align:left;padding:2px 4px;margin:0;border:0;border-radius:3px;font-size:14px;color:#C5D0D6;cursor:text;{{fmtSel}}">M3 (Project A) is on 5 Nov. The stability booklet is due Fri and blocks Ballast installation, which starts 20 Oct.</button>
+</div>
+<div style="border:1px solid #2F3E48;border-radius:10px;overflow:hidden;background:#0F171C">
+<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 14px;border-bottom:1px solid #25323B;background:#131B21">
+<span class="mono" style="font-size:12px;color:#97A5AE">::gantt · Project A · 8 weeks</span>
+<span class="chip"><span class="dot" style="background:#56C8A8"></span>Live</span>
+</div>
+<div style="padding:10px 14px">
+<div style="display:flex;height:24px;align-items:center">
+<div style="width:150px;flex-shrink:0"></div>
+<div class="mono" style="flex:1;display:grid;grid-template-columns:repeat(8,minmax(0,1fr));font-size:11px;color:#97A5AE">
+<div>28 Sep</div><div>5 Oct</div><div>12 Oct</div><div>19 Oct</div><div>26 Oct</div><div>2 Nov</div><div>9 Nov</div><div>16 Nov</div>
+</div>
+</div>
+<div style="display:flex;height:32px;align-items:center">
+<div style="width:150px;flex-shrink:0;font-size:13px;color:#C5D0D6">Ballast installation</div>
+<div style="flex:1;position:relative;height:100%;background-image:repeating-linear-gradient(to right,transparent 0,transparent calc(12.5% - 1px),#1F2B33 calc(12.5% - 1px),#1F2B33 12.5%)">
+<div style="position:absolute;left:39.3%;width:14.3%;top:6px;height:20px;border-radius:5px;border:1px solid #6CB6EA;background:rgba(108,182,234,0.2);box-sizing:border-box;overflow:hidden"></div>
+</div>
+</div>
+<div style="display:flex;height:32px;align-items:center">
+<div style="width:150px;flex-shrink:0;font-size:13px;color:#C5D0D6">Hatch fitting</div>
+<div style="flex:1;position:relative;height:100%;background-image:repeating-linear-gradient(to right,transparent 0,transparent calc(12.5% - 1px),#1F2B33 calc(12.5% - 1px),#1F2B33 12.5%)">
+<div style="position:absolute;left:60.7%;width:17.9%;top:6px;height:20px;border-radius:5px;border:1px solid #6CB6EA;background:rgba(108,182,234,0.2);box-sizing:border-box"></div>
+</div>
+</div>
+<div style="display:flex;height:32px;align-items:center">
+<div style="width:150px;flex-shrink:0;font-size:13px;font-weight:600;color:#F2B544">Milestone M3</div>
+<div style="flex:1;position:relative;height:100%;background-image:repeating-linear-gradient(to right,transparent 0,transparent calc(12.5% - 1px),#1F2B33 calc(12.5% - 1px),#1F2B33 12.5%)">
+<div style="position:absolute;left:67.9%;top:9px;width:14px;height:14px;margin-left:-7px;transform:rotate(45deg);background:#F2B544"></div>
+<div class="mono" style="position:absolute;left:calc(67.9% + 14px);top:7px;font-size:12px;color:#F2B544">5 Nov</div>
+</div>
+</div>
+</div>
+</div>
+
+<h2 style="margin:8px 0 0;font-size:18px;font-weight:600">Related emails</h2>
+<div style="border:1px solid #2F3E48;border-radius:10px;overflow:hidden;font-size:13px">
+<div style="display:grid;grid-template-columns:minmax(0,2.2fr) 70px minmax(0,1.4fr) 110px;gap:12px;padding:10px 14px;background:#131B21;font-weight:600;color:#C5D0D6"><div>Email</div><div>Fwd</div><div>Note</div><div>Project</div></div>
+<div style="display:grid;grid-template-columns:minmax(0,2.2fr) 70px minmax(0,1.4fr) 110px;gap:12px;padding:10px 14px;border-top:1px solid #25323B;color:#C5D0D6"><div>Notified body: query on technical file</div><div class="mono">28 Sep</div><div>urgent, reply by Thu</div><div>P5002</div></div>
+<div style="display:grid;grid-template-columns:minmax(0,2.2fr) 70px minmax(0,1.4fr) 110px;gap:12px;padding:10px 14px;border-top:1px solid #25323B;color:#C5D0D6"><div>Yard: hatch detail sign-off request</div><div class="mono">25 Sep</div><div>before the review</div><div>Project A</div></div>
+</div>
+
+<h2 style="margin:8px 0 0;font-size:18px;font-weight:600">Agenda</h2>
+<h3 style="margin:0;font-size:15px;font-weight:600">1. Open items from 25 Sep</h3>
+<div style="font-size:14px;color:#8797A1">Notes:</div>
+<h3 style="margin:0;font-size:15px;font-weight:600">2. Stability booklet status</h3>
+<div style="font-size:14px;color:#C5D0D6">Freeboard check needs re-running after GA rev C. Owner: Jose. Target: Friday.</div>
+<h3 style="margin:0;font-size:15px;font-weight:600">3. Hatch detail — yard</h3>
+<figure style="margin:0;display:flex;flex-direction:column;gap:8px">
+<div role="img" aria-label="Image placeholder: hatch detail, Boat 18" style="height:180px;border:1px dashed #4A5A65;border-radius:10px;background:#0F171C;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;color:#97A5AE">
+<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="M21 16l-5-5-8 8"/></svg>
+<span class="mono" style="font-size:12px">images/hatch-detail-boat18.png</span>
+</div>
+<figcaption style="font-size:13px;color:#97A5AE">Hatch detail, Boat 18. Paste or drop an image anywhere in a note.</figcaption>
+</figure>
+
+<h2 style="margin:8px 0 0;font-size:18px;font-weight:600">Decisions</h2>
+<div style="font-size:14px;color:#8797A1">None yet.</div>
+
+<h2 style="margin:8px 0 0;font-size:18px;font-weight:600">Actions</h2>
+<label style="display:flex;align-items:center;gap:10px;min-height:30px;font-size:14px;color:#C5D0D6"><input type="checkbox" style="width:18px;height:18px;accent-color:#F2B544">@Jose — re-run freeboard check — Fri</label>
+
+<div style="position:relative;margin-top:8px">
+<button type="button" onClick="{{toggleSlash}}" aria-expanded="{{slashExpanded}}" style="display:flex;align-items:center;gap:8px;width:100%;min-height:36px;padding:0 4px;border:0;background:transparent;color:#8797A1;font-size:14px;text-align:left;cursor:text"><span class="mono" style="border:1px solid #34434D;border-radius:4px;padding:0 6px;color:#C5D0D6">/</span>Type / to insert a block or widget</button>
+<sc-if value="{{slashOpen}}" hint-placeholder-val="{{ false }}">
+<div role="menu" aria-label="Insert" style="position:absolute;left:0;top:40px;z-index:5;width:340px;padding:12px;border-radius:12px;background:#1A252D;border:1px solid #3A4A55;box-shadow:0 10px 28px rgba(0,0,0,0.5);display:flex;flex-direction:column;gap:10px">
+<div style="font-size:11px;font-weight:600;letter-spacing:0.08em;color:#97A5AE">BLOCKS</div>
+<div style="display:flex;flex-wrap:wrap;gap:6px">
+<button class="tb" type="button">Heading</button><button class="tb" type="button">List</button><button class="tb" type="button">Checklist</button><button class="tb" type="button">Table</button><button class="tb" type="button">Image</button><button class="tb" type="button">Code</button><button class="tb" type="button">Callout</button><button class="tb" type="button">Link</button>
+</div>
+<div style="font-size:11px;font-weight:600;letter-spacing:0.08em;color:#97A5AE">WIDGETS</div>
+<div style="display:flex;flex-wrap:wrap;gap:6px">
+<button class="tbw" type="button">::gantt</button><button class="tbw" type="button">::tasks</button><button class="tbw" type="button">::time-split</button><button class="tbw" type="button">::email</button><button class="tbw" type="button">::graph</button>
+</div>
+</div>
+</sc-if>
+</div>
+</article>
+
+<div style="display:flex;align-items:center;justify-content:space-between;gap:16px;padding:16px 22px;border:1px dashed #34434D;border-radius:12px;max-width:860px">
+<div style="font-size:13px;color:#C5D0D6">Publishing adds this note to the knowledge base. Drafts stay private until you publish.</div>
+<button class="btn-primary" type="button">Publish to knowledge base</button>
+</div>
+</div>
+</sc-if>
+
+<sc-if value="{{modeSource}}" hint-placeholder-val="{{ false }}">
+<textarea class="ta code" aria-label="Markdown source" value="{{md}}" onChange="{{onMd}}" style="min-height:640px;resize:vertical"></textarea>
+</sc-if>
+
+</div>
+</sc-if>
+
+<sc-if value="{{viewEmails}}" hint-placeholder-val="{{ false }}">
+<div style="padding:28px 36px;display:flex;flex-direction:column;gap:20px">
+<header style="display:flex;align-items:flex-end;justify-content:space-between;gap:24px">
+<div>
+<div style="font-size:13px;color:#97A5AE">Wiki / Forwarded emails</div>
+<h1 style="margin:4px 0 0;font-size:28px;font-weight:600">Forwarded emails</h1>
+<div style="margin-top:4px;font-size:13px;color:#97A5AE">Everything you forward to the co-pilot is archived here with your priority note.</div>
+</div>
+<label style="display:block;width:300px">
+<span style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)">Search emails</span>
+<input type="text" placeholder="Search emails…" style="width:100%;box-sizing:border-box;height:44px;padding:0 14px;border-radius:10px;border:1px solid #2F3E48;background:#131B21;color:#E8EEF1;font-size:14px">
+</label>
+</header>
+
+<div style="display:flex;flex-wrap:wrap;gap:8px">
+<button class="seg-on" type="button">All</button>
+<button class="seg" type="button">Project A</button>
+<button class="seg" type="button">Project B</button>
+<button class="seg" type="button">P5002</button>
+<button class="seg" type="button">Unsorted</button>
+</div>
+
+<section class="panel" style="padding:8px 22px">
+<ul style="list-style:none;margin:0;padding:0">
+<li style="display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:center;padding:14px 0">
+<div style="min-width:0"><div style="font-weight:500;font-size:15px">Notified body: query on technical file</div><div class="mono" style="font-size:12px;color:#97A5AE;margin-top:2px">Notified body · Fwd 28 Sep · “urgent, reply by Thu”</div></div>
+<span class="chip"><span class="dot" style="background:#56C8A8"></span>P5002</span>
+</li>
+<li style="display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:center;padding:14px 0;border-top:1px solid #25323B">
+<div style="min-width:0"><div style="font-weight:500;font-size:15px">Surveyor asks for updated drawings</div><div class="mono" style="font-size:12px;color:#97A5AE;margin-top:2px">Surveyor · Fwd 29 Sep · “needs GA rev C”</div></div>
+<span class="chip"><span class="dot" style="background:#B7A3F2"></span>Project B</span>
+</li>
+<li style="display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:center;padding:14px 0;border-top:1px solid #25323B">
+<div style="min-width:0"><div style="font-weight:500;font-size:15px">Owner query on deck layout</div><div class="mono" style="font-size:12px;color:#97A5AE;margin-top:2px">Owner · Fwd 28 Sep · “low priority”</div></div>
+<span class="chip"><span class="dot" style="background:#B7A3F2"></span>Project B</span>
+</li>
+<li style="display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:center;padding:14px 0;border-top:1px solid #25323B">
+<div style="min-width:0"><div style="font-weight:500;font-size:15px">Yard: hatch detail sign-off request</div><div class="mono" style="font-size:12px;color:#97A5AE;margin-top:2px">Yard · Fwd 25 Sep · “before the review”</div></div>
+<span class="chip"><span class="dot" style="background:#6CB6EA"></span>Project A</span>
+</li>
+<li style="display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:center;padding:14px 0;border-top:1px solid #25323B">
+<div style="min-width:0"><div style="font-weight:500;font-size:15px">Supplier quote: rudder bearings</div><div class="mono" style="font-size:12px;color:#97A5AE;margin-top:2px">Supplier · Fwd 24 Sep · “compare with previous boat”</div></div>
+<span class="chip"><span class="dot" style="background:#6CB6EA"></span>Project A</span>
+</li>
+<li style="display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:center;padding:14px 0;border-top:1px solid #25323B">
+<div style="min-width:0"><div style="font-weight:500;font-size:15px">Request for stability documentation</div><div class="mono" style="font-size:12px;color:#97A5AE;margin-top:2px">Class · Fwd 22 Sep · “for M3”</div></div>
+<span class="chip"><span class="dot" style="background:#6CB6EA"></span>Project A</span>
+</li>
+<li style="display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:center;padding:14px 0;border-top:1px solid #25323B">
+<div style="min-width:0"><div style="font-weight:500;font-size:15px">Acknowledgement of submission plan</div><div class="mono" style="font-size:12px;color:#97A5AE;margin-top:2px">Notified body · Fwd 18 Sep</div></div>
+<span class="chip"><span class="dot" style="background:#56C8A8"></span>P5002</span>
+</li>
+<li style="display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:center;padding:14px 0;border-top:1px solid #25323B">
+<div style="min-width:0"><div style="font-weight:500;font-size:15px">Sail plan drawing, no context</div><div class="mono" style="font-size:12px;color:#97A5AE;margin-top:2px">Unknown sender · Fwd 17 Sep · no note</div></div>
+<span class="chip"><span class="dot" style="background:#6B7A84"></span>Unsorted</span>
+</li>
+</ul>
+</section>
+</div>
+</sc-if>
+
+<sc-if value="{{viewGraph}}" hint-placeholder-val="{{ false }}">
+<div style="padding:28px 36px;display:flex;flex-direction:column;gap:18px">
+<header>
+<div style="font-size:13px;color:#97A5AE">Wiki / Notes graph</div>
+<h1 style="margin:4px 0 0;font-size:28px;font-weight:600">Notes graph</h1>
+<div style="margin-top:4px;font-size:13px;color:#97A5AE">Pick a tag to see every note attached to it. Click a note to preview it.</div>
+</header>
+
+<div style="display:flex;flex-wrap:wrap;align-items:center;gap:10px">
+<label style="display:flex;align-items:center;gap:8px;font-size:12px;font-weight:600;color:#97A5AE;letter-spacing:0.04em">TAG
+<input type="text" value="#hatch" style="width:150px;box-sizing:border-box;height:40px;padding:0 12px;border-radius:10px;border:1px solid #F2B544;background:#131B21;color:#E8EEF1;font-size:14px;letter-spacing:0"></label>
+<span style="width:1px;height:24px;background:#25323B"></span>
+<span style="font-size:12px;font-weight:600;color:#97A5AE;letter-spacing:0.04em">BOAT</span>
+<button class="seg-on" type="button" aria-pressed="true">Boat 18</button>
+<button class="seg-on" type="button" aria-pressed="true">Boat 22</button>
+<button class="seg-on" type="button" aria-pressed="true">Boat 27</button>
+<button class="seg-on" type="button" aria-pressed="true">Project A</button>
+<button class="seg" type="button" aria-pressed="false">Project B</button>
+</div>
+<div style="display:flex;flex-wrap:wrap;align-items:center;gap:18px;font-size:13px;color:#C5D0D6">
+<span style="font-size:12px;font-weight:600;color:#97A5AE;letter-spacing:0.04em">TYPE</span>
+<span style="display:flex;align-items:center;gap:8px"><span style="width:12px;height:12px;border-radius:50%;background:#6CB6EA"></span>Design note</span>
+<span style="display:flex;align-items:center;gap:8px"><span style="width:12px;height:12px;border-radius:3px;background:#B7A3F2"></span>Meeting</span>
+<span style="display:flex;align-items:center;gap:8px"><span style="width:12px;height:12px;border-radius:50%;border:2px solid #C5D0D6;box-sizing:border-box"></span>Forwarded email</span>
+<span style="display:flex;align-items:center;gap:8px"><span style="width:12px;height:12px;border-radius:50%;background:#56C8A8"></span>Reference</span>
+<span style="margin-left:auto;color:#97A5AE">8 notes · 3 related tags</span>
+</div>
+
+<div style="position:relative;width:800px;height:530px;margin:0 auto;border:1px solid #25323B;border-radius:12px;background:#0F171C;overflow:hidden;flex-shrink:0">
+<svg width="800" height="530" viewBox="0 0 800 530" style="position:absolute;left:0;top:0;width:800px;height:530px" aria-hidden="true">
+<g stroke="#F2B544" stroke-opacity="0.35" stroke-width="1.5" fill="none">
+<line x1="400" y1="250" x2="400" y2="60"/>
+<line x1="400" y1="250" x2="190" y2="90"/>
+<line x1="400" y1="250" x2="610" y2="130"/>
+<line x1="400" y1="250" x2="680" y2="290"/>
+<line x1="400" y1="250" x2="580" y2="420"/>
+<line x1="400" y1="250" x2="340" y2="440"/>
+<line x1="400" y1="250" x2="130" y2="380"/>
+<line x1="400" y1="250" x2="90" y2="240"/>
+</g>
+<g stroke="#3A4A55" stroke-width="1.5" stroke-dasharray="5 5" fill="none">
+<line x1="400" y1="60" x2="560" y2="40"/>
+<line x1="610" y1="130" x2="560" y2="40"/>
+<line x1="680" y1="290" x2="720" y2="390"/>
+<line x1="580" y1="420" x2="720" y2="390"/>
+<line x1="340" y1="440" x2="200" y2="470"/>
+<line x1="130" y1="380" x2="200" y2="470"/>
+</g>
+</svg>
+
+<div style="position:absolute;left:383px;top:43px;width:34px;height:34px;box-sizing:border-box;border-radius:50%;border:2px solid #F2B544"></div>
+
+<div style="position:absolute;left:345px;top:228px;width:110px;height:44px;box-sizing:border-box;border-radius:999px;background:#F2B544;color:#10161A;display:flex;align-items:center;justify-content:center;font-weight:600;font-size:15px"><span>#hatch</span></div>
+
+<div style="position:absolute;left:325px;top:51px;width:150px;height:60px;display:flex;flex-direction:column;align-items:center;gap:6px;text-align:center;font-size:13px;line-height:16px;color:#E8EEF1;font-weight:600"><span style="width:18px;height:18px;border-radius:50%;background:#6CB6EA;flex-shrink:0"></span><span>Hatch detail — Boat 18</span></div>
+<div style="position:absolute;left:115px;top:81px;width:150px;height:60px;display:flex;flex-direction:column;align-items:center;gap:6px;text-align:center;font-size:13px;line-height:16px;color:#C5D0D6"><span style="width:18px;height:18px;border-radius:50%;background:#6CB6EA;flex-shrink:0"></span><span>Hatch detail — Project A</span></div>
+<div style="position:absolute;left:535px;top:121px;width:150px;height:60px;display:flex;flex-direction:column;align-items:center;gap:6px;text-align:center;font-size:13px;line-height:16px;color:#C5D0D6"><span style="width:18px;height:18px;border-radius:50%;background:#6CB6EA;flex-shrink:0"></span><span>Deck hatch sizing — Boat 22</span></div>
+<div style="position:absolute;left:605px;top:281px;width:150px;height:60px;display:flex;flex-direction:column;align-items:center;gap:6px;text-align:center;font-size:13px;line-height:16px;color:#C5D0D6"><span style="width:18px;height:18px;border-radius:50%;background:#6CB6EA;flex-shrink:0"></span><span>Watertightness test notes</span></div>
+<div style="position:absolute;left:505px;top:411px;width:150px;height:60px;display:flex;flex-direction:column;align-items:center;gap:6px;text-align:center;font-size:13px;line-height:16px;color:#C5D0D6"><span style="width:18px;height:18px;border-radius:50%;background:#56C8A8;flex-shrink:0"></span><span>ISO 12216 (reference)</span></div>
+<div style="position:absolute;left:265px;top:431px;width:150px;height:60px;display:flex;flex-direction:column;align-items:center;gap:6px;text-align:center;font-size:13px;line-height:16px;color:#C5D0D6"><span style="width:18px;height:18px;border-radius:50%;border:3px solid #C5D0D6;box-sizing:border-box;background:#0F171C;flex-shrink:0"></span><span>Yard email: hatch sign-off</span></div>
+<div style="position:absolute;left:55px;top:371px;width:150px;height:60px;display:flex;flex-direction:column;align-items:center;gap:6px;text-align:center;font-size:13px;line-height:16px;color:#C5D0D6"><span style="width:18px;height:18px;border-radius:5px;background:#B7A3F2;flex-shrink:0"></span><span>Design review · 25 Sep</span></div>
+<div style="position:absolute;left:15px;top:231px;width:150px;height:60px;display:flex;flex-direction:column;align-items:center;gap:6px;text-align:center;font-size:13px;line-height:16px;color:#C5D0D6"><span style="width:18px;height:18px;border-radius:50%;background:#6CB6EA;flex-shrink:0"></span><span>Hatch hinge options — Boat 27</span></div>
+
+<div style="position:absolute;left:485px;top:31px;width:150px;height:40px;display:flex;flex-direction:column;align-items:center;gap:4px;text-align:center;font-size:12px;line-height:16px;color:#97A5AE"><span style="width:12px;height:12px;border-radius:50%;border:2px solid #97A5AE;box-sizing:border-box;flex-shrink:0"></span><span>#deck</span></div>
+<div style="position:absolute;left:645px;top:381px;width:150px;height:40px;display:flex;flex-direction:column;align-items:center;gap:4px;text-align:center;font-size:12px;line-height:16px;color:#97A5AE"><span style="width:12px;height:12px;border-radius:50%;border:2px solid #97A5AE;box-sizing:border-box;flex-shrink:0"></span><span>#watertight</span></div>
+<div style="position:absolute;left:125px;top:461px;width:150px;height:40px;display:flex;flex-direction:column;align-items:center;gap:4px;text-align:center;font-size:12px;line-height:16px;color:#97A5AE"><span style="width:12px;height:12px;border-radius:50%;border:2px solid #97A5AE;box-sizing:border-box;flex-shrink:0"></span><span>#yard</span></div>
+</div>
+
+<section class="panel" style="display:grid;grid-template-columns:minmax(0,1fr) auto;gap:20px;align-items:center">
+<div>
+<div class="mono" style="font-size:12px;color:#97A5AE;letter-spacing:0.06em">SELECTED NOTE</div>
+<div style="font-size:18px;font-weight:600;margin:4px 0 8px">Hatch detail — Boat 18</div>
+<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px">
+<span class="chip">Design note</span><span class="chip">Boat 18</span><span class="chip">#hatch</span><span class="chip">#deck</span>
+</div>
+<div style="font-size:14px;color:#C5D0D6">Summary of the hatch arrangement used on Boat 18: frame, gasket, drainage and fixings. Drawings are attached to the page. Linked: Deck hatch sizing — Boat 22, Hatch detail — Project A, Design review · 25 Sep.</div>
+</div>
+<div style="display:flex;flex-direction:column;gap:10px">
+<button class="btn-primary" type="button" style="min-height:44px">Reuse in Project A</button>
+<button class="btn" type="button" style="min-height:44px">Open page</button>
+</div>
+</section>
+</div>
+</sc-if>
+
+<sc-if value="{{viewNew}}" hint-placeholder-val="{{ false }}">
+<div style="padding:28px 36px;display:flex;flex-direction:column;gap:20px">
+<header>
+<div style="font-size:13px;color:#97A5AE">Wiki / New page</div>
+<h1 style="margin:4px 0 0;font-size:28px;font-weight:600">Start from a template</h1>
+<div style="margin-top:4px;font-size:13px;color:#97A5AE;max-width:640px">Every note is a markdown file. Templates add the properties and headings; images, tables, checklists and widgets can be dropped in anywhere.</div>
+<div style="margin-top:10px"><span class="chip">{{tplTarget}}</span></div>
+</header>
+
+<div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.3fr);gap:24px;align-items:start">
+<ul style="list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:10px">
+<sc-for list="{{tplCards}}" as="card" hint-placeholder-count="6">
+<li>
+<button type="button" onClick="{{card.pick}}" aria-pressed="{{card.pressed}}" style="width:100%;text-align:left;padding:14px 16px;border-radius:12px;border:1px solid #25323B;color:#E8EEF1;cursor:pointer;{{card.cardStyle}}">
+<span style="display:block;font-weight:600;font-size:15px">{{card.name}}</span>
+<span style="display:block;font-size:13px;color:#97A5AE;margin-top:2px">{{card.desc}}</span>
+</button>
+</li>
+</sc-for>
+</ul>
+
+<section class="panel" style="display:flex;flex-direction:column;gap:14px">
+<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px">
+<div>
+<h2 style="margin:0;font-size:18px;font-weight:600">{{tplName}}</h2>
+<div class="mono" style="margin-top:4px;font-size:12px;color:#97A5AE">{{tplPath}}</div>
+</div>
+<button class="btn-primary" type="button" onClick="{{createNote}}">Create note</button>
+</div>
+<div style="font-size:13px;color:#C5D0D6">{{tplHint}}</div>
+<pre class="code" style="margin:0;padding:16px;border-radius:10px;border:1px solid #25323B;background:#0F171C;color:#C5D0D6;overflow:auto">{{tplMd}}</pre>
+</section>
+</div>
+</div>
+</sc-if>
+
+<sc-if value="{{viewPeople}}" hint-placeholder-val="{{ false }}">
+<div style="padding:28px 36px;display:flex;flex-direction:column;gap:20px">
+<header>
+<div style="font-size:13px;color:#97A5AE">Wiki / People</div>
+<h1 style="margin:4px 0 0;font-size:28px;font-weight:600">People</h1>
+<div style="margin-top:4px;font-size:13px;color:#97A5AE;max-width:640px">Characters you assign tasks to and track in meetings. They are just labels for you, with no accounts and no email.</div>
+</header>
+
+<div style="display:grid;grid-template-columns:minmax(0,1.4fr) minmax(0,1fr);gap:24px;align-items:start">
+<section class="panel" style="padding:6px 22px">
+<ul style="list-style:none;margin:0;padding:0">
+<sc-for list="{{peopleView}}" as="pv" hint-placeholder-count="4">
+<li style="display:grid;grid-template-columns:40px minmax(0,1fr);gap:14px;align-items:center;padding:14px 0;border-top:1px solid #25323B">
+<span style="width:40px;height:40px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:600;color:#10161A;{{pv.avatar}}">{{pv.initials}}</span>
+<div style="min-width:0"><div style="font-weight:500;font-size:15px">{{pv.name}}</div><div style="font-size:13px;color:#97A5AE">{{pv.role}}</div><div class="mono" style="font-size:12px;color:#97A5AE;margin-top:2px">{{pv.stats}}</div></div>
+</li>
+</sc-for>
+</ul>
+</section>
+
+<section class="panel" style="display:flex;flex-direction:column;gap:14px">
+<h2 style="margin:0;font-size:16px;font-weight:600">New character</h2>
+<label style="display:flex;flex-direction:column;gap:6px;font-size:12px;font-weight:600;color:#97A5AE;letter-spacing:0.04em">NAME
+<input type="text" value="{{newName}}" onChange="{{onName}}" placeholder="e.g. Rigger" style="height:44px;box-sizing:border-box;padding:0 12px;border-radius:10px;border:1px solid #2F3E48;background:#0F171C;color:#E8EEF1;font-size:14px;letter-spacing:0"></label>
+<label style="display:flex;flex-direction:column;gap:6px;font-size:12px;font-weight:600;color:#97A5AE;letter-spacing:0.04em">ROLE OR GROUP
+<input type="text" value="{{newRole}}" onChange="{{onRole}}" placeholder="e.g. Shop floor" style="height:44px;box-sizing:border-box;padding:0 12px;border-radius:10px;border:1px solid #2F3E48;background:#0F171C;color:#E8EEF1;font-size:14px;letter-spacing:0"></label>
+<button class="btn-primary" type="button" onClick="{{addPerson}}" style="min-height:44px">Add character</button>
+<div style="font-size:13px;color:#97A5AE">New characters appear in the assign menus on tasks and in every meeting's attendance list.</div>
+</section>
+</div>
+</div>
+</sc-if>
+
+</main>
+
+<!-- RIGHT PANE: chat -->
+<aside aria-label="Ask the knowledge base" style="width:{{rightW}};transition:width 0.2s;flex-shrink:0;background:#0F171C;border-left:1px solid #25323B;display:flex;flex-direction:column;overflow:hidden">
+
+<sc-if value="{{rightOpen}}" hint-placeholder-val="{{ true }}">
+<div style="display:flex;flex-direction:column;height:100%;min-width:320px">
+<div style="display:flex;align-items:center;justify-content:space-between;padding:14px 12px 10px 20px">
+<h2 style="margin:0;font-size:16px;font-weight:600">Ask the knowledge base</h2>
+<button type="button" class="iconbtn" onClick="{{toggleRight}}" aria-label="Collapse chat" aria-expanded="true">
+<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
+</button>
+</div>
+<div style="padding:0 20px 10px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+<button type="button" class="btn" onClick="{{toggleModel}}" aria-expanded="{{modelExpanded}}" aria-label="Choose AI model and access" style="min-height:34px;display:flex;align-items:center;gap:8px"><span class="dot" style="background:#56C8A8"></span>{{modelName}}<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
+<span class="chip">{{accessLabel}}</span>
+</div>
+<sc-if value="{{modelOpen}}" hint-placeholder-val="{{ false }}">
+<div style="margin:0 20px 10px;padding:14px;border-radius:12px;background:#131B21;border:1px solid #25323B;display:flex;flex-direction:column;gap:12px">
+<div style="font-size:11px;font-weight:600;letter-spacing:0.08em;color:#97A5AE">MODEL</div>
+<div style="display:flex;flex-direction:column;gap:6px">
+<sc-for list="{{models}}" as="m" hint-placeholder-count="4">
+<button type="button" onClick="{{m.pick}}" aria-pressed="{{m.pressed}}" style="text-align:left;padding:8px 12px;border-radius:10px;border:1px solid #34434D;color:#E8EEF1;cursor:pointer;min-height:44px;{{m.style}}">
+<span style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600"><span class="dot" style="{{m.dot}}"></span>{{m.name}}</span>
+<span style="display:block;font-size:12px;color:#97A5AE;margin-top:2px">{{m.detail}}</span>
+</button>
+</sc-for>
+</div>
+<div style="font-size:11px;font-weight:600;letter-spacing:0.08em;color:#97A5AE">ACCESS TO NOTES</div>
+<div style="display:flex;flex-wrap:wrap;gap:6px">
+<sc-for list="{{accessOpts}}" as="a" hint-placeholder-count="3">
+<button type="button" class="{{a.cls}}" onClick="{{a.pick}}" aria-pressed="{{a.pressed}}">{{a.name}}</button>
+</sc-for>
+</div>
+<div style="font-size:12px;color:#97A5AE">The co-pilot reads every note under Notes and Library, and edits only Notes. Every edit is kept in the note's history so it can be undone.</div>
+</div>
+</sc-if>
+<div style="flex:1;min-height:0;overflow:auto;padding:4px 20px 12px;display:flex;flex-direction:column;gap:14px">
+<div style="display:flex;flex-wrap:wrap;gap:6px"><span class="chip">Context: {{viewLabel}}</span><span class="chip">Notes: read and write</span></div>
+<div style="align-self:flex-end;max-width:85%;background:#1A252D;border-radius:12px;padding:10px 14px;font-size:14px">Which open items from the last review are still unresolved?</div>
+<div style="background:#131B21;border:1px solid #25323B;border-radius:12px;padding:12px 14px;font-size:14px;color:#C5D0D6">
+<div>Three items were open after 25 Sep: hatch detail sign-off, revised freeboard figures and the notified body reply. A forwarded email from 28 Sep suggests the reply is now urgent.</div>
+<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:10px">
+<span class="chip">Design review · 25 Sep</span>
+<span class="chip">Email · 28 Sep</span>
+</div>
+</div>
+<div style="border:1px solid #2F3E48;border-radius:12px;background:#0F171C;padding:12px 14px;display:flex;flex-direction:column;gap:8px;font-size:13px;color:#C5D0D6">
+<div style="display:flex;align-items:center;justify-content:space-between;gap:8px"><span class="mono" style="font-size:11px;color:#97A5AE">NOTE EDIT</span><span class="chip"><span class="dot" style="{{actionDot}}"></span>{{actionStatus}}</span></div>
+<div>Add subtask <b>Confirm hatch detail with yard</b> to <b>Stability booklet — freeboard check</b></div>
+<div class="mono" style="font-size:12px;color:#97A5AE">Project A / Tasks / Stability booklet.md</div>
+<sc-if value="{{showApprove}}" hint-placeholder-val="{{ true }}">
+<div style="display:flex;gap:8px"><button type="button" class="btn-primary" onClick="{{approveAction}}">Approve</button><button type="button" class="btn" onClick="{{rejectAction}}">Reject</button></div>
+</sc-if>
+<sc-if value="{{showUndo}}" hint-placeholder-val="{{ false }}">
+<div style="display:flex;gap:8px"><button type="button" class="btn" onClick="{{undoAction}}">Undo</button></div>
+</sc-if>
+</div>
+</div>
+<div style="padding:12px 20px 18px;border-top:1px solid #25323B;display:flex;gap:8px">
+<label style="flex:1"><span style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)">Ask a question</span><input type="text" placeholder="Ask about this page or the wiki…" style="width:100%;box-sizing:border-box;height:44px;padding:0 12px;border-radius:10px;border:1px solid #2F3E48;background:#131B21;color:#E8EEF1;font-size:14px"></label>
+<button class="btn-primary" type="button" style="min-height:44px">Send</button>
+</div>
+</div>
+</sc-if>
+
+<sc-if value="{{rightClosed}}" hint-placeholder-val="{{ false }}">
+<div style="display:flex;flex-direction:column;align-items:center;gap:12px;padding:14px 0">
+<button type="button" class="iconbtn" onClick="{{toggleRight}}" aria-label="Expand chat" aria-expanded="false">
+<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg>
+</button>
+</div>
+</sc-if>
+</aside>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":1000}}'>
+class Component extends DCLogic {
+constructor(props) {
+super(props);
+this.state = {
+view: 'today',
+leftOpen: true,
+rightOpen: true,
+mode: 'preview',
+tpl: 'meeting',
+md: this.meetingMd(),
+people: [
+{ id: 'me', name: 'Me', role: 'Design', color: '#F2B544', attended: 4 },
+{ id: 'yard', name: 'Yard foreman', role: 'Yard', color: '#6CB6EA', attended: 3 },
+{ id: 'class', name: 'Class surveyor', role: 'Class', color: '#B7A3F2', attended: 1 },
+{ id: 'loft', name: 'Loft lead', role: 'Shop floor', color: '#56C8A8', attended: 2 }
+],
+att: { me: true, yard: true, class: false, loft: true },
+sel: 't1',
+tmode: 'preview',
+edits: this.seedEdits(),
+nmode: 'preview',
+fmtOpen: true,
+slashOpen: false,
+ctx: null,
+nodes: this.seedNodes(),
+newName: '',
+newRole: '',
+target: null,
+model: 'gemini',
+modelOpen: false,
+access: 'ask',
+actionState: 'pending',
+open: { pA: true, niA: true, tasksA: true, t1: true, meetings: true, review: true }
+};
+}
+seedNodes() {
+const f = (id, parent, title) => ({ id, parent, title, type: 'folder' });
+const n = (id, parent, title) => ({ id, parent, title, type: 'note' });
+const P = (id, title, color, fixed) => ({ id, parent: null, title, type: 'project', color, fixed: !!fixed });
+const t = (id, parent, title, project, due, blocks, blockNote, est, slot, why) => ({ id, parent, title, type: 'task', project, due, blocks, blockNote, assignee: 'me', status: 'todo', est, slot, why });
+return [
+P('pA', 'Project A', '#6CB6EA'),
+{ id: 'gA', parent: 'pA', title: 'Plan (Gantt)', type: 'gantt' },
+{ ...f('niA', 'pA', 'Notes-in'), fixed: true },
+f('tasksA', 'pA', 'Tasks'),
+f('designA', 'pA', 'Design'),
+P('pB', 'Project B', '#B7A3F2'),
+{ id: 'gB', parent: 'pB', title: 'Plan (Gantt)', type: 'gantt' },
+{ ...f('niB', 'pB', 'Notes-in'), fixed: true },
+f('tasksB', 'pB', 'Tasks'),
+P('pR', 'P5002', '#56C8A8'),
+{ ...f('niR', 'pR', 'Notes-in'), fixed: true },
+f('tasksR', 'pR', 'Tasks'),
+P('inbox', 'Inbox', '#6B7A84', true),
+{ ...t('t1', 'tasksA', 'Stability booklet — freeboard check', 'Project A', 'Fri 2 Oct', 'Ballast installation', 'starts 20 Oct', '4h', 'Thu 1 Oct – Fri 2 Oct', 'Ballast installation cannot start until the booklet is signed off, and M3 is 5 Nov.'), status: 'in progress' },
+t('t1a', 't1', 'Re-run freeboard calculation', 'Project A', 'Thu 1 Oct', '', '', '2h', 'Thu 09:00', 'Needed after GA rev C.'),
+t('t1b', 't1', 'Update booklet tables', 'Project A', 'Thu 1 Oct', '', '', '1.5h', 'Thu 14:00', ''),
+t('t1c', 't1', 'Send revised figures to class', 'Project A', 'Fri 2 Oct', '', '', '0.5h', 'Fri 10:00', ''),
+t('t2', 'tasksR', 'Reply to notified body query', 'P5002', 'Thu 1 Oct', '', '', '1h', 'Wed 10:30', 'Forwarded email from 28 Sep, marked urgent.'),
+t('t3', 'tasksB', 'Review GA rev C comments', 'Project B', 'Fri 2 Oct', 'Systems installation', 'starts 3 Nov', '3h', 'Wed 09:00', 'Systems installation needs the approved GA.'),
+t('t4', 'tasksA', 'Update hull scantling sheet', 'Project A', 'Mon 5 Oct', 'Hatch fitting', 'starts 1 Nov', '2h', 'Wed 13:30', 'On the critical path this week.'),
+t('t5', 'tasksA', 'Prep: Friday design review', 'Project A', 'Thu 1 Oct', '', '', '1h', 'Wed 11:00', 'The brief is already drafted.'),
+t('t6', 'inbox', 'Call yard about hatch detail', 'Ad hoc', '', '', '', '0.5h', 'Wed 15:30', 'Parked for 2 days, not on the plan.'),
+n('q1', 'niA', 'Voice note — hatch detail changed'),
+n('q2', 'niA', 'Surveyor call — asks for drawings'),
+n('hull', 'designA', 'Hull structure'),
+n('stab', 'designA', 'Stability'),
+n('std', 'pR', 'Standards & references'),
+n('nb', 'pR', 'Notified body'),
+f('meetings', 'pA', 'Meetings'),
+f('review', 'meetings', 'Design review'),
+{ id: 'm2', parent: 'review', title: '2 Oct (draft)', type: 'meeting' },
+n('m1', 'review', '25 Sep'),
+n('yard', 'meetings', 'Yard coordination'),
+{ id: 'ema', parent: 'pA', title: 'Forwarded emails', type: 'emails', fixed: true },
+{ id: 'emb', parent: 'pB', title: 'Forwarded emails', type: 'emails', fixed: true },
+{ id: 'emr', parent: 'pR', title: 'Forwarded emails', type: 'emails', fixed: true },
+{ ...f('templates', null, 'Templates'), lib: true },
+{ id: 'tp0', parent: 'templates', title: 'Project', type: 'tpl', key: 'project', fixed: true },
+{ id: 'tpg', parent: 'templates', title: 'Project Gantt', type: 'tpl', key: 'gantt', fixed: true },
+{ id: 'tp1', parent: 'templates', title: 'Meeting', type: 'tpl', key: 'meeting', fixed: true },
+{ id: 'tp2', parent: 'templates', title: 'Design artifact', type: 'tpl', key: 'design', fixed: true },
+{ id: 'tp3', parent: 'templates', title: 'Quick note', type: 'tpl', key: 'quick', fixed: true },
+{ id: 'tp4', parent: 'templates', title: 'New task', type: 'tpl', key: 'task', fixed: true },
+{ id: 'tp5', parent: 'templates', title: 'Design decision', type: 'tpl', key: 'decision', fixed: true },
+{ id: 'tp6', parent: 'templates', title: 'Email note', type: 'tpl', key: 'email', fixed: true },
+{ ...f('refs', null, 'Reference library'), lib: true },
+n('rcdiso', 'refs', 'RCD & ISO documents'),
+n('boatdata', 'refs', 'Boat data')
+];
+}
+openNode(id) {
+const n = this.state.nodes.find((x) => x.id === id);
+if (!n) return;
+if (n.type === 'folder') this.toggleNode(id);
+else if (n.type === 'task') this.setState({ view: 'task', sel: id, tmode: 'preview' });
+else if (n.type === 'project') this.setState({ view: 'note', sel: id, open: { ...this.state.open, [id]: true } });
+else if (n.type === 'gantt') this.setState({ view: 'gantt', sel: id });
+else if (n.type === 'meeting') this.setState({ view: 'meeting', sel: id });
+else if (n.type === 'emails') this.setState({ view: 'emails', sel: id });
+else if (n.type === 'tpl') this.setState({ view: 'new', tpl: n.key, sel: id });
+else this.setState({ view: 'note', sel: id });
+}
+toggleNode(id) {
+this.setState({ open: { ...this.state.open, [id]: !this.state.open[id] } });
+}
+seedEdits() {
+return {
+hull: ['---', 'type: design-note', 'boat: Project A', 'system: Hull', 'tags: [hull, scantlings]', 'status: draft', '---', '', '# Hull structure', '', '## Construction', 'Cold-moulded wood-epoxy hull, double diagonal skins over longitudinals. Scantlings follow ISO 12215-5 for Category A.', '', '## Key dimensions', '| Item | Value | Note |', '|---|---|---|', '| Skin thickness | 18 mm | two diagonal layers |', '| Frame spacing | 450 mm | |', '| Keel floors | 6 | see keel detail |', '', '## Open issues', '- [ ] Update hull scantling sheet', '- [ ] Confirm hatch coaming load case', '', '## Drawings', '![Midship section](images/midship-section.png)'].join('\n'),
+stab: ['---', 'type: design-note', 'boat: Project A', 'system: Stability', 'tags: [stability, freeboard]', 'status: in progress', '---', '', '# Stability', '', 'Booklet in progress. The freeboard check must be re-run after GA rev C.', '', '> Blocks Ballast installation, which starts 20 Oct.', '', '## To do', '- [ ] Re-run freeboard calculation', '- [ ] Update booklet tables', '', '::tasks project="Project A" tag="stability"'].join('\n'),
+q1: ['---', 'type: quick-note', 'source: voice', 'project: Project A', 'tags: [hatch]', '---', '', '# Voice note — hatch detail changed', '', 'Yard says the hatch coaming height changed by 20 mm. Check it against the drawing before the review.'].join('\n'),
+q2: ['---', 'type: quick-note', 'source: call', 'project: Project A', 'tags: [class, drawings]', '---', '', '# Surveyor call — asks for drawings', '', 'Surveyor wants GA rev C and the midship section for M3.', '- [ ] Send GA rev C', '- [ ] Send midship section'].join('\n')
+};
+}
+renderMd(md) {
+const base = { isH1: false, isH2: false, isH3: false, isP: false, isQuote: false, isLi: false, isCheck: false, isCode: false, isTr: false, isWidget: false, isImg: false, text: '', cells: [], trStyle: '', src: '' };
+const props = [];
+let body = md.split('\n');
+if (body[0] === '---') {
+const end = body.indexOf('---', 1);
+if (end > 0) {
+body.slice(1, end).forEach((l) => { const i = l.indexOf(':'); if (i > 0) props.push({ k: l.slice(0, i).trim(), v: l.slice(i + 1).trim() || '—' }); });
+body = body.slice(end + 1);
+}
+}
+const strip = (t) => t.replace(/\*\*(.+?)\*\*/g, '$1').replace(/`(.+?)`/g, '$1').replace(/\[\[(.+?)\]\]/g, '$1');
+const blocks = [];
+let code = null;
+body.forEach((raw) => {
+const l = raw.trimEnd();
+if (l.startsWith('```')) { if (code === null) code = []; else { blocks.push({ ...base, isCode: true, text: code.join('\n') }); code = null; } return; }
+if (code !== null) { code.push(raw); return; }
+if (!l.trim() || l.startsWith('<!--')) return;
+let m;
+if ((m = l.match(/^### (.*)/))) blocks.push({ ...base, isH3: true, text: strip(m[1]) });
+else if ((m = l.match(/^## (.*)/))) blocks.push({ ...base, isH2: true, text: strip(m[1]) });
+else if ((m = l.match(/^# (.*)/))) blocks.push({ ...base, isH1: true, text: strip(m[1]) });
+else if (l.startsWith('::')) blocks.push({ ...base, isWidget: true, text: l });
+else if ((m = l.match(/^!\[(.*?)\]\((.*?)\)/))) blocks.push({ ...base, isImg: true, text: m[1], src: m[2] });
+else if (l.startsWith('>')) blocks.push({ ...base, isQuote: true, text: strip(l.replace(/^>\s?/, '')) });
+else if ((m = l.match(/^\s*- \[( |x)\]\s?(.*)/))) blocks.push({ ...base, isCheck: true, text: strip(m[2]) });
+else if ((m = l.match(/^\s*[-*] (.*)/))) blocks.push({ ...base, isLi: true, text: strip(m[1]) });
+else if (l.startsWith('|')) {
+const cells = l.split('|').slice(1, -1).map((c) => c.trim());
+if (cells.every((c) => /^:?-+:?$/.test(c))) return;
+const head = !(blocks.length && blocks[blocks.length - 1].isTr);
+blocks.push({ ...base, isTr: true, cells: cells.map((c) => ({ t: strip(c) || ' ' })), trStyle: 'grid-template-columns:repeat(' + cells.length + ',minmax(0,1fr));' + (head ? 'background:#131B21;font-weight:600;border-radius:10px 10px 0 0;' : '') });
+} else blocks.push({ ...base, isP: true, text: strip(l) });
+});
+return { props, blocks };
+}
+agentSubtask() {
+return { id: 'agent1', parent: 't1', title: 'Confirm hatch detail with yard', type: 'task', project: 'Project A', due: 'Thu 1 Oct', blocks: '', blockNote: '', assignee: 'me', status: 'todo', est: '0.5h', slot: 'Not scheduled', why: 'Added by the co-pilot from the 25 Sep meeting notes.' };
+}
+applyAction(extra) {
+const has = this.state.nodes.some((n) => n.id === 'agent1');
+this.setState({ ...extra, actionState: 'applied', nodes: has ? this.state.nodes : [...this.state.nodes, this.agentSubtask()], open: { ...this.state.open, t1: true } });
+}
+undoAction() {
+this.setState({ actionState: 'undone', nodes: this.state.nodes.filter((n) => n.id !== 'agent1') });
+}
+setAccess(a) {
+if (a === 'auto' && this.state.actionState === 'pending') this.applyAction({ access: a });
+else this.setState({ access: a });
+}
+projectOf(id) {
+let n = this.state.nodes.find((x) => x.id === id);
+while (n && n.type !== 'project') n = this.state.nodes.find((x) => x.id === n.parent);
+return n || null;
+}
+addChild(pid) {
+const p = this.state.nodes.find((x) => x.id === pid);
+if (!p) return;
+if (p.type === 'task') this.newTask(pid);
+else this.setState({ view: 'new', target: pid, open: { ...this.state.open, [pid]: true } });
+}
+newTask(parent) {
+const pid = parent || 'inbox';
+const p = this.state.nodes.find((x) => x.id === pid);
+const isSub = p && p.type === 'task';
+const proj = this.projectOf(pid);
+const pname = isSub ? p.project : (proj && proj.title !== 'Inbox' ? proj.title : 'Ad hoc');
+const id = 't' + Date.now();
+const node = { id, parent: pid, title: isSub ? 'New subtask' : 'New task', type: 'task', project: pname, due: '', blocks: '', blockNote: '', assignee: 'me', status: 'todo', est: '1h', slot: 'Not scheduled', why: '' };
+this.setState({ nodes: [...this.state.nodes, node], open: { ...this.state.open, [pid]: true }, view: 'task', sel: id, tmode: 'preview' });
+}
+delNode(id) {
+const gone = {};
+const mark = (x) => { gone[x] = true; this.state.nodes.filter((n) => n.parent === x).forEach((n) => mark(n.id)); };
+mark(id);
+this.setState({ nodes: this.state.nodes.filter((n) => !gone[n.id]), view: gone[this.state.sel] && ['task', 'note', 'meeting', 'gantt'].indexOf(this.state.view) >= 0 ? 'today' : this.state.view });
+}
+taskMdFor(t, par, kids, who) {
+const lines = ['---', 'type: task', 'project: ' + t.project, 'status: ' + t.status, 'due: ' + t.due, 'est: ' + t.est, 'assignee: ' + who, 'scheduled: ' + t.slot, 'blocks: ' + (t.blocks ? t.blocks + ' (' + t.blockNote + ')' : ''), 'parent: ' + (par ? '[[' + par.title + ']]' : ''), 'tags: [task]', '---', '', '# ' + t.title, ''];
+if (par) lines.push('Subtask of [[' + par.title + ']]', '');
+lines.push('## Why it matters', t.why || '', '', '## Subtasks', '<!-- auto: child pages of this task -->');
+kids.forEach((k) => lines.push('- [ ] [[' + k.title + ']] — est: ' + k.est + ' — due: ' + (k.due || 'tbc')));
+lines.push('', '## Linked Gantt tasks', t.blocks ? '- blocks: ' + t.blocks + ' (finish-to-start, ' + t.blockNote + ')' : '- none yet', '', '## Definition of done', '- [ ] ', '', '## Notes', '');
+return lines.join('\n');
+}
+meetingMd() {
+return [
+'---',
+'type: meeting',
+'series: Design review',
+'date: 2026-10-02',
+'project: [Project A, P5002]',
+'attendees: [Me, Yard foreman, Loft lead]',
+'tags: [meeting, hatch, stability]',
+'status: draft',
+'---',
+'',
+'# Design review — 2 Oct',
+'',
+'## Attendance',
+'Present: Me, Yard foreman, Loft lead',
+'Absent: Class surveyor',
+'',
+'## Brief',
+'> Drafted by the co-pilot from the 25 Sep notes, the current plan and 2 forwarded emails.',
+'',
+'## Carried over from 25 Sep',
+'- [ ] Confirm hatch detail with yard',
+'- [ ] Send revised freeboard figures',
+'- [ ] Reply to notified body query',
+'',
+'## Plan check',
+'M3 (Project A) is on 5 Nov. The stability booklet is due Fri and blocks Ballast installation, which starts 20 Oct.',
+'',
+'::gantt project="Project A" range="8w"',
+'',
+'## Related emails',
+'| Email | Fwd | Note | Project |',
+'|---|---|---|---|',
+'| Notified body: query on technical file | 28 Sep | urgent, reply by Thu | P5002 |',
+'| Yard: hatch detail sign-off request | 25 Sep | before the review | Project A |',
+'',
+'## Agenda',
+'### 1. Open items from 25 Sep',
+'Notes:',
+'',
+'### 2. Stability booklet status',
+'Freeboard check needs re-running after GA rev C. Owner: Jose. Target: Friday.',
+'',
+'### 3. Hatch detail — yard',
+'![Hatch detail, Boat 18](images/hatch-detail-boat18.png)',
+'',
+'## Decisions',
+'- ',
+'',
+'## Actions',
+'- [ ] @Jose — re-run freeboard check — Fri'
+].join('\n');
+}
+templates() {
+const fm = (lines) => ['---'].concat(lines).concat(['---', '']);
+return {
+project: {
+name: 'Project',
+desc: 'A top-level project: overview, milestones, and a home for its plan, tasks, meetings and design notes.',
+path: 'Projects/<project>/index.md',
+hint: 'Creating a project adds a first-level tree item with a Plan (Gantt) page, a Notes-in folder for unsorted notes, and Tasks, Meetings, Design and Forwarded emails folders already in place.',
+md: fm(['type: project', 'boat: ', 'client: ', 'status: active', 'milestones: ', 'team: ', 'tags: [project]']).concat([
+'# Project name', '', '## Overview', '', '', '## Milestones', '| Milestone | Date | Note |', '|---|---|---|', '| M1 | | |', '',
+'## Plan', '::gantt project="" range="8w"', '', '## Key documents', '- ', '', '## Open questions', '- [ ] '
+]).join('\n')
+},
+gantt: {
+name: 'Project Gantt',
+desc: 'The shop floor plan for one project, with your design tasks linked as dependencies.',
+path: 'Projects/<project>/Plan (Gantt).md',
+hint: 'Add one per project. It shows that project only: shop floor tasks from the loaded Gantt, plus the design tasks that block them, with float drawn as dashed amber lines.',
+md: fm(['type: gantt', 'project: ', 'source: Gantt PDF or sheet', 'range: 8w', 'tags: [gantt, plan]']).concat([
+'# Plan (Gantt)', '', '::gantt project="" range="8w" links="design-tasks"', '', '## Milestones', '- ', '', '## Notes', ''
+]).join('\n')
+},
+meeting: {
+name: 'Meeting',
+desc: 'Brief, carried-over items, agenda topics, decisions and actions.',
+path: 'Meetings/<series>/<date>.md',
+hint: 'Meeting prep fills the brief into this template: carried-over items, plan check, related emails and agenda.',
+md: fm(['type: meeting', 'series: ', 'date: ', 'project: ', 'attendees: ', 'tags: [meeting]', 'status: draft']).concat([
+'# Meeting title — date', '', '## Attendance', 'Present: ', 'Absent: ', '', '## Brief', '> Co-pilot drafts this from the last notes, the plan and forwarded emails.', '',
+'## Carried over', '- [ ] ', '', '## Plan check', '::gantt project="" range="8w"', '', '## Related emails', '::email tag=""', '',
+'## Agenda', '### 1. Topic', 'Notes:', '', '## Decisions', '- ', '', '## Actions', '- [ ] @owner — task — due'
+]).join('\n')
+},
+design: {
+name: 'Design artifact',
+desc: 'A fitting, detail or system with drawings, dimensions and references.',
+path: 'Design/<boat>/<artifact>.md',
+hint: 'Tag it by boat and system so it shows up in the notes graph the next time someone designs something similar.',
+md: fm(['type: design-artifact', 'boat: ', 'project: ', 'system: ', 'blocks: ', 'tags: [design]', 'status: draft']).concat([
+'# Artifact name', '', '## Purpose', '', '## Drawings and images', '![description](images/file.png)', '',
+'## Key dimensions', '| Item | Value | Note |', '|---|---|---|', '| | | |', '',
+'## Standards and references', '- ', '', '## Open issues', '- [ ] '
+]).join('\n')
+},
+quick: {
+name: 'Quick note',
+desc: 'A fast capture from a call, a hallway chat or the phone.',
+path: 'Inbox/<date>-<title>.md',
+hint: 'The Android capture app creates these. They land in the project\'s Notes-in folder, where you can leave them unsorted. The co-pilot chunks them into tasks, design notes and meeting notes when you ask.',
+md: fm(['type: quick-note', 'source: verbal', 'project: ', 'tags: [quick-note, unsorted]']).concat(['# Title', '', 'What just came in?']).join('\n')
+},
+task: {
+name: 'New task',
+desc: 'One task with a plan link, a due date and a definition of done.',
+path: 'Tasks/<title>.md',
+hint: 'All task metadata lives in the header. Subtasks are child pages in the tree and appear in the Subtasks section automatically. The agent schedules each subtask against the start dates of the shop floor tasks you link.',
+md: fm(['type: task', 'project: ', 'status: todo', 'due: ', 'est: ', 'assignee: Me', 'scheduled: ', 'blocks: ', 'parent: ', 'tags: [task]']).concat([
+'# Task title', '', '## Why it matters', '', '', '## Subtasks', '<!-- auto: child pages of this task -->', '', '## Linked Gantt tasks', '- blocks: Shop floor task (finish-to-start)', '', '## Definition of done', '- [ ] ', '', '## Notes', ''
+]).join('\n')
+},
+decision: {
+name: 'Design decision',
+desc: 'Context, options considered, the decision and its consequences.',
+path: 'Decisions/<date>-<title>.md',
+hint: 'Decisions stay searchable, so you can see why something was designed the way it was.',
+md: fm(['type: decision', 'project: ', 'date: ', 'status: proposed', 'tags: [decision]']).concat([
+'# Decision title', '', '## Context', '', '## Options considered', '| Option | Pros | Cons |', '|---|---|---|', '| | | |', '',
+'## Decision', '', '## Consequences', '- ', '', '## Links', '- '
+]).join('\n')
+},
+email: {
+name: 'Email note',
+desc: 'Your own note on a forwarded email: what it means and what to do.',
+path: 'Emails/<date>-<subject>.md',
+hint: 'Forwarded emails are archived automatically. Use this template to add your reading of one.',
+md: fm(['type: email-note', 'from: ', 'forwarded: ', 'project: ', 'priority: ', 'tags: [email]']).concat([
+'# Subject', '', '## Summary', '', '## What it means for the plan', '', '## Reply needed', '- [ ] '
+]).join('\n')
+}
+};
+}
+renderVals() {
+const s = this.state;
+const T = this.templates();
+const on = (b) => (b ? 'background:#1A252D;color:#E8EEF1;font-weight:500' : 'background:transparent;color:#97A5AE');
+const labels = { tasks: 'All tasks', gantt: 'Plan (Gantt)', today: 'Today',meeting: 'Design review — 2 Oct', graph: 'Notes graph', emails: 'Forwarded emails', new: 'New page', people: 'People' };
+const keys = ['project', 'gantt', 'meeting', 'design', 'quick', 'task', 'decision', 'email'];
+const cur = T[s.tpl];
+const tplCards = keys.map((k) => ({
+name: T[k].name,
+desc: T[k].desc,
+pressed: s.tpl === k ? 'true' : 'false',
+cardStyle: s.tpl === k ? 'background:#1A252D;border-color:#F2B544' : 'background:#131B21;border-color:#25323B',
+pick: () => this.setState({ tpl: k })
+}));
+const initials = (n) => n.split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join('');
+const assignedCount = (id) => s.nodes.filter((n) => n.type === 'task' && n.assignee === id).length;
+const peopleView = s.people.map((p) => ({
+name: p.name,
+role: p.role,
+initials: initials(p.name),
+avatar: 'background:' + p.color,
+stats: assignedCount(p.id) + ' tasks assigned · attended ' + p.attended + ' of 4 meetings'
+}));
+const peopleOpts = s.people.map((p) => ({ id: p.id, name: p.name }));
+const attendance = s.people.map((p) => {
+const here = !!s.att[p.id];
+return {
+name: p.name,
+initials: initials(p.name),
+avatar: 'background:' + p.color,
+pressed: here ? 'true' : 'false',
+label: here ? 'Present' : 'Absent',
+style: here ? 'background:#1A252D;border-color:#56C8A8' : 'background:transparent;border-color:#34434D',
+toggle: () => this.setState({ att: { ...this.state.att, [p.id]: !this.state.att[p.id] } })
+};
+});
+const kidsOf = (pid) => s.nodes.filter((n) => n.parent === pid);
+const personName = (id) => (s.people.find((p) => p.id === id) || { name: 'Unassigned' }).name;
+const personColor = (id) => (s.people.find((p) => p.id === id) || { color: '#6B7A84' }).color;
+const projColor = { 'Ad hoc': '#6B7A84' };
+s.nodes.filter((n) => n.type === 'project').forEach((p) => { projColor[p.title] = p.color; });
+const statusColor = { 'todo': '#6B7A84', 'in progress': '#F2B544', 'done': '#56C8A8' };
+const dotOf = (c) => 'background:' + (c || '#6B7A84');
+const openT = {};
+s.nodes.filter((n) => n.type === 'task').forEach((n) => { openT[n.id] = () => this.openNode(n.id); });
+
+const taskRows = [];
+let rank = 0;
+const isTopTask = (n) => n.type === 'task' && ((s.nodes.find((x) => x.id === n.parent) || {}).type !== 'task');
+const walkTasks = (list, d) => list.forEach((n) => {
+if (d === 0) rank += 1;
+taskRows.push({
+rank: d === 0 ? String(rank) : '',
+pad: d * 22,
+title: n.title,
+titleStyle: d === 0 ? 'color:#E8EEF1;font-weight:500;font-size:13px' : 'color:#C5D0D6;font-size:13px',
+dot: dotOf(projColor[n.project]),
+project: n.project,
+due: n.due || '—',
+blocks: n.blocks || (d > 0 ? 'via parent' : '—'),
+avatar: 'background:' + personColor(n.assignee),
+initials: initials(personName(n.assignee)),
+assignee: personName(n.assignee),
+open: () => this.openNode(n.id)
+});
+walkTasks(kidsOf(n.id).filter((k) => k.type === 'task'), d + 1);
+});
+walkTasks(s.nodes.filter(isTopTask), 0);
+
+const treeRows = [];
+const isActive = (n) => (['task', 'note', 'meeting', 'gantt', 'emails'].indexOf(s.view) >= 0 && s.sel === n.id) || (n.type === 'tpl' && s.view === 'new' && s.tpl === n.key);
+const walkTree = (pid, d, lib) => kidsOf(pid).filter((n) => pid !== null || !!n.lib === lib).forEach((n) => {
+const ch = kidsOf(n.id);
+const isOpen = !!s.open[n.id];
+const canExpand = n.type === 'folder' || n.type === 'project' || ch.length > 0;
+const isProj = n.type === 'project';
+treeRows.push({
+isHeader: false,
+isRow: true,
+label: '',
+pad: 6 + d * 14,
+title: n.title,
+dotStyle: isProj ? 'background:' + n.color + ';flex-shrink:0' : 'display:none',
+style: isActive(n) ? 'background:#1A252D;color:#E8EEF1;font-weight:500' : (isProj ? 'color:#E8EEF1;font-weight:600' : (n.type === 'folder' ? 'color:#C5D0D6;font-weight:' + (d === 0 ? 600 : 500) : 'color:#97A5AE')),
+chevVis: canExpand ? '' : 'visibility:hidden',
+rot: isOpen ? 'transform:rotate(90deg)' : 'transform:rotate(0deg)',
+exp: isOpen ? 'true' : 'false',
+toggleLabel: (isOpen ? 'Collapse ' : 'Expand ') + n.title,
+canAdd: n.type === 'folder' || n.type === 'task' || isProj,
+canDel: !n.fixed,
+addLabel: n.type === 'task' ? 'Add subtask to ' + n.title : 'Add page to ' + n.title,
+delLabel: 'Delete ' + n.title,
+open: () => this.openNode(n.id),
+toggle: () => this.toggleNode(n.id),
+add: () => this.addChild(n.id),
+del: () => this.delNode(n.id)
+});
+if (isOpen) walkTree(n.id, d + 1, lib);
+});
+treeRows.push({ isHeader: true, isRow: false, label: 'NOTES' });
+walkTree(null, 0, false);
+treeRows.push({ isHeader: true, isRow: false, label: 'LIBRARY' });
+walkTree(null, 0, true);
+
+const cur2 = s.nodes.find((n) => n.id === s.sel) || {};
+const isTask = s.view === 'task' && cur2.type === 'task';
+const isNote = s.view === 'note' && (cur2.type === 'note' || cur2.type === 'project');
+const isGantt = s.view === 'gantt' && cur2.type === 'gantt';
+const gProj = isGantt ? this.projectOf(cur2.id) : null;
+const gName = gProj ? gProj.title : '';
+const par = s.nodes.find((n) => n.id === cur2.parent);
+const parTask = par && par.type === 'task' ? par : null;
+const subKids = isTask ? kidsOf(cur2.id).filter((n) => n.type === 'task') : [];
+const tsub = s.tmode === 'preview';
+const taskVals = isTask ? {
+tTitle: cur2.title,
+tType: 'task',
+tProject: cur2.project,
+tDot: dotOf(projColor[cur2.project]),
+tStatus: cur2.status,
+tStatusDot: dotOf(statusColor[cur2.status]),
+tDue: cur2.due || '—',
+tEst: cur2.est || '—',
+tSlot: cur2.slot || 'Not scheduled',
+tWhy: cur2.why || 'Add a line on why this task matters.',
+tPath: (this.projectOf(cur2.id) || { title: 'Inbox' }).title + '/Tasks/' + (parTask ? parTask.title + '/' : '') + cur2.title + '.md',
+tHasParent: !!parTask,
+tParentTitle: parTask ? parTask.title : '',
+tGoParent: () => { if (parTask) this.openNode(parTask.id); },
+tHasSubs: subKids.length > 0,
+tNoSubs: subKids.length === 0,
+tSubs: subKids.map((k) => ({ title: k.title, est: k.est, due: k.due || 'tbc', slot: k.slot || 'Not scheduled', dot: dotOf(statusColor[k.status]), open: () => this.openNode(k.id) })),
+tBlocksText: cur2.blocks ? cur2.blocks + ' · ' + cur2.blockNote + ' · finish-to-start' : (parTask && parTask.blocks ? 'Via parent: ' + parTask.blocks + ' · ' + parTask.blockNote : 'No shop floor task linked yet'),
+tAssignOpts: s.people.map((p) => ({
+name: p.name,
+initials: initials(p.name),
+avatar: 'background:' + p.color,
+pressed: cur2.assignee === p.id ? 'true' : 'false',
+style: cur2.assignee === p.id ? 'background:#1A252D;border-color:#F2B544' : 'background:transparent',
+pick: () => this.setState({ nodes: this.state.nodes.map((n) => (n.id === cur2.id ? { ...n, assignee: p.id } : n)) })
+})),
+tMd: s.edits[cur2.id] !== undefined ? s.edits[cur2.id] : this.taskMdFor(cur2, parTask, subKids, personName(cur2.assignee))
+} : { tTitle: '', tType: '', tProject: '', tDot: '', tStatus: '', tStatusDot: '', tDue: '', tEst: '', tSlot: '', tWhy: '', tPath: '', tHasParent: false, tParentTitle: '', tGoParent: () => {}, tHasSubs: false, tNoSubs: false, tSubs: [], tBlocksText: '', tAssignOpts: [], tMd: '' };
+const nMdVal = isNote ? (s.edits[cur2.id] !== undefined ? s.edits[cur2.id] : (cur2.type === 'project' ? T.project.md.replace('# Project name', '# ' + cur2.title) : '---\ntype: note\ntags: []\n---\n\n# ' + cur2.title + '\n\n')) : '';
+const rendered = isNote ? this.renderMd(nMdVal) : { props: [], blocks: [] };
+const npv = s.nmode === 'preview';
+const noteVals = isNote ? {
+nProps: rendered.props,
+nBlocks: rendered.blocks,
+nPreview: npv,
+nSource: !npv,
+nClsPreview: npv ? 'seg-on' : 'seg',
+nClsSource: npv ? 'seg' : 'seg-on',
+nPvPressed: npv ? 'true' : 'false',
+nSrcPressed: npv ? 'false' : 'true',
+nSetPreview: () => this.setState({ nmode: 'preview' }),
+nSetSource: () => this.setState({ nmode: 'source' }),
+nTitle: cur2.title,
+nPath: cur2.type === 'project' ? 'Projects/' + cur2.title + '/index.md' : ((this.projectOf(cur2.id) || { title: 'Inbox' }).title + '/' + cur2.title + '.md'),
+nMd: s.edits[cur2.id] !== undefined ? s.edits[cur2.id] : (cur2.type === 'project' ? T.project.md.replace('# Project name', '# ' + cur2.title) : '---\ntype: note\ntags: []\n---\n\n# ' + cur2.title + '\n\n')
+} : { nTitle: '', nPath: '', nMd: '', nProps: [], nBlocks: [], nPreview: false, nSource: false, nClsPreview: 'seg', nClsSource: 'seg', nPvPressed: 'false', nSrcPressed: 'false', nSetPreview: () => {}, nSetSource: () => {} };
+const modelList = [
+{ id: 'gemini', name: 'Gemini 3.1', detail: 'Default · Google API key connected', dot: 'background:#56C8A8' },
+{ id: 'claude', name: 'Claude', detail: 'Anthropic API · add a key to enable', dot: 'background:#6B7A84' },
+{ id: 'openai', name: 'OpenAI', detail: 'OpenAI API · add a key to enable', dot: 'background:#6B7A84' },
+{ id: 'local', name: 'Local model', detail: 'Ollama or LM Studio on the work PC · add endpoint', dot: 'background:#6B7A84' }
+];
+const models = modelList.map((m) => ({
+...m,
+pressed: s.model === m.id ? 'true' : 'false',
+style: s.model === m.id ? 'background:#1A252D;border-color:#F2B544' : 'background:transparent',
+pick: () => this.setState({ model: m.id })
+}));
+const accessList = [{ id: 'read', name: 'Read only' }, { id: 'ask', name: 'Ask first' }, { id: 'auto', name: 'Write directly' }];
+const accessOpts = accessList.map((a) => ({
+name: a.name,
+cls: s.access === a.id ? 'seg-on' : 'seg',
+pressed: s.access === a.id ? 'true' : 'false',
+pick: () => this.setAccess(a.id)
+}));
+const act = s.actionState;
+const actionStatus = s.access === 'read' && act === 'pending' ? 'Suggested only' : ({ pending: 'Waiting for approval', applied: 'Written to note', rejected: 'Rejected', undone: 'Undone' })[act];
+const actionDotColor = act === 'applied' ? '#56C8A8' : (act === 'pending' && s.access !== 'read' ? '#F2B544' : '#6B7A84');
+const pv = s.mode === 'preview';
+return {
+viewToday: s.view === 'today',
+viewMeeting: s.view === 'meeting',
+viewGraph: s.view === 'graph',
+viewEmails: s.view === 'emails',
+viewNew: s.view === 'new',
+viewPeople: s.view === 'people',
+navPeople: on(s.view === 'people'),
+peopleView, peopleOpts, attendance, treeRows, taskRows, openT,
+...taskVals, ...noteVals,
+viewTasks: s.view === 'tasks',
+viewGantt: isGantt,
+ganttA: gName === 'Project A',
+ganttB: gName === 'Project B',
+ganttEmpty: isGantt && gName !== 'Project A' && gName !== 'Project B',
+ganttCrumb: gName ? 'Projects / ' + gName : 'Plan',
+ganttTitle: 'Plan (Gantt) — ' + gName,
+tplTarget: s.target ? 'Adding to: ' + ((s.nodes.find((n) => n.id === s.target) || {}).title || 'Inbox') : 'New top-level page',
+viewTask: isTask,
+viewNote: isNote,
+navTasks: on(s.view === 'tasks'),
+goTasks: () => this.setState({ view: 'tasks' }),
+goGantt: () => {
+const pr = this.projectOf(this.state.sel);
+const g = this.state.nodes.find((n) => n.type === 'gantt' && pr && this.projectOf(n.id) === pr) || this.state.nodes.find((n) => n.type === 'gantt');
+if (g) this.setState({ view: 'gantt', sel: g.id });
+},
+newTask: () => this.newTask(),
+tAddSub: () => this.newTask(s.sel),
+tPreview: tsub,
+tSource: !tsub,
+tClsPreview: tsub ? 'seg-on' : 'seg',
+tClsSource: tsub ? 'seg' : 'seg-on',
+tPvPressed: tsub ? 'true' : 'false',
+tSrcPressed: tsub ? 'false' : 'true',
+tSetPreview: () => this.setState({ tmode: 'preview' }),
+tSetSource: () => this.setState({ tmode: 'source' }),
+onTaskMd: (e) => this.setState({ edits: { ...this.state.edits, [this.state.sel]: e.target.value } }),
+onNoteMd: (e) => this.setState({ edits: { ...this.state.edits, [this.state.sel]: e.target.value } }),
+newName: s.newName,
+newRole: s.newRole,
+onName: (e) => this.setState({ newName: e.target.value }),
+onRole: (e) => this.setState({ newRole: e.target.value }),
+addPerson: () => {
+const n = (this.state.newName || '').trim();
+if (!n) return;
+const pal = ['#F2B544', '#6CB6EA', '#B7A3F2', '#56C8A8', '#F08A7A', '#8FD16F'];
+const id = 'p' + Date.now();
+this.setState({
+people: [...this.state.people, { id, name: n, role: (this.state.newRole || '').trim() || 'No group', color: pal[this.state.people.length % pal.length], attended: 0 }],
+att: { ...this.state.att, [id]: false },
+newName: '',
+newRole: ''
+});
+},
+goPeople: () => this.setState({ view: 'people' }),
+viewLabel: s.view === 'task' || s.view === 'note' ? (cur2.title || 'Page') : (s.view === 'gantt' ? 'Plan · ' + gName : labels[s.view]),
+leftOpen: s.leftOpen,
+leftClosed: !s.leftOpen,
+rightOpen: s.rightOpen,
+rightClosed: !s.rightOpen,
+leftW: s.leftOpen ? '264px' : '64px',
+rightW: s.rightOpen ? '320px' : '64px',
+tplCards,
+models, accessOpts,
+ctxOpen: !!s.ctx,
+ctxX: s.ctx ? s.ctx.x : 0,
+ctxPos: s.ctx ? (s.ctx.up ? 'bottom:' + (window.innerHeight - s.ctx.y) + 'px' : 'top:' + s.ctx.y + 'px') : 'top:0px',
+ctxDir: s.ctx && s.ctx.up ? 'column-reverse' : 'column',
+openCtx: (e) => {
+if (e && e.preventDefault) e.preventDefault();
+const cx = e && typeof e.clientX === 'number' ? e.clientX : 400;
+const cy = e && typeof e.clientY === 'number' ? e.clientY : 300;
+const up = cy > window.innerHeight / 2;
+this.setState({ ctx: { x: Math.max(8, Math.min(cx, window.innerWidth - 310)), y: cy, up } });
+},
+closeCtx: () => this.setState({ ctx: null }),
+fmtOpen: s.fmtOpen && !s.ctx,
+fmtPressed: s.fmtOpen ? 'true' : 'false',
+fmtSel: s.fmtOpen ? 'background:rgba(108,182,234,0.28)' : 'background:transparent',
+toggleFmt: () => this.setState({ fmtOpen: !this.state.fmtOpen }),
+slashOpen: s.slashOpen,
+slashExpanded: s.slashOpen ? 'true' : 'false',
+toggleSlash: () => this.setState({ slashOpen: !this.state.slashOpen }),
+modelName: modelList.find((m) => m.id === s.model).name,
+modelOpen: s.modelOpen,
+modelExpanded: s.modelOpen ? 'true' : 'false',
+toggleModel: () => this.setState({ modelOpen: !this.state.modelOpen }),
+accessLabel: s.access === 'read' ? 'Notes: read only' : (s.access === 'ask' ? 'Asks before writing' : 'Writes directly'),
+actionStatus,
+actionDot: 'background:' + actionDotColor,
+showApprove: act === 'pending' && s.access === 'ask',
+showUndo: act === 'applied',
+approveAction: () => this.applyAction({}),
+rejectAction: () => this.setState({ actionState: 'rejected' }),
+undoAction: () => this.undoAction(),
+tplName: cur.name,
+tplPath: cur.path,
+tplHint: cur.hint,
+tplMd: cur.md,
+navToday: on(s.view === 'today'),
+navMeeting: on(s.view === 'meeting'),
+navGraph: on(s.view === 'graph'),
+navEmails: on(s.view === 'emails'),
+modePreview: pv,
+modeSource: !pv,
+clsPreview: pv ? 'seg-on' : 'seg',
+clsSource: pv ? 'seg' : 'seg-on',
+pvPressed: pv ? 'true' : 'false',
+srcPressed: pv ? 'false' : 'true',
+md: s.md,
+onMd: (e) => this.setState({ md: e.target.value }),
+setPreview: () => this.setState({ mode: 'preview' }),
+setSource: () => this.setState({ mode: 'source' }),
+goNew: () => this.setState({ view: 'new', target: null }),
+createNote: () => {
+const k = this.state.tpl;
+const tg = this.state.target;
+const id = 'n' + Date.now();
+if (k === 'meeting') { this.setState({ view: 'meeting', sel: 'm2' }); return; }
+if (k === 'task') { this.newTask(tg || undefined); return; }
+if (k === 'project') {
+const pal = ['#F2B544', '#F08A7A', '#8FD16F', '#6CB6EA', '#B7A3F2'];
+const color = pal[this.state.nodes.filter((n) => n.type === 'project').length % pal.length];
+const add = [
+{ id, parent: null, title: 'New project', type: 'project', color },
+{ id: id + 'g', parent: id, title: 'Plan (Gantt)', type: 'gantt' },
+{ id: id + 'n', parent: id, title: 'Notes-in', type: 'folder', fixed: true },
+{ id: id + 't', parent: id, title: 'Tasks', type: 'folder' },
+{ id: id + 'm', parent: id, title: 'Meetings', type: 'folder' },
+{ id: id + 'd', parent: id, title: 'Design', type: 'folder' },
+{ id: id + 'e', parent: id, title: 'Forwarded emails', type: 'emails', fixed: true }
+];
+this.setState({ nodes: [...this.state.nodes, ...add], open: { ...this.state.open, [id]: true }, view: 'note', sel: id });
+return;
+}
+let parent = tg || (k === 'gantt' ? 'pA' : 'inbox');
+const tgNode = this.state.nodes.find((n) => n.id === tg);
+if (tgNode && tgNode.type === 'project' && k !== 'gantt') {
+const ni = this.state.nodes.find((n) => n.parent === tg && n.title === 'Notes-in');
+if (ni) parent = ni.id;
+}
+if (k === 'gantt') {
+this.setState({ nodes: [...this.state.nodes, { id, parent, title: 'Plan (Gantt)', type: 'gantt' }], open: { ...this.state.open, [parent]: true }, view: 'gantt', sel: id });
+return;
+}
+this.setState({ nodes: [...this.state.nodes, { id, parent, title: T[k].name, type: 'note' }], open: { ...this.state.open, [parent]: true }, view: 'note', sel: id, edits: { ...this.state.edits, [id]: T[k].md } });
+},
+goToday: () => this.setState({ view: 'today' }),
+goMeeting: () => this.setState({ view: 'meeting' }),
+goGraph: () => this.setState({ view: 'graph' }),
+goEmails: () => this.setState({ view: 'emails' }),
+toggleLeft: () => this.setState({ leftOpen: !this.state.leftOpen }),
+toggleRight: () => this.setState({ rightOpen: !this.state.rightOpen })
+};
+}
+}
+</script>
+</body>
+</html>

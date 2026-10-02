@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Capture</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#0C1216}
+a{color:inherit;text-decoration:none}
+button,textarea{font-family:inherit}
+textarea::placeholder{color:#8797A1}
+.chipb{min-height:44px;padding:0 16px;border-radius:999px;border:1px solid #34434D;background:transparent;color:#C5D0D6;font-size:14px;cursor:pointer}
+.chipb-on{min-height:44px;padding:0 16px;border-radius:999px;border:1px solid #F2B544;background:rgba(242,181,68,0.16);color:#F6C96A;font-size:14px;font-weight:600;cursor:pointer}
+</style>
+</helmet>
+<div style="width:390px;height:844px;box-sizing:border-box;background:#0C1216;color:#E8EEF1;font-family:'IBM Plex Sans',system-ui,sans-serif;display:flex;flex-direction:column;overflow:hidden;line-height:1.4">
+
+<div style="padding:24px 20px 8px">
+<h1 style="margin:0;font-size:26px;font-weight:600">Capture</h1>
+<div style="margin-top:2px;font-size:14px;color:#97A5AE">Drop it here. Sort it later.</div>
+</div>
+
+<div style="flex:1;min-height:0;padding:10px 20px 0;display:flex;flex-direction:column;gap:18px">
+
+<div style="position:relative;background:#131B21;border:1px solid #2F3E48;border-radius:14px;padding:14px">
+<textarea aria-label="Note" rows="4" style="width:100%;box-sizing:border-box;padding:0 0 40px;border:0;background:transparent;color:#E8EEF1;font-size:16px;line-height:1.5;resize:none;outline:none">Yard wants hatch detail signed off by Friday.</textarea>
+<button type="button" aria-label="Dictate" style="position:absolute;right:12px;bottom:12px;width:48px;height:48px;border-radius:50%;border:0;background:#1A252D;color:#F2B544;display:flex;align-items:center;justify-content:center;cursor:pointer">
+<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3z"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/></svg>
+</button>
+</div>
+
+<div>
+<div style="font-size:12px;font-weight:600;color:#97A5AE;margin-bottom:8px;letter-spacing:0.04em">SOURCE</div>
+<div style="display:flex;flex-wrap:wrap;gap:8px">
+<button class="chipb-on" type="button">Verbal</button>
+<button class="chipb" type="button">Meeting</button>
+<button class="chipb" type="button">Email</button>
+<button class="chipb" type="button">Other</button>
+</div>
+</div>
+
+<div>
+<div style="font-size:12px;font-weight:600;color:#97A5AE;margin-bottom:8px;letter-spacing:0.04em">PROJECT</div>
+<div style="display:flex;flex-wrap:wrap;gap:8px">
+<button class="chipb-on" type="button">Project A</button>
+<button class="chipb" type="button">Project B</button>
+<button class="chipb" type="button">P5002</button>
+<button class="chipb" type="button">Not sure</button>
+</div>
+</div>
+
+<div>
+<div style="font-size:12px;font-weight:600;color:#97A5AE;margin-bottom:8px;letter-spacing:0.04em">PRIORITY</div>
+<div style="display:flex;flex-wrap:wrap;gap:8px">
+<button class="chipb" type="button">Urgent</button>
+<button class="chipb" type="button">This week</button>
+<button class="chipb-on" type="button">Park it</button>
+</div>
+</div>
+
+<div style="display:flex;align-items:center;gap:12px;padding:12px 14px;border-radius:12px;background:#0F171C;border:1px solid #25323B;font-size:13px;color:#C5D0D6">
+<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#97A5AE" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex-shrink:0"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="M8.6 10.5l6.8-4M8.6 13.5l6.8 4"/></svg>
+<span>Share from Gmail or any app to send it straight here.</span>
+</div>
+
+<button type="button" style="min-height:52px;border:0;border-radius:12px;background:#F2B544;color:#10161A;font-size:16px;font-weight:600;cursor:pointer">Save to inbox</button>
+</div>
+
+<nav aria-label="Primary" style="display:flex;border-top:1px solid #25323B;background:#0F171C;height:72px;flex-shrink:0;margin-top:14px">
+<a href="Capture.dc.html" style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;font-size:12px;font-weight:600;color:#F2B544">
+<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16v4z"/></svg>Capture</a>
+<a href="Morning.dc.html" style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;font-size:12px;color:#97A5AE">
+<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01"/></svg>Today</a>
+<a href="Evening.dc.html" style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;font-size:12px;color:#97A5AE">
+<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M8 12.5l2.7 2.7L16 9.5"/></svg>Check-in</a>
+</nav>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":390,"height":844}}'>
+class Component extends DCLogic {
+renderVals() {
+return {};
+}
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,71 @@
+{
+  "v": 3,
+  "attachments": {},
+  "boards": {
+    "Capture.dc.html": {
+      "h": 844,
+      "title": "Android — Capture",
+      "w": 390,
+      "x": 0,
+      "y": 1360
+    },
+    "Evening.dc.html": {
+      "h": 844,
+      "is_interactive": true,
+      "title": "Android — Evening check-in",
+      "w": 390,
+      "x": 940,
+      "y": 1360
+    },
+    "Main.dc.html": {
+      "expand": "fill",
+      "h": 1000,
+      "is_interactive": true,
+      "title": "Desktop app",
+      "w": 1440,
+      "x": 0,
+      "y": 0
+    },
+    "Morning.dc.html": {
+      "h": 844,
+      "title": "Android — Morning list",
+      "w": 390,
+      "x": 470,
+      "y": 1360
+    }
+  },
+  "createdOnFiles": {
+    "at": "2026-09-30T20:05:00Z",
+    "v": 1
+  },
+  "designSystems": [],
+  "launch": {
+    "view": "canvas"
+  },
+  "notes": {
+    "n1": {
+      "kind": "title1",
+      "maxW": 1440,
+      "text": "Desktop web app",
+      "w": 240,
+      "x": 0,
+      "y": -300
+    },
+    "n2": {
+      "kind": "title1",
+      "maxW": 1330,
+      "text": "Android app",
+      "w": 240,
+      "x": 0,
+      "y": 1100
+    }
+  },
+  "order": [
+    "Main.dc.html",
+    "Capture.dc.html",
+    "Morning.dc.html",
+    "Evening.dc.html"
+  ],
+  "pages": [],
+  "title": "Co-Pilot Interface Mockups"
+}

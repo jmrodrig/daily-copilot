@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+venv/
+env/
+.pytest_cache/
+
+# Node
+node_modules/
+dist/
+.DS_Store
+
+# Android
+build/
+.gradle/
+local.properties
+
+# Tailscale / Secrets
+*.pem
+*.key
+
+# SQLite
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
