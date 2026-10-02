@@ -20,6 +20,7 @@ Build a personal AI co-pilot that runs Jose's day from the actual project plans 
 | Evening check-in | Jose ticks off completed tasks; feeds tomorrow's ranking and doubles as a timesheet entry | Removes the need to separately reconstruct the week for timesheets |
 | Meeting prep briefs | For recurring meetings, pulls prior notes and open items, checks them against current project status, and produces a short prep brief with a structured place to add live notes | One-off meetings get a lighter version; notes feed back into that meeting's ongoing thread |
 | Weekly rollup | Shows time spent on project work vs. ad hoc/reactive work, doubling as a pre-filled timesheet | Also useful as evidence of the planning gap on the wider project |
+| Version history | Unified audit trail capturing full snapshots and the "source" (actor/model) for every change to DB rows and notes | Essential for safe agent edits; provides full undo, timeline views, and certification traceability |
 
 ## Daily loop
 
@@ -67,6 +68,8 @@ A People section holds characters Jose creates as labels, such as a yard foreman
 - Agent access: the co-pilot reads the extracted PDF text (with OCR for scans) and every comment and annotation label, so they are searchable and can feed meeting briefs and tasks. Turning a comment into a task is one action.
 - Open decisions for implementation: the PDF renderer (PDF.js is the likely choice), the annotation data format, OCR engine, and whether comments sync live between devices or on save.
 
+**Version history tracking.** Every entity (database rows like Tasks and Links, and file-based Notes and Emails) has full version history recorded in a central SQLite `history` table. Every change captures the source (e.g., manual edit, Gemini, email capture) and a full JSON snapshot of the entity, ensuring older snapshots remain readable even if schemas evolve. To guarantee complete coverage without bypassing the history log, all deletions are handled via application-level soft deletes rather than database-level cascades, and file renames are logged explicitly as a "rename" action.
+
 ## Constraints and workaround
 
 Direct, automatic access to Jose's work inbox is not straightforward given current IT/system constraints. The agreed workaround: Jose manually forwards only the emails that matter to a dedicated address the agent can read, adding a short note on priority and project. This keeps the system's access narrow and deliberate rather than reading the full inbox, at the cost of an extra manual step. For now the volume is manageable; if forwarding becomes a bottleneck or emails start going unforwarded, it's worth revisiting (a forwarding rule, a shared label, or a reminder habit).
@@ -74,12 +77,13 @@ Direct, automatic access to Jose's work inbox is not straightforward given curre
 ## Build phases
 
 1. Load all three Gantt charts (C7801, R5301 and P5002): Jose provides the current PDF exports, one per project, which get parsed into structured data (tasks, dates, dependencies, milestones and objectives) the triage engine can check requests against.
-2. Stand up the capture app — a minimal, fast-to-use logging tool for verbal and meeting inputs, tagged by project and priority. This alone fixes the "buried and forgotten" problem and is useful even before anything else exists.
-3. Set up the dedicated forwarding address and a simple tagging convention for forwarded emails.
-4. Build the daily triage engine: pull capture app entries + forwarded emails + plan data, produce a ranked morning list.
-5. Add the evening check-in, tying completed tasks back into tomorrow's ranking and logging time per project.
-6. Add meeting prep briefs, starting with recurring meetings — pulling prior notes and open items, with a structured place for live notes that feed back into that meeting's thread.
-7. Add the weekly rollup: time split between project work and ad hoc work, doubling as a pre-filled timesheet.
+2. Implement version history tracking: Set up the unified SQLite history table and intercept all write paths (DB events and file saves) to capture full snapshots and the "source" actor. Introduce application-level soft-deletes and file rename actions. Doing this now ensures the audit trail is ready before agents and pipelines begin writing data.
+3. Stand up the capture app — a minimal, fast-to-use logging tool for verbal and meeting inputs, tagged by project and priority. This alone fixes the "buried and forgotten" problem and is useful even before anything else exists.
+4. Set up the dedicated forwarding address and a simple tagging convention for forwarded emails.
+5. Build the daily triage engine: pull capture app entries + forwarded emails + plan data, produce a ranked morning list.
+6. Add the evening check-in, tying completed tasks back into tomorrow's ranking and logging time per project.
+7. Add meeting prep briefs, starting with recurring meetings — pulling prior notes and open items, with a structured place for live notes that feed back into that meeting's thread.
+8. Add the weekly rollup: time split between project work and ad hoc work, doubling as a pre-filled timesheet.
 
 Each phase is usable on its own, so the system delivers value from phase 1 rather than waiting on the full build.
 

@@ -117,16 +117,18 @@ def test_project_code_is_unique(session_factory):
             session.add_all([Project(code="C7801", name="a"), Project(code="C7801", name="b")])
 
 
-def test_deleting_task_cascades_to_links(session_factory):
+def test_hard_deleting_a_linked_task_is_refused(session_factory):
+    """There are no delete cascades any more: rows are soft-deleted instead."""
     with session_factory() as session, session.begin():
         a, b = Task(title="a"), Task(title="b")
         session.add_all([a, b])
         session.flush()
         session.add(Link(predecessor_id=a.id, successor_id=b.id))
-    with session_factory() as session, session.begin():
-        session.delete(session.get(Task, a.id))
+    with pytest.raises(IntegrityError):
+        with session_factory() as session, session.begin():
+            session.delete(session.get(Task, a.id))
     with session_factory() as session:
-        assert session.scalar(select(func.count()).select_from(Link)) == 0
+        assert session.scalar(select(func.count()).select_from(Link)) == 1
 
 
 # --- import_gantt -------------------------------------------------------------
@@ -178,6 +180,13 @@ def test_reimport_replaces_gantt_tasks_only(session_factory, data):
         titles = set(session.scalars(select(Task.title)))
         assert titles == {"Keel install", "STAGE PAYMENT - Roll out/keel", "Order paint"}
         assert session.scalar(select(func.count()).select_from(Link)) == 0
+
+        # The replaced rows are soft-deleted, not removed.
+        all_tasks = session.scalars(select(Task).execution_options(include_deleted=True)).all()
+        assert len(all_tasks) == 6
+        assert sum(t.deleted_at is not None for t in all_tasks) == 3
+        old_link = session.scalar(select(Link).execution_options(include_deleted=True))
+        assert old_link.deleted_at is not None
 
 
 def test_import_gantt_skips_duplicate_and_self_links(session_factory, data):

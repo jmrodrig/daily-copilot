@@ -5,7 +5,9 @@ Usage (from backend/):
     python cli_import.py "../docs/gantt/C7801 Project Plan.pdf"
 
 Re-importing a project replaces all of its Gantt tasks (and their links); tasks
-created outside the Gantt (`is_gantt_task=False`) are left alone.
+created outside the Gantt (`is_gantt_task=False`) are left alone. Replaced rows are
+soft-deleted, and every change is recorded in the `history` table with source
+"cli_import".
 """
 
 import argparse
@@ -17,14 +19,16 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from gantt_parser import GanttParseError, extract_gantt_data
+from history import SOURCE_KEY, restore, set_source, soft_delete
 from models import Link, Project, Task
 from schemas import LinkType, Status
 
 PROMPT = "Approve and import to database? [Y/N] "
+SOURCE = "cli_import"
 _PROJECT_CODE_RE = re.compile(r"\b([A-Z]\d{4})\b")
 
 
@@ -103,20 +107,32 @@ def import_gantt(session: Session, data: dict, project_code: str) -> ImportResul
     """Upsert the project and replace its Gantt tasks, milestones and links.
 
     The caller owns the transaction: commit on success, roll back on error.
+    Changes are attributed to "cli_import" unless the session already has a source.
     """
-    project = session.scalar(select(Project).where(Project.code == project_code))
+    if SOURCE_KEY not in session.info:
+        set_source(session, SOURCE)
+
+    # Project codes are unique, so a soft-deleted project is brought back rather than duplicated.
+    project = session.scalar(
+        select(Project).where(Project.code == project_code).execution_options(include_deleted=True)
+    )
     created_project = project is None
     if project is None:
         project = Project(code=project_code, name=data.get("project_name") or project_code)
         session.add(project)
         session.flush()
-    elif data.get("project_name"):
-        project.name = data["project_name"]
+    else:
+        restore(project)
+        if data.get("project_name"):
+            project.name = data["project_name"]
 
-    # Links to the old tasks go with them via ON DELETE CASCADE.
-    replaced = session.execute(
-        delete(Task).where(Task.project_id == project.id, Task.is_gantt_task.is_(True))
-    ).rowcount
+    # Soft-delete the old Gantt tasks; their links go with them.
+    old_tasks = session.scalars(
+        select(Task).where(Task.project_id == project.id, Task.is_gantt_task.is_(True))
+    ).all()
+    for task in old_tasks:
+        soft_delete(session, task)
+    replaced = len(old_tasks)
 
     by_gantt_id: dict[str, Task] = {}
     for item in data.get("tasks", []):
