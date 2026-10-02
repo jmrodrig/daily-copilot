@@ -12,8 +12,8 @@ A personal AI co-pilot designed to manage daily workflows against real project G
 - **Co-Pilot Chat:** Conversational agent reading/writing the knowledge base with per-user access modes (Read only, Ask first, Write directly).
 
 ## 2. Phase Status
-- **Phase 0 — Foundations:** **In Progress**
-- **Phase 1 — Gantt Ingestion:** Pending
+- **Phase 0 — Foundations:** **Complete**
+- **Phase 1 — Gantt Ingestion:** **In Progress**
 - **Phase 2 — Capture App:** Pending
 - **Phase 3 — Email Intake:** Pending
 - **Phase 4 — Desktop App Core:** Pending
