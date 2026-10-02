@@ -1,0 +1,38 @@
+package com.bespoke.copilot.ui.theme
+
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.graphics.Color
+
+// Mirrors shared/design-tokens.json
+object CopilotColors {
+    val Background = Color(0xFF0C1216)
+    val SurfaceRaised = Color(0xFF131B21)
+    val SurfacePanel = Color(0xFF0F171C)
+    val Border = Color(0xFF25323B)
+    val BorderLight = Color(0xFF2F3E48)
+    val TextPrimary = Color(0xFFE8EEF1)
+    val TextSecondary = Color(0xFFC5D0D6)
+    val TextMuted = Color(0xFF97A5AE)
+    val Accent = Color(0xFFF2B544)
+}
+
+private val DarkColors = darkColorScheme(
+    primary = CopilotColors.Accent,
+    onPrimary = CopilotColors.Background,
+    background = CopilotColors.Background,
+    onBackground = CopilotColors.TextPrimary,
+    surface = CopilotColors.SurfaceRaised,
+    onSurface = CopilotColors.TextPrimary,
+    surfaceVariant = CopilotColors.SurfacePanel,
+    onSurfaceVariant = CopilotColors.TextSecondary,
+    outline = CopilotColors.Border,
+    outlineVariant = CopilotColors.BorderLight,
+)
+
+// Dark-first: the app always uses the dark scheme regardless of system setting.
+@Composable
+fun CopilotTheme(content: @Composable () -> Unit) {
+    MaterialTheme(colorScheme = DarkColors, content = content)
+}

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Window-level theme only; all UI is drawn by Compose. Dark background avoids a white flash on launch. -->
+    <style name="Theme.DailyCopilot" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#0C1216</item>
+        <item name="android:statusBarColor">#0C1216</item>
+        <item name="android:navigationBarColor">#0C1216</item>
+    </style>
+</resources>
