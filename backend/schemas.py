@@ -71,10 +71,12 @@ class Task(BaseModel):
     status: Status = Status.TODO
     priority: Priority = Priority.NORMAL
     estimate_hours: float | None = Field(default=None, ge=0)
+    start_date: date | None = Field(default=None, description="Planned start from the Gantt")
     deadline: date | None = None
     float_days: float | None = Field(default=None, description="Schedule float from the Gantt")
     rank: float | None = None
     is_gantt_task: bool = Field(default=False, description="True for shop floor Gantt tasks")
+    is_milestone: bool = Field(default=False, description="Zero-duration Gantt event")
     subtasks: list[Subtask] = Field(default_factory=list)
     created_at: datetime | None = None
     completed_at: datetime | None = None

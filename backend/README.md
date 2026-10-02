@@ -69,6 +69,22 @@ data = extract_gantt_data("../docs/gantt/C7801 Project Plan.pdf")
 print(data["tasks"][:2])
 ```
 
+### Reviewing and importing a Gantt
+
+`cli_import.py` runs the extraction, prints the JSON and a summary (project,
+task/milestone/dependency counts, date range), then asks
+`Approve and import to database? [Y/N]`. On `Y` it creates or updates the
+`Project` and stores tasks and milestones as `Task` rows with `is_gantt_task=True`
+(milestones also get `is_milestone=True`), plus their finish-to-start `Link`s.
+
+```powershell
+python cli_import.py "../docs/gantt/C7801 Project Plan.pdf"
+python cli_import.py plan.pdf --code C7801   # if no project code can be found
+```
+
+Re-importing a project deletes its previous Gantt tasks (and their links) before
+inserting the new ones; tasks that didn't come from the Gantt are kept.
+
 ## Tests
 
 ```powershell

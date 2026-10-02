@@ -11,7 +11,7 @@ from config import get_settings
 
 
 class Base(DeclarativeBase):
-    """Base class for ORM models (schemas arrive in phase 0.4)."""
+    """Base class for ORM models (defined in `models`)."""
 
 
 def make_engine(database_url: str) -> Engine:
@@ -36,14 +36,13 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False
 
 
 def init_db(bind: Engine = engine) -> None:
-    """Create the database file (and any registered tables) if missing."""
+    """Create the database file and any missing tables."""
+    import models  # noqa: F401  -- registers the ORM tables on Base.metadata
+
     db_file = bind.url.database
     if db_file and db_file != ":memory:":
         Path(db_file).parent.mkdir(parents=True, exist_ok=True)
     Base.metadata.create_all(bind=bind)
-    # create_all is a no-op without tables; connecting guarantees the file exists.
-    with bind.connect():
-        pass
 
 
 def get_db() -> Iterator[Session]:
