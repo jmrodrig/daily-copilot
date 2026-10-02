@@ -82,8 +82,40 @@ python cli_import.py "../docs/gantt/C7801 Project Plan.pdf"
 python cli_import.py plan.pdf --code C7801   # if no project code can be found
 ```
 
-Re-importing a project deletes its previous Gantt tasks (and their links) before
-inserting the new ones; tasks that didn't come from the Gantt are kept.
+Re-importing a project soft-deletes its previous Gantt tasks (and their links)
+before inserting the new ones; tasks that didn't come from the Gantt are kept.
+
+## Version history
+
+Nothing is ever hard-deleted. `Project`, `Task` and `Link` rows have a
+`deleted_at` column; `history.soft_delete(session, obj)` sets it (deleting a
+project also deletes its tasks, deleting a task also deletes its links) and
+`history.restore(obj)` clears it. Soft-deleted rows are hidden from ORM queries
+unless you pass `.execution_options(include_deleted=True)`. The foreign keys no
+longer cascade, so a hard `session.delete()` of a row that others point to fails.
+
+Every change is appended to the `history` table with a full JSON snapshot:
+
+| Column        | Meaning                                                        |
+|---------------|----------------------------------------------------------------|
+| `entity_type` | `Project`, `Task`, `Link` or `Note`                            |
+| `entity_id`   | Row id, or the note path relative to `COPILOT_NOTES_DIR`       |
+| `action`      | `create`, `update`, `delete` or `rename` (notes only)          |
+| `source`      | Who made the change: `manual` (default), `cli_import`, `gemini`, ... |
+| `timestamp`   | UTC                                                            |
+| `snapshot`    | The entity's full state after the change (before it, for deletes) |
+
+Database changes are recorded automatically on flush; set the actor with
+`history.set_source(session, "gemini")` (or `sessionmaker(info={"source": ...})`).
+`cli_import.py` records its changes as `cli_import`. Note changes made through
+`file_layer.write_note`, `rename_note` and `delete_note` take a `source=` argument;
+a deleted note's last content stays in its `delete` snapshot.
+
+`init_db()` adds the new columns to databases created by earlier versions.
+
+```powershell
+python -c "import sqlite3; [print(r) for r in sqlite3.connect('copilot.db').execute('SELECT id, entity_type, entity_id, action, source, timestamp FROM history')]"
+```
 
 ## Tests
 

@@ -10,10 +10,12 @@ A personal AI co-pilot designed to manage daily workflows against real project G
 - **Weekly Rollup:** Pre-fills timesheets and separates project work from ad hoc noise.
 - **Knowledge Base:** Markdown-backed wiki with templates, notes graph, and forwarded email archive.
 - **Co-Pilot Chat:** Conversational agent reading/writing the knowledge base with per-user access modes (Read only, Ask first, Write directly).
+- **Version History:** Unified SQLite audit trail capturing full JSON snapshots and the "source" (actor/model) for every change to DB rows and notes, using soft deletes.
 
 ## 2. Phase Status
 - **Phase 0 — Foundations:** **Complete**
 - **Phase 1 — Gantt Ingestion:** **Complete**
+- **Phase 1.5 — Version History:** Pending (High Priority)
 - **Phase 2 — Capture App:** **In Progress**
 - **Phase 3 — Email Intake:** Pending
 - **Phase 4 — Desktop App Core:** Pending
@@ -35,3 +37,4 @@ A personal AI co-pilot designed to manage daily workflows against real project G
 
 ## 5. Deviations Log
 - **2026-10-02:** *Email Intake (Phase 3) modified.* Switched from dedicated email forwarding/IMAP polling to a local automation that saves emails directly to a markdown drop folder. (Decision 6 updated).
+- **2026-10-02:** *Version History Integration added.* Inserted Phase 1.5 to implement a unified SQLite history table capturing full snapshots and actor sources for all DB and file changes. Confirmed the use of application-level soft deletes (replacing DB cascades) and explicit file rename actions to guarantee history coverage.
