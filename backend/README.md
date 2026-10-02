@@ -26,7 +26,8 @@ Settings are read from system environment variables and from `backend/.env`
 | `COPILOT_HOST`              | `127.0.0.1`              | Used by `python main.py`                          |
 | `COPILOT_PORT`              | `8000`                   | Used by `python main.py`                          |
 | `COPILOT_OLLAMA_BASE_URL`   | `http://localhost:11434` | Local model endpoint                              |
-| `COPILOT_GEMINI_API_KEY`    | unset                    | Optional; never hardcode or commit                |
+| `COPILOT_GANTT_MODEL`       | `gemini/gemini-3.1-pro-preview` | litellm model for the Gantt PDF parser     |
+| `COPILOT_GEMINI_API_KEY`    | unset                    | Needed by the Gantt parser; never hardcode or commit |
 | `COPILOT_ANTHROPIC_API_KEY` | unset                    | Optional; never hardcode or commit                |
 
 To get started, copy `.env.example` to `.env` and fill in what you need. `.env` is git-ignored.
@@ -52,6 +53,21 @@ uvicorn main:app --host 100.x.y.z --port 8000
 ```
 
 Don't bind to `0.0.0.0`: that would also expose the API on the office LAN.
+
+## Gantt PDF parser
+
+`gantt_parser.extract_gantt_data(pdf_path)` reads a Gantt PDF export with PyMuPDF
+and asks Gemini (via litellm) to turn it into JSON with `tasks` (name, parent,
+trade, start/end, percent complete), finish-to-start `dependencies` and
+`milestones`. Text is sent with page coordinates so that dates can be read off
+the bar positions when a chart has no date columns. Treat the output as a draft
+for human review; it is not written to the database. Requires `COPILOT_GEMINI_API_KEY`.
+
+```python
+from gantt_parser import extract_gantt_data
+data = extract_gantt_data("../docs/gantt/C7801 Project Plan.pdf")
+print(data["tasks"][:2])
+```
 
 ## Tests
 

@@ -29,6 +29,8 @@ class Settings(BaseSettings):
 
     # Model endpoints
     ollama_base_url: str = "http://localhost:11434"
+    # litellm model string used to structure Gantt PDF text (needs gemini_api_key)
+    gantt_model: str = "gemini/gemini-3.1-pro-preview"
 
     # API keys: SecretStr keeps them out of reprs and logs.
     gemini_api_key: SecretStr | None = None
