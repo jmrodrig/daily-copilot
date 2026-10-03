@@ -9,6 +9,7 @@ export type TriageItem = {
   project: string | null;
   priority: "low" | "normal" | "high" | "urgent";
   status: "todo" | "in_progress" | "blocked" | "done" | null;
+  assignee: string | null;
   start_date: string | null;
   due_date: string | null;
   created: string | null;
@@ -16,7 +17,10 @@ export type TriageItem = {
   content: string | null;
 };
 
-const RANK_LABELS: Record<TriageItem["rank"], string> = {
+/** The person using the app: claimed tasks are assigned to them and appear at the Evening Check-in. */
+export const ME = "Jose";
+
+export const RANK_LABELS: Record<TriageItem["rank"], string> = {
   1: "Overdue",
   2: "Today",
   3: "High priority notes",
@@ -29,12 +33,12 @@ const MS_PER_DAY = 86_400_000;
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 // Full class names so Tailwind can find them; the colours come from shared/design-tokens.json.
-const PROJECT_TAG: Record<string, string> = {
+export const PROJECT_TAG: Record<string, string> = {
   c7801: "border-project-c7801/60 text-project-c7801",
   r5301: "border-project-r5301/60 text-project-r5301",
   p5002: "border-project-p5002/60 text-project-p5002",
 };
-const NEUTRAL_TAG = "border-project-neutral/60 text-text-muted";
+export const NEUTRAL_TAG = "border-project-neutral/60 text-text-muted";
 
 const PRIORITY_TAG: Record<TriageItem["priority"], string> = {
   urgent: "border-accent bg-accent/15 text-accent",
@@ -56,7 +60,7 @@ function todayDay(): number {
   return Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()) / MS_PER_DAY;
 }
 
-function formatDay(iso: string): string {
+export function formatDay(iso: string): string {
   const date = new Date(toDay(iso) * MS_PER_DAY);
   return `${date.getUTCDate()} ${MONTHS[date.getUTCMonth()]}`;
 }
@@ -95,6 +99,11 @@ export default function TriageBoard() {
     return () => controller.abort();
   }, []);
 
+  const replaceItem = (updated: TriageItem) =>
+    setTriage((prev) =>
+      prev.state === "ok" ? { ...prev, items: prev.items.map((i) => (i.id === updated.id ? updated : i)) } : prev,
+    );
+
   if (triage.state === "loading") return <p className="text-sm text-text-secondary">Loading /api/triage…</p>;
   if (triage.state === "error") {
     return <p className="text-sm text-text-secondary">Could not load the Morning List ({triage.message}).</p>;
@@ -126,7 +135,7 @@ export default function TriageBoard() {
           </h3>
           <ul className="divide-y divide-border-default/60">
             {items.map((item) => (
-              <TriageRow key={item.id} item={item} today={today} />
+              <TriageRow key={item.id} item={item} today={today} onChange={replaceItem} />
             ))}
           </ul>
         </div>
@@ -135,7 +144,15 @@ export default function TriageBoard() {
   );
 }
 
-function TriageRow({ item, today }: { item: TriageItem; today: number }) {
+function TriageRow({
+  item,
+  today,
+  onChange,
+}: {
+  item: TriageItem;
+  today: number;
+  onChange: (item: TriageItem) => void;
+}) {
   const isTask = item.kind === "gantt_task";
   // The note body beyond its first line (which is already the title).
   const detail = item.content?.trim().split(/\r?\n/).slice(1).join(" ").trim();
@@ -163,7 +180,57 @@ function TriageRow({ item, today }: { item: TriageItem; today: number }) {
       >
         {when(item, today)}
       </span>
+      {isTask && <ClaimButton item={item} onChange={onChange} />}
     </li>
+  );
+}
+
+/** "Claim" an unassigned Gantt task (assign it to ME and start it); click a claimed task's badge to unclaim it. */
+function ClaimButton({ item, onChange }: { item: TriageItem; onChange: (item: TriageItem) => void }) {
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const mine = item.assignee === ME;
+
+  async function patch(body: { assignee: string | null; status?: "in_progress" }) {
+    setSaving(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/tasks/${item.id.slice("task:".length)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const task: { assignee: string | null; status: NonNullable<TriageItem["status"]> } = await res.json();
+      onChange({ ...item, assignee: task.assignee, status: task.status });
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (item.assignee && !mine) {
+    return <span className="w-16 shrink-0 pt-0.5 text-right text-xs text-text-muted">👤 {item.assignee}</span>;
+  }
+  return (
+    <button
+      type="button"
+      disabled={saving}
+      onClick={() =>
+        patch(mine ? { assignee: null } : { assignee: ME, ...(item.status === "todo" ? { status: "in_progress" } : {}) })
+      }
+      title={error ? `Could not update the task (${error})` : mine ? "Claimed by you · click to unclaim" : "Claim this task"}
+      className={`w-16 shrink-0 rounded border px-1.5 py-px text-xs disabled:opacity-40 ${
+        error
+          ? "border-accent/60 text-accent"
+          : mine
+            ? "border-accent/60 bg-accent/15 text-accent hover:bg-accent/25"
+            : "border-border-default text-text-muted hover:border-border-light hover:text-text-primary"
+      }`}
+    >
+      {error ? "Retry" : mine ? `👤 ${ME}` : "Claim"}
+    </button>
   );
 }
 
@@ -182,7 +249,7 @@ function KindBadge({ isTask }: { isTask: boolean }) {
   );
 }
 
-function Tag({ className, children }: { className: string; children: string }) {
+export function Tag({ className, children }: { className: string; children: string }) {
   return (
     <span className={`rounded border px-1.5 py-px font-mono text-[10px] uppercase leading-4 ${className}`}>
       {children}

@@ -6,22 +6,27 @@ from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
 from typing import Any
 
-from fastapi import Depends, FastAPI
-from sqlalchemy import select
+from fastapi import Depends, FastAPI, HTTPException
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 import file_layer
 from database import get_db, init_db
-from models import Project, Task
+from history import set_source, utcnow
+from models import Project, Task, TimeLog
+import schemas
 from schemas import (
     AccessMode,
     CaptureRequest,
     CaptureResponse,
+    CheckInRequest,
+    CheckInResponse,
     GanttProject,
     GanttResponse,
     GanttTask,
     Priority,
     Status,
+    TaskUpdate,
     TriageItem,
     TriageKind,
     TriageRank,
@@ -171,6 +176,7 @@ def _triage_tasks(db: Session, today: date) -> list[tuple[tuple, TriageItem]]:
             project=code,
             priority=task.priority,
             status=task.status,
+            assignee=task.assignee,
             start_date=task.start_date,
             due_date=task.deadline,
         )
@@ -248,6 +254,84 @@ def triage(db: Session = Depends(get_db)) -> list[TriageItem]:
     ranked = _triage_tasks(db, today) + _triage_notes()
     ranked.sort(key=lambda pair: (pair[1].rank, pair[0]))
     return [item for _key, item in ranked]
+
+
+TASK_UPDATE_SOURCE = "desktop"
+
+
+@app.patch("/api/tasks/{task_id}")
+def update_task(task_id: int, request: TaskUpdate, db: Session = Depends(get_db)) -> schemas.Task:
+    """Claim or unclaim a task (`assignee`) and/or change its status. Unsent fields are left alone."""
+    task = db.get(Task, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail=f"Unknown task id: {task_id}")
+    set_source(db, TASK_UPDATE_SOURCE)
+    changes = request.model_dump(exclude_unset=True)
+    if "assignee" in changes:
+        task.assignee = changes["assignee"]
+    if "status" in changes and changes["status"] != task.status:
+        task.status = changes["status"]
+        task.completed_at = utcnow() if task.status == Status.DONE else None
+    db.commit()
+    return schemas.Task.model_validate(task, from_attributes=True)
+
+
+CHECKIN_SOURCE = "evening_checkin"
+# Time sheet rows logged against these (or no project at all) are overhead, not project work.
+OVERHEAD_CODES = {INBOX.lower(), "overhead"}
+
+
+def _timesheet_project(db: Session, code: str | None) -> Project | None:
+    """The project to log hours against, created if the code has no Gantt imported yet."""
+    if code is None or code.lower() in OVERHEAD_CODES:
+        return None
+    code = code.upper()
+    # Include soft-deleted projects: their code is still taken, and past hours still count.
+    project = db.scalars(
+        select(Project).where(func.upper(Project.code) == code).execution_options(include_deleted=True)
+    ).first()
+    if project is None:
+        project = Project(code=code, name=code)
+        db.add(project)
+        db.flush()
+    return project
+
+
+@app.post("/api/checkin")
+def checkin(request: CheckInRequest, db: Session = Depends(get_db)) -> CheckInResponse:
+    """Evening check-in: mark the day's finished tasks done and log hours, in one transaction."""
+    set_source(db, CHECKIN_SOURCE)
+    task_ids = list(dict.fromkeys(request.completed_task_ids))
+    tasks = db.scalars(select(Task).where(Task.id.in_(task_ids))).all()
+    missing = sorted(set(task_ids) - {task.id for task in tasks})
+    if missing:
+        raise HTTPException(status_code=404, detail=f"Unknown task ids: {missing}")
+
+    now = utcnow()
+    for task in tasks:
+        if task.status != Status.DONE:  # Re-submitting keeps the original completion time.
+            task.status = Status.DONE
+            task.completed_at = now
+
+    day = request.day or _today()
+    logs = []
+    for entry in request.time_entries:
+        project = _timesheet_project(db, entry.project)
+        logs.append(
+            TimeLog(
+                date=day,
+                project_id=project.id if project else None,
+                hours=entry.hours,
+                notes=entry.notes.strip(),
+            )
+        )
+    db.add_all(logs)
+    db.commit()
+    return CheckInResponse(
+        completed_task_ids=task_ids,
+        time_log_ids=[log.id for log in logs],
+        total_hours=sum(log.hours for log in logs),
+    )
 
 
 if __name__ == "__main__":

@@ -69,6 +69,26 @@ Don't bind to `0.0.0.0`: that would also expose the API on the office LAN.
 `created`. The response is `{"path": "<path relative to the notes dir>"}`, and the
 change is logged in `history` with source `android_app`.
 
+## Evening check-in API
+
+`POST /api/checkin` closes out the day in one transaction:
+
+```json
+{
+  "completed_task_ids": [12, 15],
+  "time_entries": [{"project": "C7801", "hours": 4, "notes": "Gelcoat"}, {"project": "Inbox", "hours": 0.5}]
+}
+```
+
+Each task is set to `done` with `completed_at` (tasks already done keep their original
+time), so it drops off `/api/triage`. Each time entry becomes a `TimeLog` row for
+`day` (optional, defaults to today); `hours` must be above 0 and at most 24. A project of
+`Inbox`, `Overhead` or `null` logs the time without a project, and a project code with
+no row yet (e.g. a project whose Gantt hasn't been imported) is created on the fly.
+Unknown task ids return 404 and nothing is saved. Changes are logged in `history`
+with source `evening_checkin`. The response is
+`{"completed_task_ids": [...], "time_log_ids": [...], "total_hours": 4.5}`.
+
 ## Gantt PDF parser
 
 `gantt_parser.extract_gantt_data(pdf_path)` reads a Gantt PDF export with PyMuPDF

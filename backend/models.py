@@ -74,6 +74,8 @@ class Task(Versioned, Base):
     rank: Mapped[float | None]
     is_gantt_task: Mapped[bool] = mapped_column(default=False, index=True)
     is_milestone: Mapped[bool] = mapped_column(default=False)
+    # Who is personally working on the task; None means nobody has claimed it.
+    assignee: Mapped[str | None] = mapped_column(String(64), default=None)
     created_at: Mapped[dt.datetime] = mapped_column(server_default=func.now())
     completed_at: Mapped[dt.datetime | None]
 
@@ -111,6 +113,26 @@ class Link(Versioned, Base):
 
     def __repr__(self) -> str:
         return f"Link({self.predecessor_id!r} -> {self.successor_id!r})"
+
+
+class TimeLog(Versioned, Base):
+    """Hours logged at the evening check-in. No project means Inbox/overhead time."""
+
+    __tablename__ = "time_logs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    date: Mapped[dt.date] = mapped_column(default=dt.date.today, index=True)
+    project_id: Mapped[int | None] = mapped_column(ForeignKey("projects.id"), index=True)
+    task_id: Mapped[int | None] = mapped_column(ForeignKey("tasks.id"), index=True)
+    hours: Mapped[float]
+    notes: Mapped[str] = mapped_column(default="")
+    created_at: Mapped[dt.datetime] = mapped_column(server_default=func.now())
+
+    project: Mapped[Project | None] = relationship()
+    task: Mapped[Task | None] = relationship()
+
+    def __repr__(self) -> str:
+        return f"TimeLog(id={self.id!r}, date={self.date!r}, hours={self.hours!r})"
 
 
 class HistoryRecord(Base):
