@@ -54,6 +54,21 @@ uvicorn main:app --host 100.x.y.z --port 8000
 
 Don't bind to `0.0.0.0`: that would also expose the API on the office LAN.
 
+## Capture API
+
+`POST /api/capture` saves a quick note from the Android app as a markdown file:
+
+```json
+{"content": "Check weld spec", "project": "C7801", "priority": "High"}
+```
+
+`project` defaults to `Inbox` and must be a plain code (letters, digits, `-`, `_`);
+`priority` is `Low`, `Normal`, `High` or `Urgent` (any case). The note is written to
+`<project>/Notes-in/Capture_<YYYYMMDD_HHMMSS>.md` (or `Inbox/Capture_<...>.md`) under
+`COPILOT_NOTES_DIR`, with front-matter `type: capture`, `project`, `priority` and
+`created`. The response is `{"path": "<path relative to the notes dir>"}`, and the
+change is logged in `history` with source `android_app`.
+
 ## Gantt PDF parser
 
 `gantt_parser.extract_gantt_data(pdf_path)` reads a Gantt PDF export with PyMuPDF

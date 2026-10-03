@@ -16,6 +16,10 @@ object CopilotColors {
     val TextSecondary = Color(0xFFC5D0D6)
     val TextMuted = Color(0xFF97A5AE)
     val Accent = Color(0xFFF2B544)
+    val ProjectC7801 = Color(0xFF6CB6EA)
+    val ProjectR5301 = Color(0xFFB7A3F2)
+    val ProjectP5002 = Color(0xFF56C8A8)
+    val ProjectNeutral = Color(0xFF6B7A84)
 }
 
 private val DarkColors = darkColorScheme(

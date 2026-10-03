@@ -7,7 +7,7 @@ notes and emails live as markdown files with YAML front-matter (see `file_layer`
 from datetime import date, datetime
 from enum import Enum
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class AccessMode(str, Enum):
@@ -110,6 +110,32 @@ class Capture(BaseModel):
     tags: list[str] = Field(default_factory=list)
     processed: bool = False
     created_at: datetime | None = None
+
+
+class CaptureRequest(BaseModel):
+    """A quick note from the Android capture screen (`POST /api/capture`)."""
+
+    content: str = Field(min_length=1)
+    # The project becomes a folder name, so only plain codes are allowed (no path separators).
+    project: str = Field(default="Inbox", pattern=r"^[A-Za-z0-9_-]+$", max_length=64)
+    priority: Priority = Priority.NORMAL
+
+    @field_validator("content")
+    @classmethod
+    def _not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("content must not be blank")
+        return value
+
+    @field_validator("priority", mode="before")
+    @classmethod
+    def _lowercase_priority(cls, value: object) -> object:
+        """The app sends display labels ("Low", "Normal", "High")."""
+        return value.lower() if isinstance(value, str) else value
+
+
+class CaptureResponse(BaseModel):
+    path: str = Field(description="Path of the new note relative to the notes directory")
 
 
 class Note(BaseModel):
