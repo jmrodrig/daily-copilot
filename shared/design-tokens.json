@@ -3,19 +3,24 @@
     "background": "#0C1216",
     "surface": {
       "raised": "#131B21",
-      "panel": "#0F171C"
+      "panel": "#0F171C",
+      "active": "#1A252D",
+      "hover": "#151F26"
     },
     "border": {
       "default": "#25323B",
-      "light": "#2F3E48"
+      "light": "#2F3E48",
+      "strong": "#34434D"
     },
     "text": {
       "primary": "#E8EEF1",
       "secondary": "#C5D0D6",
-      "muted": "#97A5AE"
+      "muted": "#97A5AE",
+      "onAccent": "#10161A"
     },
     "accent": {
-      "primary": "#F2B544"
+      "primary": "#F2B544",
+      "soft": "#F6C96A"
     },
     "project": {
       "c7801": "#6CB6EA",

@@ -4,6 +4,7 @@ Structured records (projects, tasks, links, captures, people) are stored in SQLi
 notes and emails live as markdown files with YAML front-matter (see `file_layer`).
 """
 
+import re
 from datetime import date, datetime
 from enum import Enum
 from typing import Any
@@ -140,6 +141,7 @@ class CaptureRequest(BaseModel):
     # The project becomes a folder name, so only plain codes are allowed (no path separators).
     project: str = Field(default="Inbox", pattern=r"^[A-Za-z0-9_-]+$", max_length=64)
     priority: Priority = Priority.NORMAL
+    source: str | None = Field(default=None, pattern=r"^[A-Za-z0-9 _-]+$", max_length=32, description='e.g. "verbal", "meeting"')
 
     @field_validator("content")
     @classmethod
@@ -294,6 +296,54 @@ class ChatRequest(BaseModel):
         if value[-1].role != ChatRole.USER or not value[-1].content.strip():
             raise ValueError("the last message must be a non-blank user message")
         return value
+
+
+class SavedPromptIn(BaseModel):
+    """`POST /api/prompts` and `PUT /api/prompts/{id}`: a slash command and the instruction it sends."""
+
+    command: str = Field(description='e.g. "/prep"; the leading slash is optional')
+    description: str = Field(default="", max_length=200, description="One line shown in the chat's command menu")
+    instruction: str = Field(min_length=1, description="What the agent is told to do when the command is used")
+
+    @field_validator("command")
+    @classmethod
+    def _normalise_command(cls, value: str) -> str:
+        command = "/" + value.strip().lstrip("/").lower()
+        if not re.fullmatch(r"/[a-z0-9][a-z0-9_-]{0,30}", command):
+            raise ValueError("command must be a slash and up to 31 letters, digits, '-' or '_', e.g. /prep")
+        return command
+
+    @field_validator("description")
+    @classmethod
+    def _strip_description(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("instruction")
+    @classmethod
+    def _instruction_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("instruction must not be blank")
+        return value.strip()
+
+
+class SavedPrompt(SavedPromptIn):
+    id: int
+    created_at: datetime | None = None
+
+
+class NoteSummary(BaseModel):
+    """One entry in the desktop page tree (`GET /api/notes`)."""
+
+    path: str = Field(description="Path relative to the notes directory")
+    title: str
+
+
+class NoteFile(BaseModel):
+    """`GET /api/notes/file`: a note as stored on disk."""
+
+    path: str
+    frontmatter: dict[str, Any] = Field(default_factory=dict)
+    content: str
 
 
 class ProposedEdit(BaseModel):

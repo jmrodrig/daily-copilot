@@ -11,9 +11,10 @@ from sqlalchemy.orm import Session
 
 import agent
 import file_layer
+import database
 from database import get_db, init_db
-from history import set_source, to_jsonable, utcnow
-from models import Project, Task, TimeLog
+from history import set_source, soft_delete, to_jsonable, utcnow
+from models import Project, SavedPrompt, Task, TimeLog
 import schemas
 from schemas import (
     AccessMode,
@@ -28,6 +29,8 @@ from schemas import (
     GanttProject,
     GanttResponse,
     GanttTask,
+    NoteFile,
+    NoteSummary,
     Priority,
     Status,
     TaskUpdate,
@@ -43,6 +46,8 @@ CAPTURE_SOURCE = "android_app"
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     init_db()
+    with database.SessionLocal() as db:
+        seed_prompts(db)
     yield
 
 
@@ -77,6 +82,8 @@ def capture(request: CaptureRequest) -> CaptureResponse:
         "priority": request.priority.value,
         "created": now.isoformat(),
     }
+    if request.source:
+        frontmatter["source"] = request.source.strip().lower()
     # The capture is the user's own new note, so it is written without an approval step.
     file_layer.write_note(path, request.content, frontmatter, AccessMode.WRITE_DIRECTLY, source=CAPTURE_SOURCE)
     return CaptureResponse(path=path)
@@ -337,6 +344,115 @@ def chat(request: ChatRequest) -> ChatResponse:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except agent.AgentError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+PROMPTS_SOURCE = "settings"
+DEFAULT_PROMPTS = (
+    schemas.SavedPromptIn(
+        command="/prep",
+        description="Draft a meeting prep brief",
+        instruction=(
+            "Prepare me for an upcoming meeting. Find the meeting note (ask me which meeting if it is not clear), "
+            "read the notes from the previous meeting of the same series and list which of its action items are "
+            "still open. Check the project's open and overdue tasks. Then draft a prep brief "
+            "in the meeting note: open items carried over, schedule risks, and questions to raise."
+        ),
+    ),
+)
+
+
+def seed_prompts(db: Session) -> None:
+    """Add the default slash commands to a database that has never had any (deleted ones count)."""
+    if db.scalars(select(SavedPrompt).execution_options(include_deleted=True).limit(1)).first() is None:
+        set_source(db, PROMPTS_SOURCE)
+        db.add_all(SavedPrompt(**prompt.model_dump()) for prompt in DEFAULT_PROMPTS)
+        db.commit()
+
+
+def _get_prompt(db: Session, prompt_id: int) -> SavedPrompt:
+    prompt = db.get(SavedPrompt, prompt_id)
+    if prompt is None or prompt.deleted_at is not None:
+        raise HTTPException(status_code=404, detail=f"Unknown prompt id: {prompt_id}")
+    return prompt
+
+
+def _check_command_free(db: Session, command: str, prompt_id: int | None = None) -> None:
+    clash = db.scalars(select(SavedPrompt).where(SavedPrompt.command == command, SavedPrompt.id != prompt_id)).first()
+    if clash is not None:
+        raise HTTPException(status_code=409, detail=f"{command} already exists")
+
+
+@app.get("/api/prompts")
+def list_prompts(db: Session = Depends(get_db)) -> list[schemas.SavedPrompt]:
+    """The saved slash commands, alphabetically."""
+    prompts = db.scalars(select(SavedPrompt).order_by(SavedPrompt.command)).all()
+    return [schemas.SavedPrompt.model_validate(p, from_attributes=True) for p in prompts]
+
+
+@app.post("/api/prompts", status_code=201)
+def create_prompt(request: schemas.SavedPromptIn, db: Session = Depends(get_db)) -> schemas.SavedPrompt:
+    _check_command_free(db, request.command)
+    set_source(db, PROMPTS_SOURCE)
+    prompt = SavedPrompt(**request.model_dump())
+    db.add(prompt)
+    db.commit()
+    return schemas.SavedPrompt.model_validate(prompt, from_attributes=True)
+
+
+@app.put("/api/prompts/{prompt_id}")
+def update_prompt(
+    prompt_id: int, request: schemas.SavedPromptIn, db: Session = Depends(get_db)
+) -> schemas.SavedPrompt:
+    prompt = _get_prompt(db, prompt_id)
+    _check_command_free(db, request.command, prompt_id)
+    set_source(db, PROMPTS_SOURCE)
+    for key, value in request.model_dump().items():
+        setattr(prompt, key, value)
+    db.commit()
+    return schemas.SavedPrompt.model_validate(prompt, from_attributes=True)
+
+
+@app.delete("/api/prompts/{prompt_id}", status_code=204)
+def delete_prompt(prompt_id: int, db: Session = Depends(get_db)) -> None:
+    """Soft-delete a slash command (it stays in `history`)."""
+    prompt = _get_prompt(db, prompt_id)
+    set_source(db, PROMPTS_SOURCE)
+    soft_delete(db, prompt)
+    db.commit()
+
+
+def _hidden(path: str) -> bool:
+    return any(part.startswith(".") for part in path.split("/"))
+
+
+@app.get("/api/notes")
+def list_notes() -> list[NoteSummary]:
+    """Every note with a display title, for the desktop page tree."""
+    summaries = []
+    for path in file_layer.list_notes("**/*.md"):
+        if _hidden(path):
+            continue
+        try:
+            note = file_layer.read_note(path)
+            title = str(note["frontmatter"].get("title") or "").strip() or _note_title(note["content"])
+        except (file_layer.FileLayerError, OSError, UnicodeDecodeError):
+            title = ""
+        if not title or title == "(empty note)":
+            title = path.rsplit("/", 1)[-1].removesuffix(".md")
+        summaries.append(NoteSummary(path=path, title=title))
+    return summaries
+
+
+@app.get("/api/notes/file")
+def get_note(path: str) -> NoteFile:
+    """One note with its front-matter, for the desktop note page."""
+    try:
+        note = file_layer.read_note(path)
+    except file_layer.FileLayerError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"No note at {path}") from exc
+    return NoteFile(path=note["path"], frontmatter=to_jsonable(note["frontmatter"]), content=note["content"])
 
 
 @app.post("/api/notes/apply-edit")

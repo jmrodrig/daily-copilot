@@ -67,8 +67,9 @@ Don't bind to `0.0.0.0`: that would also expose the API on the office LAN.
 `priority` is `Low`, `Normal`, `High` or `Urgent` (any case). The note is written to
 `<project>/Notes-in/Capture_<YYYYMMDD_HHMMSS>.md` (or `Inbox/Capture_<...>.md`) under
 `COPILOT_NOTES_DIR`, with front-matter `type: capture`, `project`, `priority` and
-`created`. The response is `{"path": "<path relative to the notes dir>"}`, and the
-change is logged in `history` with source `android_app`.
+`created`, plus `source` (e.g. `verbal`, `meeting`) if the request sends one. The
+response is `{"path": "<path relative to the notes dir>"}`, and the change is logged in
+`history` with source `android_app`.
 
 ## Evening check-in API
 
@@ -122,6 +123,36 @@ a new note) and `base_hash`, the SHA-256 of the note file when it was proposed.
 "new" note now exists) it returns 409 and writes nothing. The write is recorded in
 `history` with source `copilot_agent_approved`. Without `COPILOT_GEMINI_API_KEY`,
 `/api/chat` returns 503; a failing model call returns 502.
+
+## Saved prompts (slash commands)
+
+Saved prompts are routines the user triggers in the desktop chat by starting a message
+with their command, e.g. `/prep Friday design review`. They are `SavedPrompt` rows:
+
+```json
+{"command": "/prep", "description": "Draft a meeting prep brief", "instruction": "Prepare me for an upcoming meeting..."}
+```
+
+- `GET /api/prompts` lists them by command.
+- `POST /api/prompts` creates one (201); `PUT /api/prompts/{id}` replaces one.
+- `DELETE /api/prompts/{id}` soft-deletes one (204).
+
+`command` is lower-cased and gets a leading `/` if missing; it must be up to 31
+letters, digits, `-` or `_`. A command already used by another live prompt returns
+409. Changes are logged in `history` with source `settings`. On startup a database
+that has never had any prompts gets a default `/prep` for meeting prep.
+
+The prompt is expanded by the desktop app, not the server: the user message sent to
+`/api/chat` becomes `[Saved prompt /prep]`, the instruction, and `User input: ...` for
+any text after the command. The agent's system prompt tells it to follow such routines.
+
+## Notes API
+
+`GET /api/notes` lists every note (hidden folders skipped) as `{"path", "title"}` for
+the desktop page tree; the title is the front-matter `title`, else the first line of the
+content, else the file name. `GET /api/notes/file?path=<path>` returns one note as
+`{"path", "frontmatter", "content"}` (404 if missing, 400 for paths outside the notes
+directory).
 
 ## Gantt PDF parser
 
