@@ -18,8 +18,8 @@ A personal AI co-pilot designed to manage daily workflows against real project G
 - **Phase 1.5 — Version History:** **Complete**
 - **Phase 2 — Capture App:** **Complete**
 - **Phase 3 — Email Intake:** **Blocked (Waiting on IT)**
-- **Phase 4 — Desktop App Core:** **In Progress**
-- **Phase 5 — Triage Engine:** Pending
+- **Phase 4 — Desktop App Core:** **Complete**
+- **Phase 5 — Triage Engine:** **In Progress**
 - **Phase 6 — Evening Check-in:** Pending
 - **Phase 7 — Co-pilot Chat and Agent:** Pending
 - **Phase 8 — Meeting Prep Briefs:** Pending
