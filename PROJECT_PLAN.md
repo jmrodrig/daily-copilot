@@ -17,8 +17,8 @@ A personal AI co-pilot designed to manage daily workflows against real project G
 - **Phase 1 — Gantt Ingestion:** **Complete**
 - **Phase 1.5 — Version History:** **Complete**
 - **Phase 2 — Capture App:** **Complete**
-- **Phase 3 — Email Intake:** **In Progress**
-- **Phase 4 — Desktop App Core:** Pending
+- **Phase 3 — Email Intake:** **Blocked (Waiting on IT)**
+- **Phase 4 — Desktop App Core:** **In Progress**
 - **Phase 5 — Triage Engine:** Pending
 - **Phase 6 — Evening Check-in:** Pending
 - **Phase 7 — Co-pilot Chat and Agent:** Pending
