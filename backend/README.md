@@ -27,7 +27,8 @@ Settings are read from system environment variables and from `backend/.env`
 | `COPILOT_PORT`              | `8000`                   | Used by `python main.py`                          |
 | `COPILOT_OLLAMA_BASE_URL`   | `http://localhost:11434` | Local model endpoint                              |
 | `COPILOT_GANTT_MODEL`       | `gemini/gemini-3.1-pro-preview` | litellm model for the Gantt PDF parser     |
-| `COPILOT_GEMINI_API_KEY`    | unset                    | Needed by the Gantt parser; never hardcode or commit |
+| `COPILOT_CHAT_MODEL`        | `gemini/gemini-3.1-pro-preview` | litellm model for the Co-pilot chat agent  |
+| `COPILOT_GEMINI_API_KEY`    | unset                    | Needed by the Gantt parser and chat; never hardcode or commit |
 | `COPILOT_ANTHROPIC_API_KEY` | unset                    | Optional; never hardcode or commit                |
 
 To get started, copy `.env.example` to `.env` and fill in what you need. `.env` is git-ignored.
@@ -89,6 +90,39 @@ Unknown task ids return 404 and nothing is saved. Changes are logged in `history
 with source `evening_checkin`. The response is
 `{"completed_task_ids": [...], "time_log_ids": [...], "total_hours": 4.5}`.
 
+## Co-pilot chat API
+
+`POST /api/chat` runs one turn of the Co-pilot agent (`agent.py`). The server keeps no
+chat state, so the client sends the whole conversation, ending with a user message:
+
+```json
+{
+  "messages": [{"role": "user", "content": "What is currently overdue on C7801?"}],
+  "access_mode": "ask_first"
+}
+```
+
+The model (`COPILOT_CHAT_MODEL`, via litellm) can call `search_notes`, `read_note`,
+`list_tasks` (tasks from SQLite with an `overdue` flag) and `write_note`, for up to
+8 rounds. `access_mode` decides what `write_note` does; it is enforced by `file_layer`:
+
+| Mode             | `write_note`                                                          |
+|------------------|-----------------------------------------------------------------------|
+| `read_only`      | Not offered to the model, and refused if it is called anyway          |
+| `ask_first`      | Nothing is written; the change is returned in `proposed_edits` (default) |
+| `write_directly` | Written at once and listed in `written_paths`; history source `copilot_agent` |
+
+The response is `{"reply": "<markdown>", "proposed_edits": [...], "written_paths": [...],
+"tool_calls": [{"name", "arguments", "ok"}]}`. Each proposed edit carries the new
+`content`/`frontmatter`, the current `previous_content`/`previous_frontmatter` (null for
+a new note) and `base_hash`, the SHA-256 of the note file when it was proposed.
+
+`POST /api/notes/apply-edit` commits an edit the user approved: send `path`, `content`,
+`frontmatter` and `base_hash` from the proposal. If the note changed since then (or a
+"new" note now exists) it returns 409 and writes nothing. The write is recorded in
+`history` with source `copilot_agent_approved`. Without `COPILOT_GEMINI_API_KEY`,
+`/api/chat` returns 503; a failing model call returns 502.
+
 ## Gantt PDF parser
 
 `gantt_parser.extract_gantt_data(pdf_path)` reads a Gantt PDF export with PyMuPDF
@@ -136,7 +170,7 @@ Every change is appended to the `history` table with a full JSON snapshot:
 | `entity_type` | `Project`, `Task`, `Link` or `Note`                            |
 | `entity_id`   | Row id, or the note path relative to `COPILOT_NOTES_DIR`       |
 | `action`      | `create`, `update`, `delete` or `rename` (notes only)          |
-| `source`      | Who made the change: `manual` (default), `cli_import`, `gemini`, ... |
+| `source`      | Who made the change: `manual` (default), `cli_import`, `copilot_agent`, ... |
 | `timestamp`   | UTC                                                            |
 | `snapshot`    | The entity's full state after the change (before it, for deletes) |
 

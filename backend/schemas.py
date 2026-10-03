@@ -6,6 +6,7 @@ notes and emails live as markdown files with YAML front-matter (see `file_layer`
 
 from datetime import date, datetime
 from enum import Enum
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -269,3 +270,69 @@ class Email(BaseModel):
     priority: Priority = Priority.NORMAL
     attachments: list[str] = Field(default_factory=list)
     body: str = ""
+
+
+class ChatRole(str, Enum):
+    USER = "user"
+    ASSISTANT = "assistant"
+
+
+class ChatMessage(BaseModel):
+    role: ChatRole
+    content: str
+
+
+class ChatRequest(BaseModel):
+    """`POST /api/chat`: the whole conversation so far (the server keeps no chat state)."""
+
+    messages: list[ChatMessage] = Field(min_length=1)
+    access_mode: AccessMode = AccessMode.ASK_FIRST
+
+    @field_validator("messages")
+    @classmethod
+    def _ends_with_user(cls, value: list[ChatMessage]) -> list[ChatMessage]:
+        if value[-1].role != ChatRole.USER or not value[-1].content.strip():
+            raise ValueError("the last message must be a non-blank user message")
+        return value
+
+
+class ProposedEdit(BaseModel):
+    """A note write the agent wanted to make in `ask_first` mode, waiting for the user's approval."""
+
+    path: str = Field(description="Path relative to the notes directory")
+    content: str
+    frontmatter: dict[str, Any] = Field(default_factory=dict)
+    previous_content: str | None = Field(description="Current content on disk; None for a new note")
+    previous_frontmatter: dict[str, Any] | None = None
+    base_hash: str | None = Field(
+        description="SHA-256 of the note file when the edit was proposed; None for a new note"
+    )
+
+
+class ToolCallSummary(BaseModel):
+    """One tool call the agent made while answering, for display in the chat."""
+
+    name: str
+    arguments: dict[str, Any]
+    ok: bool
+
+
+class ChatResponse(BaseModel):
+    reply: str
+    proposed_edits: list[ProposedEdit] = Field(default_factory=list)
+    written_paths: list[str] = Field(default_factory=list, description="Notes written (write_directly mode)")
+    tool_calls: list[ToolCallSummary] = Field(default_factory=list)
+
+
+class ApplyEditRequest(BaseModel):
+    """`POST /api/notes/apply-edit`: commit a `ProposedEdit` the user approved."""
+
+    path: str
+    content: str
+    frontmatter: dict[str, Any] = Field(default_factory=dict)
+    base_hash: str | None = None
+
+
+class ApplyEditResponse(BaseModel):
+    path: str
+    written: bool = Field(description="False if the note already had exactly this text")

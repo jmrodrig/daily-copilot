@@ -9,6 +9,7 @@ Rows are never removed: `Versioned` models are soft-deleted by setting `deleted_
 
 import datetime as dt
 import enum
+import re
 
 from sqlalchemy import JSON, Enum, ForeignKey, String, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -25,6 +26,10 @@ def _str_enum(enum_cls: type[enum.Enum]) -> Enum:
         native_enum=False,
         length=32,
     )
+
+
+# `cli_import` writes "Complete: 40%" into the description; older imports wrote " |  | 40%".
+_PERCENT_RE = re.compile(r"(?:Complete:|\|)\s*(\d+(?:\.\d+)?)%")
 
 
 class Versioned:
@@ -87,6 +92,13 @@ class Task(Versioned, Base):
     predecessor_links: Mapped[list["Link"]] = relationship(
         foreign_keys="Link.successor_id", back_populates="successor", passive_deletes="all"
     )
+
+    @property
+    def completion_percent(self) -> float:
+        if self.status == Status.DONE:
+            return 100.0
+        match = _PERCENT_RE.search(self.description or "")
+        return min(float(match.group(1)), 100.0) if match else 0.0
 
     def __repr__(self) -> str:
         return f"Task(id={self.id!r}, title={self.title!r})"

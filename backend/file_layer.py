@@ -13,6 +13,7 @@ so an overwritten or deleted note can always be recovered.
 """
 
 import functools
+import hashlib
 import os
 import re
 import tempfile
@@ -180,6 +181,12 @@ def read_note(filepath: str | Path, *, notes_dir: str | Path | None = None) -> d
         "frontmatter": frontmatter,
         "content": content,
     }
+
+
+def note_hash(filepath: str | Path, *, notes_dir: str | Path | None = None) -> str | None:
+    """SHA-256 of the note file's bytes, or None if it does not exist (to detect concurrent edits)."""
+    path = resolve_note_path(filepath, notes_dir)
+    return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
 
 
 def list_notes(pattern: str, *, notes_dir: str | Path | None = None) -> list[str]:

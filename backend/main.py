@@ -1,6 +1,5 @@
 """FastAPI entry point. Run with `uvicorn main:app --reload` from backend/."""
 
-import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
@@ -10,15 +9,20 @@ from fastapi import Depends, FastAPI, HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+import agent
 import file_layer
 from database import get_db, init_db
-from history import set_source, utcnow
+from history import set_source, to_jsonable, utcnow
 from models import Project, Task, TimeLog
 import schemas
 from schemas import (
     AccessMode,
+    ApplyEditRequest,
+    ApplyEditResponse,
     CaptureRequest,
     CaptureResponse,
+    ChatRequest,
+    ChatResponse,
     CheckInRequest,
     CheckInResponse,
     GanttProject,
@@ -77,17 +81,6 @@ def capture(request: CaptureRequest) -> CaptureResponse:
     return CaptureResponse(path=path)
 
 
-# `cli_import` writes "Complete: 40%" into the description; older imports wrote " |  | 40%".
-_PERCENT_RE = re.compile(r"(?:Complete:|\|)\s*(\d+(?:\.\d+)?)%")
-
-
-def _completion_percent(task: Task) -> float:
-    if task.status == Status.DONE:
-        return 100.0
-    match = _PERCENT_RE.search(task.description or "")
-    return min(float(match.group(1)), 100.0) if match else 0.0
-
-
 def _gantt_sort_key(task: Task) -> tuple[bool, date, int]:
     return (task.start_date is None, task.start_date or date.min, task.id)
 
@@ -115,7 +108,7 @@ def gantt(db: Session = Depends(get_db)) -> GanttResponse:
                         name=task.title,
                         start_date=task.start_date,
                         end_date=task.deadline,
-                        completion_percent=_completion_percent(task),
+                        completion_percent=task.completion_percent,
                         status=task.status,
                         is_milestone=task.is_milestone,
                     )
@@ -166,7 +159,7 @@ def _triage_tasks(db: Session, today: date) -> list[tuple[tuple, TriageItem]]:
     ).all()
     items = []
     for task, code in rows:
-        if _completion_percent(task) >= 100:
+        if task.completion_percent >= 100:
             continue  # Finished in the imported Gantt even if its status was never set to done.
         item = TriageItem(
             id=f"task:{task.id}",
@@ -332,6 +325,45 @@ def checkin(request: CheckInRequest, db: Session = Depends(get_db)) -> CheckInRe
         time_log_ids=[log.id for log in logs],
         total_hours=sum(log.hours for log in logs),
     )
+
+
+@app.post("/api/chat")
+def chat(request: ChatRequest) -> ChatResponse:
+    """One Co-pilot turn: the agent answers the last user message, honouring `access_mode`."""
+    try:
+        return agent.run_chat(request.messages, request.access_mode)
+    except agent.AgentNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except agent.AgentError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.post("/api/notes/apply-edit")
+def apply_edit(request: ApplyEditRequest) -> ApplyEditResponse:
+    """Commit an `ask_first` edit the user approved, unless the note changed since it was proposed."""
+    try:
+        if file_layer.note_hash(request.path) != request.base_hash:
+            raise HTTPException(
+                status_code=409, detail=f"{request.path} changed since the edit was proposed; ask the Co-pilot again"
+            )
+        frontmatter = request.frontmatter
+        if request.base_hash is not None:
+            current = file_layer.read_note(request.path)["frontmatter"]
+            # Unchanged front-matter came back through JSON (dates as strings); keep the original types.
+            if to_jsonable(current) == frontmatter:
+                frontmatter = current
+        written = file_layer.write_note(
+            request.path,
+            request.content,
+            frontmatter,
+            AccessMode.ASK_FIRST,
+            approved=True,
+            source=agent.APPROVED_SOURCE,
+        )
+    except file_layer.FileLayerError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    path = file_layer.resolve_note_path(request.path).relative_to(file_layer.notes_root()).as_posix()
+    return ApplyEditResponse(path=path, written=written)
 
 
 if __name__ == "__main__":
