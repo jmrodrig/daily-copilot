@@ -21,8 +21,8 @@ A personal AI co-pilot designed to manage daily workflows against real project G
 - **Phase 4 — Desktop App Core:** **Complete**
 - **Phase 5 — Triage Engine:** **Complete**
 - **Phase 6 — Evening Check-in:** **Complete**
-- **Phase 7 — Co-pilot Chat and Agent:** **In Progress**
-- **Phase 8 — Meeting Prep Briefs:** Pending
+- **Phase 7 — Co-pilot Chat and Agent:** **Complete**
+- **Phase 8 — UI Realignment & Slash Commands:** **In Progress**
 - **Phase 9 — Weekly Rollup:** Pending
 - **Phase 10 — Annotations & Bulk Ingestion:** Pending
 - **Phase 11 — Android App Expansions:** Pending (Morning brief, Triage, and Evening check-in on the mobile app)
@@ -37,5 +37,5 @@ A personal AI co-pilot designed to manage daily workflows against real project G
 - **Meeting Notes:** Future evolution from manual entry to automated listening mode remains to be investigated.
 
 ## 5. Deviations Log
-- **2026-10-02:** *Email Intake (Phase 3) modified.* Switched from dedicated email forwarding/IMAP polling to a local automation that saves emails directly to a markdown drop folder. (Decision 6 updated).
+- **2026-10-03:** *Meeting Prep (Phase 8) Architecture Shift.* Scrapped the bespoke Meeting Prep UI route. Meeting Prep will instead be handled natively by the Co-pilot Agent using a new Saved Prompts (Slash Commands) feature. The phase was redirected to focus on this, alongside a massive UI overhaul to align with the provided Figma mockups.\n- **2026-10-02:** *Email Intake (Phase 3) modified.* Switched from dedicated email forwarding/IMAP polling to a local automation that saves emails directly to a markdown drop folder. (Decision 6 updated).
 - **2026-10-02:** *Version History Integration added.* Inserted Phase 1.5 to implement a unified SQLite history table capturing full snapshots and actor sources for all DB and file changes. Confirmed the use of application-level soft deletes (replacing DB cascades) and explicit file rename actions to guarantee history coverage.
