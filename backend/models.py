@@ -147,6 +147,25 @@ class TimeLog(Versioned, Base):
         return f"TimeLog(id={self.id!r}, date={self.date!r}, hours={self.hours!r})"
 
 
+class SavedPrompt(Versioned, Base):
+    """A slash command for the Co-pilot chat: typing `command` sends `instruction` to the agent.
+
+    `command` is unique among live prompts only (checked by the API), so a deleted
+    command can be created again.
+    """
+
+    __tablename__ = "saved_prompts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    command: Mapped[str] = mapped_column(String(32), index=True)
+    description: Mapped[str] = mapped_column(default="")
+    instruction: Mapped[str]
+    created_at: Mapped[dt.datetime] = mapped_column(server_default=func.now())
+
+    def __repr__(self) -> str:
+        return f"SavedPrompt(id={self.id!r}, command={self.command!r})"
+
+
 class HistoryRecord(Base):
     """One entry in the append-only audit trail: the full state of an entity after a change.
 

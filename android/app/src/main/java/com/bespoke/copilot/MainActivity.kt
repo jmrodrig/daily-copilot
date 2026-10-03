@@ -3,22 +3,25 @@ package com.bespoke.copilot
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.material3.Button
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.List
+import androidx.compose.material.icons.outlined.CheckCircle
+import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SegmentedButton
-import androidx.compose.material3.SegmentedButtonDefaults
-import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Snackbar
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -30,22 +33,25 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.bespoke.copilot.ui.CaptureScreen
+import com.bespoke.copilot.ui.CheckInScreen
+import com.bespoke.copilot.ui.TodayScreen
 import com.bespoke.copilot.ui.theme.CopilotColors
 import com.bespoke.copilot.ui.theme.CopilotTheme
 import kotlinx.coroutines.launch
 
-private val PROJECTS = listOf("C7801", "R5301", "P5002", "Inbox")
-private val PRIORITIES = listOf("Low", "Normal", "High")
-
-private fun projectColor(project: String): Color = when (project) {
-    "C7801" -> CopilotColors.ProjectC7801
-    "R5301" -> CopilotColors.ProjectR5301
-    "P5002" -> CopilotColors.ProjectP5002
-    else -> CopilotColors.ProjectNeutral
+private enum class Tab(val label: String, val icon: ImageVector) {
+    CAPTURE("Capture", Icons.Outlined.Edit),
+    TODAY("Today", Icons.AutoMirrored.Outlined.List),
+    CHECK_IN("Check-in", Icons.Outlined.CheckCircle),
 }
 
 class MainActivity : ComponentActivity() {
@@ -53,37 +59,22 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         setContent {
             CopilotTheme {
-                CaptureScreen()
+                CopilotApp()
             }
         }
     }
 }
 
 @Composable
-fun CaptureScreen() {
-    var content by rememberSaveable { mutableStateOf("") }
-    var project by rememberSaveable { mutableStateOf("Inbox") }
-    var priority by rememberSaveable { mutableStateOf("Normal") }
-    var saving by remember { mutableStateOf(false) }
-    var lastSaveFailed by remember { mutableStateOf(false) }
+fun CopilotApp() {
+    var tab by rememberSaveable { mutableStateOf(Tab.CAPTURE) }
+    var lastMessageIsError by remember { mutableStateOf(false) }
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
 
-    fun save() {
-        saving = true
-        scope.launch {
-            val result = NetworkClient.saveCapture(content, project, priority)
-            saving = false
-            lastSaveFailed = result.isFailure
-            result
-                .onSuccess { path ->
-                    content = ""
-                    snackbarHostState.showSnackbar("Saved to $path")
-                }
-                .onFailure { error ->
-                    snackbarHostState.showSnackbar("Save failed: ${error.message ?: "unknown error"}")
-                }
-        }
+    val showMessage: (String, Boolean) -> Unit = { message, isError ->
+        lastMessageIsError = isError
+        scope.launch { snackbarHostState.showSnackbar(message) }
     }
 
     Scaffold(
@@ -92,123 +83,71 @@ fun CaptureScreen() {
             SnackbarHost(snackbarHostState) { data ->
                 Snackbar(
                     snackbarData = data,
-                    containerColor = CopilotColors.SurfaceRaised,
-                    contentColor = if (lastSaveFailed) MaterialTheme.colorScheme.error else CopilotColors.TextPrimary,
+                    containerColor = CopilotColors.SurfaceActive,
+                    contentColor = if (lastMessageIsError) MaterialTheme.colorScheme.error else CopilotColors.TextPrimary,
                 )
             }
         },
+        bottomBar = { BottomBar(selected = tab, onSelect = { tab = it }) },
     ) { innerPadding ->
-        Column(
-            modifier = Modifier
+        Box(
+            Modifier
                 .fillMaxSize()
-                .padding(innerPadding)
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
+                .padding(innerPadding),
         ) {
-            Text(
-                text = "Daily Co-Pilot Capture",
-                style = MaterialTheme.typography.headlineSmall,
-                color = MaterialTheme.colorScheme.onBackground,
-            )
-
-            OutlinedTextField(
-                value = content,
-                onValueChange = { content = it },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f),
-                placeholder = { Text("Quick note…", color = CopilotColors.TextMuted) },
-                enabled = !saving,
-            )
-
-            Label("Project")
-            ChoiceRow(
-                options = PROJECTS,
-                selected = project,
-                onSelect = { project = it },
-                enabled = !saving,
-                selectedColor = projectColor(project),
-            )
-
-            Label("Priority")
-            ChoiceRow(
-                options = PRIORITIES,
-                selected = priority,
-                onSelect = { priority = it },
-                enabled = !saving,
-                selectedColor = CopilotColors.Accent,
-            )
-
-            Button(
-                onClick = { save() },
-                enabled = content.isNotBlank() && !saving,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(52.dp),
-            ) {
-                if (saving) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(20.dp),
-                        strokeWidth = 2.dp,
-                        color = CopilotColors.TextMuted,
-                    )
-                } else {
-                    Text("Save")
-                }
+            when (tab) {
+                Tab.CAPTURE -> CaptureScreen(showMessage)
+                Tab.TODAY -> TodayScreen()
+                Tab.CHECK_IN -> CheckInScreen(showMessage)
             }
-
-            Text(
-                text = "v${BuildConfig.VERSION_NAME} · ${BuildConfig.BACKEND_URL}",
-                style = MaterialTheme.typography.bodySmall,
-                color = CopilotColors.TextMuted,
-            )
         }
     }
 }
 
 @Composable
-private fun Label(text: String) {
-    Text(
-        text = text,
-        style = MaterialTheme.typography.labelLarge,
-        color = CopilotColors.TextSecondary,
-    )
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun ChoiceRow(
-    options: List<String>,
-    selected: String,
-    onSelect: (String) -> Unit,
-    enabled: Boolean,
-    selectedColor: Color,
-) {
-    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-        options.forEachIndexed { index, option ->
-            SegmentedButton(
-                selected = option == selected,
-                onClick = { onSelect(option) },
-                shape = SegmentedButtonDefaults.itemShape(index = index, count = options.size),
-                enabled = enabled,
-                colors = SegmentedButtonDefaults.colors(
-                    activeContainerColor = selectedColor.copy(alpha = 0.2f),
-                    activeContentColor = selectedColor,
-                    activeBorderColor = CopilotColors.BorderLight,
-                    inactiveContainerColor = CopilotColors.SurfacePanel,
-                    inactiveContentColor = CopilotColors.TextSecondary,
-                    inactiveBorderColor = CopilotColors.Border,
-                ),
-                label = { Text(option) },
-            )
+private fun BottomBar(selected: Tab, onSelect: (Tab) -> Unit) {
+    Column(Modifier.background(CopilotColors.Background)) {
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(1.dp)
+                .background(CopilotColors.Border),
+        )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .padding(vertical = 10.dp),
+            horizontalArrangement = Arrangement.SpaceEvenly,
+        ) {
+            Tab.entries.forEach { tab ->
+                val active = tab == selected
+                val color = if (active) CopilotColors.Accent else CopilotColors.TextMuted
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clickable(role = Role.Tab) { onSelect(tab) }
+                        .padding(vertical = 6.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Icon(tab.icon, contentDescription = null, tint = color, modifier = Modifier.size(24.dp))
+                    Text(
+                        tab.label,
+                        fontSize = 13.sp,
+                        fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                        color = color,
+                    )
+                }
+            }
         }
     }
 }
 
 @Preview
 @Composable
-private fun CaptureScreenPreview() {
+private fun CopilotAppPreview() {
     CopilotTheme {
-        CaptureScreen()
+        CopilotApp()
     }
 }

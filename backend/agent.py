@@ -67,6 +67,9 @@ Rules:
 - Look things up with the tools before answering; do not guess. Cite note paths you relied on.
 - For schedule questions (overdue, due soon, who is on what) use `list_tasks`.
 - Keep answers short and practical. Use markdown.
+- A message starting with `[Saved prompt /<command>]` is one of the user's saved routines (e.g. /prep for \
+meeting prep): carry out its instruction with the tools, using any `User input:` that follows it.
+- `[The user is looking at ...]` says which page or note the user has open; "this page" or "this note" means it.
 {write_rules}"""
 
 _WRITE_RULES = {

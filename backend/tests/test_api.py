@@ -578,3 +578,105 @@ def test_checkin_with_nothing_to_report(client, triage_today):
 
     assert response.status_code == 200
     assert response.json() == {"completed_task_ids": [], "time_log_ids": [], "total_hours": 0.0}
+
+
+# --- Saved prompts (slash commands) -------------------------------------------
+
+
+def test_default_prompts_are_seeded_once(client):
+    prompts = client.get("/api/prompts").json()
+    assert [p["command"] for p in prompts] == ["/prep"]
+    assert prompts[0]["instruction"]
+
+    client.delete(f"/api/prompts/{prompts[0]['id']}")
+    with database.SessionLocal() as db:
+        main.seed_prompts(db)
+    assert client.get("/api/prompts").json() == []
+
+
+def test_prompt_crud(client):
+    created = client.post(
+        "/api/prompts", json={"command": " Weekly ", "description": " Weekly report ", "instruction": " Summarise. "}
+    )
+    assert created.status_code == 201
+    prompt = created.json()
+    assert (prompt["command"], prompt["description"], prompt["instruction"]) == ("/weekly", "Weekly report", "Summarise.")
+    assert [p["command"] for p in client.get("/api/prompts").json()] == ["/prep", "/weekly"]
+
+    updated = client.put(f"/api/prompts/{prompt['id']}", json={"command": "/week", "instruction": "Summarise the week."})
+    assert updated.status_code == 200
+    assert updated.json()["command"] == "/week"
+    assert updated.json()["description"] == ""
+
+    assert client.delete(f"/api/prompts/{prompt['id']}").status_code == 204
+    assert [p["command"] for p in client.get("/api/prompts").json()] == ["/prep"]
+    assert client.delete(f"/api/prompts/{prompt['id']}").status_code == 404
+    assert client.put(f"/api/prompts/{prompt['id']}", json={"command": "/x", "instruction": "y"}).status_code == 404
+
+    with database.SessionLocal() as db:
+        actions = db.scalars(
+            select(HistoryRecord.action).where(
+                HistoryRecord.entity_type == "SavedPrompt", HistoryRecord.entity_id == str(prompt["id"])
+            )
+        ).all()
+    assert actions == ["create", "update", "delete"]
+
+
+def test_prompt_commands_are_unique_among_live_prompts(client):
+    first = client.post("/api/prompts", json={"command": "/brief", "instruction": "a"}).json()
+    assert client.post("/api/prompts", json={"command": "/BRIEF", "instruction": "b"}).status_code == 409
+    assert client.put(f"/api/prompts/{first['id']}", json={"command": "/prep", "instruction": "a"}).status_code == 409
+    # Saving a prompt under its own command is fine.
+    assert client.put(f"/api/prompts/{first['id']}", json={"command": "/brief", "instruction": "c"}).status_code == 200
+
+    client.delete(f"/api/prompts/{first['id']}")
+    assert client.post("/api/prompts", json={"command": "/brief", "instruction": "d"}).status_code == 201
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"command": "/prep me", "instruction": "x"},
+        {"command": "/", "instruction": "x"},
+        {"command": "/a" + "b" * 31, "instruction": "x"},
+        {"command": "/ok", "instruction": "   "},
+        {"command": "/ok"},
+    ],
+)
+def test_prompt_rejects_invalid_payloads(client, payload):
+    assert client.post("/api/prompts", json=payload).status_code == 422
+
+
+# --- Notes tree ----------------------------------------------------------------
+
+
+def test_list_notes_with_titles(client, notes_dir):
+    (notes_dir / "C7801" / "Meetings").mkdir(parents=True)
+    (notes_dir / "C7801" / "Meetings" / "review.md").write_text("---\ntitle: Design review\n---\nBody\n", encoding="utf-8")
+    (notes_dir / "C7801" / "plan.md").write_text("# Build plan\n\nText\n", encoding="utf-8")
+    (notes_dir / "Inbox").mkdir()
+    (notes_dir / "Inbox" / "empty.md").write_text("", encoding="utf-8")
+    (notes_dir / ".trash").mkdir()
+    (notes_dir / ".trash" / "old.md").write_text("old", encoding="utf-8")
+
+    assert client.get("/api/notes").json() == [
+        {"path": "C7801/Meetings/review.md", "title": "Design review"},
+        {"path": "C7801/plan.md", "title": "Build plan"},
+        {"path": "Inbox/empty.md", "title": "empty"},
+    ]
+
+
+def test_get_note_file(client, notes_dir):
+    (notes_dir / "a.md").write_bytes(b"---\ncreated: 2026-09-30\n---\nHello\n")
+    assert client.get("/api/notes/file", params={"path": "a.md"}).json() == {
+        "path": "a.md",
+        "frontmatter": {"created": "2026-09-30"},
+        "content": "Hello\n",
+    }
+    assert client.get("/api/notes/file", params={"path": "missing.md"}).status_code == 404
+    assert client.get("/api/notes/file", params={"path": "../x.md"}).status_code == 400
+
+
+def test_capture_records_source(client, notes_dir):
+    path = client.post("/api/capture", json={"content": "Hi", "source": "Verbal"}).json()["path"]
+    assert file_layer.read_note(path)["frontmatter"]["source"] == "verbal"

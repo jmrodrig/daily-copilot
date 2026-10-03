@@ -103,20 +103,28 @@ export default function EveningCheckIn() {
 
   if (submit.state === "done") {
     return (
-      <div className="mx-auto mt-16 max-w-xl rounded-lg border border-accent/60 bg-surface-raised p-8 text-center">
+      <div className="mx-auto mt-16 max-w-xl rounded-xl border border-accent/60 bg-surface-raised p-8 text-center">
         <p className="mb-3 text-4xl">🎉</p>
         <h1 className="mb-2 text-2xl font-semibold">Day closed out</h1>
         <p className="text-text-secondary">
           {plural(submit.tasks, "task")} done · {submit.hours} h logged. Tomorrow's list is clean.
         </p>
-        <p className="mt-4 text-xs text-text-muted">Back to the Dashboard…</p>
+        <p className="mt-4 text-xs text-text-muted">Back to Today…</p>
       </div>
     );
   }
 
   return (
-    <div className="space-y-6">
-      <h1 className="text-2xl font-semibold">Evening Check-in</h1>
+    <div className="flex flex-col gap-5 px-9 py-7">
+      <header>
+        <div className="font-mono text-xs tracking-[0.06em] text-text-muted">
+          {new Date().toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" }).toUpperCase()}
+        </div>
+        <h1 className="mt-1 text-[28px] font-semibold">Evening check-in</h1>
+        <div className="mt-1 text-[13px] text-text-muted">
+          Tick what got done. The rest carries into tomorrow's ranking.
+        </div>
+      </header>
       <div className="grid max-w-6xl gap-6 lg:grid-cols-2">
         <section>
           <h2 className="mb-3 flex items-center justify-between text-xs font-medium uppercase tracking-wider text-text-muted">

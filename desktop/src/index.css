@@ -17,6 +17,37 @@ body {
   @apply bg-background font-sans text-text-primary antialiased;
 }
 
+/* Shared controls, as in docs/mockups/Main.dc.html. */
+@layer components {
+  .btn {
+    @apply inline-flex min-h-10 items-center justify-center gap-2 rounded-lg border border-border-strong bg-transparent px-3.5 text-[13px] font-medium text-text-primary hover:bg-surface-raised disabled:cursor-not-allowed disabled:opacity-40;
+  }
+  .btn-primary {
+    @apply inline-flex min-h-10 items-center justify-center rounded-lg bg-accent px-4 text-[13px] font-semibold text-text-onAccent hover:bg-accent-soft disabled:cursor-not-allowed disabled:opacity-40;
+  }
+  .chip {
+    @apply inline-flex items-center gap-1.5 whitespace-nowrap rounded-full border border-border-light px-2.5 py-[3px] text-xs text-text-secondary;
+  }
+  .panel {
+    @apply rounded-xl border border-border-default bg-surface-raised px-[22px] py-5;
+  }
+  .seg {
+    @apply min-h-9 rounded-full border border-border-strong bg-surface-panel px-3.5 text-[13px] text-text-secondary hover:text-text-primary;
+  }
+  .seg-on {
+    @apply min-h-9 rounded-full border border-accent bg-accent/[0.16] px-3.5 text-[13px] font-semibold text-accent-soft;
+  }
+  .field {
+    @apply w-full rounded-lg border border-border-light bg-surface-panel px-3 py-2.5 text-sm text-text-primary placeholder:text-[#8797A1] focus:border-accent/70 focus:outline-none;
+  }
+}
+
+/* Thin scrollbars, as in the mockups. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #2f3e48 transparent;
+}
+
 /* Co-pilot chat replies (rendered markdown). */
 .markdown > * + * {
   @apply mt-2;

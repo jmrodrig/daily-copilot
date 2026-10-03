@@ -1,6 +1,10 @@
-import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import Markdown from "react-markdown";
+import { Link, useLocation, type Location } from "react-router-dom";
 import remarkGfm from "remark-gfm";
+
+import { errorDetail, getJson, message, PROMPTS_CHANGED, type SavedPrompt } from "../lib/api";
+import { IconButton } from "./Sidebar";
 
 // Shapes of POST /api/chat and POST /api/notes/apply-edit (see ChatResponse etc. in backend/schemas.py).
 type AccessMode = "read_only" | "ask_first" | "write_directly";
@@ -23,8 +27,10 @@ type EditStatus =
   | { state: "rejected" }
   | { state: "error"; message: string };
 type Edit = ProposedEdit & { status: EditStatus };
+/** A saved prompt used at the start of a message, e.g. "/prep Friday design review". */
+type UsedPrompt = { command: string; instruction: string; rest: string };
 type Entry =
-  | { role: "user"; content: string }
+  | { role: "user"; content: string; prompt: UsedPrompt | null; context: string | null }
   | { role: "assistant"; content: string; edits: Edit[]; written: string[]; toolCalls: ToolCall[] };
 
 const MODES: { value: AccessMode; label: string }[] = [
@@ -34,52 +40,132 @@ const MODES: { value: AccessMode; label: string }[] = [
 ];
 const MODE_KEY = "copilot.accessMode";
 const CONTEXT_LINES = 3;
+const COMMAND_RE = /^(\/[a-z0-9][a-z0-9_-]*)(?:\s+([\s\S]*))?$/i;
 
 function storedMode(): AccessMode {
   const value = localStorage.getItem(MODE_KEY);
   return MODES.some((m) => m.value === value) ? (value as AccessMode) : "ask_first";
 }
 
-async function errorDetail(res: Response): Promise<string> {
-  const body = await res.json().catch(() => null);
-  return typeof body?.detail === "string" ? body.detail : `HTTP ${res.status}`;
+/** What the chat shows as its context, and the hint sent to the model with each question. */
+function pageContext(location: Location): { label: string; hint: string | null } {
+  const { pathname } = location;
+  if (pathname === "/") return { label: "Today", hint: "the Today page (the day's schedule)" };
+  if (pathname === "/note") {
+    const path = new URLSearchParams(location.search).get("path") ?? "";
+    const name = path.split("/").pop()?.replace(/\.md$/i, "") || "Note";
+    return { label: name, hint: path ? `the note ${path}` : null };
+  }
+  if (pathname.startsWith("/plan/")) {
+    const code = decodeURIComponent(pathname.slice("/plan/".length));
+    return { label: `${code} plan`, hint: `the ${code} Gantt plan` };
+  }
+  const labels: Record<string, string> = {
+    "/tasks": "All tasks",
+    "/check-in": "Evening check-in",
+    "/settings": "Settings",
+    "/emails": "Forwarded emails",
+    "/graph": "Notes graph",
+    "/people": "People",
+  };
+  return { label: labels[pathname] ?? "Wiki", hint: null };
 }
 
-/** What the model sees of an assistant turn: its reply plus what the user did with its proposed edits. */
+/** What the model sees of a turn: saved prompts expanded, plus what the user did with proposed edits. */
 function historyContent(entry: Entry): string {
-  if (entry.role === "user") return entry.content;
+  if (entry.role === "user") {
+    const parts = [];
+    if (entry.context) parts.push(`[The user is looking at ${entry.context}]`);
+    if (entry.prompt) {
+      parts.push(`[Saved prompt ${entry.prompt.command}]\n${entry.prompt.instruction}`);
+      if (entry.prompt.rest) parts.push(`User input: ${entry.prompt.rest}`);
+    } else {
+      parts.push(entry.content);
+    }
+    return parts.join("\n\n");
+  }
   const outcomes = entry.edits
     .filter((e) => e.status.state === "applied" || e.status.state === "rejected")
     .map((e) => `[The user ${e.status.state === "applied" ? "approved and saved" : "rejected"} the edit to ${e.path}]`);
   return [entry.content, ...outcomes].join("\n\n");
 }
 
-export default function CopilotChat({ open, onClose }: { open: boolean; onClose: () => void }) {
+export default function CopilotChat({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
   const [entries, setEntries] = useState<Entry[]>([]);
   const [input, setInput] = useState("");
   const [mode, setMode] = useState<AccessMode>(storedMode);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [model, setModel] = useState<string | null>(null);
+  const [prompts, setPrompts] = useState<SavedPrompt[]>([]);
+  const [menuIndex, setMenuIndex] = useState(0);
+  const [menuDismissed, setMenuDismissed] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const location = useLocation();
+  const context = pageContext(location);
 
   useEffect(() => {
-    fetch("/health").then(res => res.json()).then(data => setModel(data.chat_model)).catch(() => {});
+    getJson<{ chat_model?: string }>("/health")
+      .then((data) => setModel(data.chat_model ?? null))
+      .catch(() => {});
   }, []);
 
-  useEffect(() => { localStorage.setItem(MODE_KEY, mode); }, [mode]);
-  useEffect(() => { bottomRef.current?.scrollIntoView({ block: "end" }); }, [entries, sending]);
+  useEffect(() => {
+    const load = () =>
+      getJson<SavedPrompt[]>("/api/prompts")
+        .then(setPrompts)
+        .catch(() => {});
+    load();
+    window.addEventListener(PROMPTS_CHANGED, load);
+    return () => window.removeEventListener(PROMPTS_CHANGED, load);
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem(MODE_KEY, mode);
+  }, [mode]);
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ block: "end" });
+  }, [entries, sending]);
   useEffect(() => {
     if (open) inputRef.current?.focus();
   }, [open]);
 
+  // The command menu is open while the input is a lone "/word" (no space yet).
+  const menuItems = useMemo(() => {
+    if (menuDismissed || !/^\/\S*$/.test(input)) return [];
+    const typed = input.toLowerCase();
+    return prompts.filter((p) => p.command.startsWith(typed));
+  }, [input, prompts, menuDismissed]);
+  const highlighted = Math.min(menuIndex, Math.max(menuItems.length - 1, 0));
+  const multiline = input.includes("\n");
+
+  function changeInput(value: string) {
+    setInput(value);
+    setMenuIndex(0);
+    if (!value.startsWith("/")) setMenuDismissed(false);
+  }
+
+  function pickCommand(prompt: SavedPrompt) {
+    setInput(`${prompt.command} `);
+    setMenuDismissed(true);
+    inputRef.current?.focus();
+  }
+
+  /** The saved prompt a message starts with, if any. */
+  function usedPrompt(text: string): UsedPrompt | null {
+    const match = COMMAND_RE.exec(text);
+    const prompt = match && prompts.find((p) => p.command === match[1].toLowerCase());
+    return prompt ? { command: prompt.command, instruction: prompt.instruction, rest: (match[2] ?? "").trim() } : null;
+  }
+
   async function send() {
     const text = input.trim();
     if (!text || sending) return;
-    const next: Entry[] = [...entries, { role: "user", content: text }];
+    const next: Entry[] = [...entries, { role: "user", content: text, prompt: usedPrompt(text), context: context.hint }];
     setEntries(next);
     setInput("");
+    setMenuDismissed(false);
     setError(null);
     setSending(true);
     try {
@@ -107,7 +193,7 @@ export default function CopilotChat({ open, onClose }: { open: boolean; onClose:
       // Put the question back so it can be retried without two user turns in a row.
       setEntries(entries);
       setInput(text);
-      setError(err instanceof Error ? err.message : String(err));
+      setError(message(err));
     } finally {
       setSending(false);
     }
@@ -139,84 +225,135 @@ export default function CopilotChat({ open, onClose }: { open: boolean; onClose:
       if (!res.ok) throw new Error(await errorDetail(res));
       setEditStatus(entryIndex, edit.path, { state: "applied" });
     } catch (err: unknown) {
-      setEditStatus(entryIndex, edit.path, { state: "error", message: err instanceof Error ? err.message : String(err) });
+      setEditStatus(entryIndex, edit.path, { state: "error", message: message(err) });
     }
   }
 
   function handleKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
+    if (menuItems.length > 0) {
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        const step = e.key === "ArrowDown" ? 1 : -1;
+        setMenuIndex((highlighted + step + menuItems.length) % menuItems.length);
+        return;
+      }
+      if (e.key === "Enter" || e.key === "Tab") {
+        e.preventDefault();
+        pickCommand(menuItems[highlighted]);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setMenuDismissed(true);
+        return;
+      }
+    }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       send();
     }
   }
 
+  if (!open) {
+    return (
+      <aside
+        aria-label="Ask the knowledge base"
+        className="flex w-16 shrink-0 flex-col items-center border-l border-border-default bg-surface-panel py-3.5"
+      >
+        <IconButton label="Expand chat" onClick={() => onOpenChange(true)} direction="left" />
+      </aside>
+    );
+  }
+
   return (
     <aside
-      className={`w-[30rem] shrink-0 flex-col border-l border-border-default bg-surface-panel ${open ? "flex" : "hidden"}`}
-      aria-label="Co-pilot chat"
+      aria-label="Ask the knowledge base"
+      className="flex w-[320px] shrink-0 flex-col border-l border-border-default bg-surface-panel"
     >
-      <header className="flex h-14 shrink-0 items-center gap-2 border-b border-border-default px-4">
-        <span className="flex-1 text-sm font-semibold tracking-wide">
-          Co-pilot
-          {model && <span className="ml-2 font-mono text-[10px] font-normal text-text-muted">{model.split("/").pop()}</span>}
-        </span>
-        <select
-          value={mode}
-          onChange={(e) => setMode(e.target.value as AccessMode)}
-          className="rounded border border-border-light bg-surface-raised px-2 py-1 text-xs"
-          aria-label="Access mode"
-          title="What the Co-pilot may do with your notes"
-        >
-          {MODES.map(({ value, label }) => (
-            <option key={value} value={value}>
-              {label}
-            </option>
-          ))}
-        </select>
-        <button
-          type="button"
-          onClick={() => {
-            setEntries([]);
-            setError(null);
-          }}
-          disabled={sending || entries.length === 0}
-          className="rounded px-2 py-1 text-xs text-text-muted hover:bg-surface-raised hover:text-text-primary disabled:opacity-40"
-        >
-          Clear
-        </button>
-        <button
-          type="button"
-          onClick={onClose}
-          className="rounded px-2 py-1 text-text-muted hover:bg-surface-raised hover:text-text-primary"
-          aria-label="Close chat"
-        >
-          ×
-        </button>
-      </header>
+      <div className="flex items-center justify-between pb-2.5 pl-5 pr-3 pt-3.5">
+        <h2 className="text-base font-semibold">Ask the knowledge base</h2>
+        <IconButton label="Collapse chat" onClick={() => onOpenChange(false)} direction="right" />
+      </div>
 
-      <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4">
+      <div className="flex flex-col gap-2.5 px-5 pb-2.5">
+        <div className="flex items-center gap-2">
+          <span className="btn min-h-[34px] cursor-default hover:bg-transparent" title={model ?? undefined}>
+            <span className={`h-2 w-2 rounded-full ${model ? "bg-project-p5002" : "bg-project-neutral"}`} />
+            {model ? model.split("/").pop() : "Model"}
+          </span>
+          <button
+            type="button"
+            onClick={() => {
+              setEntries([]);
+              setError(null);
+            }}
+            disabled={sending || entries.length === 0}
+            className="ml-auto rounded-md px-2 py-1 text-xs text-text-muted hover:bg-surface-raised hover:text-text-primary disabled:opacity-40"
+          >
+            Clear
+          </button>
+        </div>
+        <div className="flex flex-wrap gap-1.5" role="group" aria-label="Access to notes">
+          {MODES.map(({ value, label }) => (
+            <button
+              key={value}
+              type="button"
+              onClick={() => setMode(value)}
+              aria-pressed={mode === value}
+              className={`${mode === value ? "seg-on" : "seg"} !min-h-8 !px-3 !text-xs`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="flex min-h-0 flex-1 flex-col gap-3.5 overflow-y-auto px-5 pb-3 pt-1">
+        <div className="flex flex-wrap gap-1.5">
+          <span className="chip">Context: {context.label}</span>
+          <span className="chip">{MODE_CHIP[mode]}</span>
+        </div>
         {entries.length === 0 && (
-          <p className="text-sm text-text-muted">
-            Ask about your projects and notes, e.g. “What is currently overdue on C7801?” or “What did we decide about
-            the keel design?”
+          <p className="text-[13px] text-text-muted">
+            Ask about your projects and notes, e.g. “What is overdue on C7801?”. Type <span className="font-mono">/</span>{" "}
+            for your saved commands.
           </p>
         )}
         {entries.map((entry, i) =>
           entry.role === "user" ? (
-            <div key={i} className="ml-8 whitespace-pre-wrap rounded-lg bg-surface-raised px-3 py-2 text-sm">
-              {entry.content}
+            <div
+              key={i}
+              className="max-w-[85%] self-end whitespace-pre-wrap rounded-xl bg-surface-active px-3.5 py-2.5 text-sm"
+            >
+              {entry.prompt ? (
+                <>
+                  <span className="font-mono text-accent" title={entry.prompt.instruction}>
+                    {entry.prompt.command}
+                  </span>
+                  {entry.prompt.rest && ` ${entry.prompt.rest}`}
+                </>
+              ) : (
+                entry.content
+              )}
             </div>
           ) : (
-            <div key={i} className="space-y-2">
-              {entry.toolCalls.length > 0 && <ToolCalls calls={entry.toolCalls} />}
-              <div className="markdown text-sm">
-                <Markdown remarkPlugins={[remarkGfm]}>{entry.content}</Markdown>
+            <div key={i} className="flex flex-col gap-2">
+              <div className="rounded-xl border border-border-default bg-surface-raised px-3.5 py-3 text-sm text-text-secondary">
+                {entry.toolCalls.length > 0 && <ToolCalls calls={entry.toolCalls} />}
+                <div className="markdown">
+                  <Markdown remarkPlugins={[remarkGfm]}>{entry.content}</Markdown>
+                </div>
+                {entry.written.length > 0 && (
+                  <div className="mt-2.5 flex flex-wrap gap-1.5">
+                    {entry.written.map((path) => (
+                      <Link key={path} to={`/note?path=${encodeURIComponent(path)}`} className="chip" title={path}>
+                        <span className="h-1.5 w-1.5 rounded-full bg-project-p5002" />
+                        Wrote {path.split("/").pop()}
+                      </Link>
+                    ))}
+                  </div>
+                )}
               </div>
-              {entry.written.map((path) => (
-                <p key={path} className="font-mono text-xs text-project-p5002">
-                  ✓ Wrote {path}
-                </p>
-              ))}
               {entry.edits.map((edit) => (
                 <EditCard
                   key={edit.path}
@@ -228,40 +365,96 @@ export default function CopilotChat({ open, onClose }: { open: boolean; onClose:
             </div>
           ),
         )}
-        {sending && <p className="text-sm text-text-muted">Thinking…</p>}
-        {error && <p className="text-sm text-accent">Could not get an answer ({error}).</p>}
+        {sending && <p className="text-[13px] text-text-muted">Thinking…</p>}
+        {error && <p className="text-[13px] text-accent">Could not get an answer ({error}).</p>}
         <div ref={bottomRef} />
       </div>
 
-      <div className="shrink-0 border-t border-border-default p-3">
-        <textarea
-          ref={inputRef}
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={handleKeyDown}
-          rows={3}
-          placeholder="Ask the Co-pilot… (Enter to send, Shift+Enter for a new line)"
-          className="w-full resize-none rounded border border-border-light bg-surface-raised px-3 py-2 text-sm placeholder:text-text-muted"
-          aria-label="Message"
-        />
-        <div className="mt-2 flex justify-end">
-          <button
-            type="button"
-            onClick={send}
-            disabled={sending || !input.trim()}
-            className="rounded-lg bg-accent px-4 py-1.5 text-sm font-semibold text-background hover:bg-accent/90 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            Send
-          </button>
-        </div>
+      <div className="relative flex items-end gap-2 border-t border-border-default px-5 pb-[18px] pt-3">
+        {menuItems.length > 0 && (
+          <CommandMenu items={menuItems} highlighted={highlighted} onPick={pickCommand} onHover={setMenuIndex} />
+        )}
+        <label className="flex-1">
+          <span className="sr-only">Ask a question</span>
+          <textarea
+            ref={inputRef}
+            value={input}
+            onChange={(e) => changeInput(e.target.value)}
+            onKeyDown={handleKeyDown}
+            rows={multiline ? 3 : 1}
+            placeholder="Ask, or type / for commands"
+            className={`block min-h-11 w-full resize-none rounded-[10px] ${multiline ? "" : "overflow-hidden"} border border-border-light bg-surface-raised px-3 py-[11px] text-sm leading-5 placeholder:text-[#8797A1] focus:border-accent/70 focus:outline-none`}
+            aria-autocomplete="list"
+            aria-expanded={menuItems.length > 0}
+          />
+        </label>
+        <button type="button" onClick={send} disabled={sending || !input.trim()} className="btn-primary min-h-11">
+          Send
+        </button>
       </div>
     </aside>
   );
 }
 
+const MODE_CHIP: Record<AccessMode, string> = {
+  read_only: "Notes: read only",
+  ask_first: "Notes: asks before writing",
+  write_directly: "Notes: read and write",
+};
+
+function CommandMenu({
+  items,
+  highlighted,
+  onPick,
+  onHover,
+}: {
+  items: SavedPrompt[];
+  highlighted: number;
+  onPick: (prompt: SavedPrompt) => void;
+  onHover: (index: number) => void;
+}) {
+  return (
+    <div
+      role="listbox"
+      aria-label="Saved commands"
+      className="absolute inset-x-5 bottom-full z-20 mb-2 overflow-hidden rounded-xl border border-border-strong bg-surface-active p-1.5 shadow-xl shadow-black/40"
+    >
+      {items.map((prompt, i) => (
+        <button
+          key={prompt.id}
+          type="button"
+          role="option"
+          aria-selected={i === highlighted}
+          // Keep focus in the textarea.
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => onPick(prompt)}
+          onMouseEnter={() => onHover(i)}
+          className={`flex w-full flex-col items-start gap-0.5 rounded-md px-3 py-2 text-left ${
+            i === highlighted ? "bg-[#2A3842]" : ""
+          }`}
+        >
+          <span className="flex w-full items-baseline gap-2">
+            <span className="font-mono text-[13px] text-accent">{prompt.command}</span>
+            <span className="truncate text-[13px] text-text-primary">{prompt.description}</span>
+          </span>
+          <span className="line-clamp-1 text-xs text-text-muted">{prompt.instruction}</span>
+        </button>
+      ))}
+      <div className="mx-1.5 my-1 h-px bg-border-strong" />
+      <Link
+        to="/settings"
+        onMouseDown={(e) => e.preventDefault()}
+        className="block rounded-md px-3 py-1.5 text-xs text-text-muted hover:bg-[#2A3842] hover:text-text-primary"
+      >
+        Manage commands…
+      </Link>
+    </div>
+  );
+}
+
 function ToolCalls({ calls }: { calls: ToolCall[] }) {
   return (
-    <details className="text-xs text-text-muted">
+    <details className="mb-2 text-xs text-text-muted">
       <summary className="cursor-pointer select-none">
         Used {calls.length} tool{calls.length === 1 ? "" : "s"}
       </summary>
@@ -277,6 +470,14 @@ function ToolCalls({ calls }: { calls: ToolCall[] }) {
   );
 }
 
+const EDIT_STATUS: Record<EditStatus["state"], { label: string; dot: string }> = {
+  pending: { label: "Waiting for approval", dot: "bg-accent" },
+  applying: { label: "Saving…", dot: "bg-accent" },
+  applied: { label: "Written to note", dot: "bg-project-p5002" },
+  rejected: { label: "Rejected", dot: "bg-project-neutral" },
+  error: { label: "Could not save", dot: "bg-red-400" },
+};
+
 function EditCard({ edit, onApprove, onReject }: { edit: Edit; onApprove: () => void; onReject: () => void }) {
   const { state } = edit.status;
   const isNew = edit.previous_content === null;
@@ -284,41 +485,32 @@ function EditCard({ edit, onApprove, onReject }: { edit: Edit; onApprove: () => 
   const after = noteText(edit.content, edit.frontmatter);
 
   return (
-    <div className="overflow-hidden rounded-lg border border-accent/60 bg-surface-raised">
-      <div className="flex items-center gap-2 border-b border-border-default px-3 py-2 text-xs">
-        <span className="font-medium uppercase tracking-wider text-accent">{isNew ? "New note" : "Edit"}</span>
-        <span className="min-w-0 flex-1 truncate font-mono text-text-secondary" title={edit.path}>
-          {edit.path}
+    <div className="flex flex-col gap-2 rounded-xl border border-border-light bg-surface-panel px-3.5 py-3 text-[13px] text-text-secondary">
+      <div className="flex items-center justify-between gap-2">
+        <span className="font-mono text-[11px] text-text-muted">{isNew ? "NEW NOTE" : "NOTE EDIT"}</span>
+        <span className="chip">
+          <span className={`h-2 w-2 rounded-full ${EDIT_STATUS[state].dot}`} />
+          {EDIT_STATUS[state].label}
         </span>
       </div>
-      <Diff before={before} after={after} />
-      <div className="flex items-center justify-end gap-2 border-t border-border-default px-3 py-2 text-xs">
-        {state === "applied" && <span className="text-project-p5002">✓ Saved</span>}
-        {state === "rejected" && <span className="text-text-muted">Rejected</span>}
-        {state === "error" && edit.status.state === "error" && (
-          <span className="min-w-0 flex-1 text-accent">Could not save ({edit.status.message})</span>
-        )}
-        {(state === "pending" || state === "applying" || state === "error") && (
-          <>
-            <button
-              type="button"
-              onClick={onReject}
-              disabled={state === "applying"}
-              className="rounded border border-border-light px-3 py-1 text-text-secondary hover:bg-surface-panel hover:text-text-primary disabled:opacity-40"
-            >
-              Reject
-            </button>
-            <button
-              type="button"
-              onClick={onApprove}
-              disabled={state === "applying"}
-              className="rounded bg-accent px-3 py-1 font-semibold text-background hover:bg-accent/90 disabled:opacity-40"
-            >
-              {state === "applying" ? "Saving…" : "Approve"}
-            </button>
-          </>
-        )}
-      </div>
+      <div className="break-all font-mono text-xs text-text-muted">{edit.path.split("/").join(" / ")}</div>
+      <details open={state === "pending"} className="text-xs">
+        <summary className="cursor-pointer select-none text-text-muted">Changes</summary>
+        <div className="mt-1.5 overflow-hidden rounded-lg border border-border-default bg-background">
+          <Diff before={before} after={after} />
+        </div>
+      </details>
+      {edit.status.state === "error" && <span className="text-xs text-accent">{edit.status.message}</span>}
+      {(state === "pending" || state === "applying" || state === "error") && (
+        <div className="flex gap-2">
+          <button type="button" onClick={onApprove} disabled={state === "applying"} className="btn-primary">
+            {state === "applying" ? "Saving…" : "Approve"}
+          </button>
+          <button type="button" onClick={onReject} disabled={state === "applying"} className="btn">
+            Reject
+          </button>
+        </div>
+      )}
     </div>
   );
 }
