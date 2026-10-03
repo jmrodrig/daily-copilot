@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 
 import pytest
 from fastapi.testclient import TestClient
@@ -8,7 +8,9 @@ import database
 import file_layer
 import main
 from config import Settings
-from models import HistoryRecord
+from history import soft_delete
+from models import HistoryRecord, Project, Task
+from schemas import Status
 
 
 @pytest.fixture
@@ -98,3 +100,89 @@ def test_capture_rejects_invalid_payloads(client, notes_dir, payload):
 
     assert response.status_code == 422
     assert not any(notes_dir.rglob("*.md"))
+
+
+@pytest.fixture
+def gantt_db():
+    """Two projects with shop floor tasks, plus rows the Gantt must leave out."""
+    with database.SessionLocal() as session:
+        c7801 = Project(code="C7801", name="C7801 Build")
+        r5301 = Project(code="R5301", name="R5301 Refit")
+        archived = Project(code="X0001", name="Old job", active=False)
+        session.add_all([c7801, r5301, archived])
+        session.flush()
+        gone = Task(project_id=c7801.id, title="Removed", start_date=date(2026, 9, 1), is_gantt_task=True)
+        session.add_all(
+            [
+                Task(
+                    project_id=c7801.id,
+                    title="Hatch fitting",
+                    description="Section: Deck\nComplete: 40%",
+                    status=Status.IN_PROGRESS,
+                    start_date=date(2026, 10, 20),
+                    deadline=date(2026, 11, 5),
+                    is_gantt_task=True,
+                ),
+                Task(
+                    project_id=c7801.id,
+                    title="Hull moulding",
+                    status=Status.DONE,
+                    start_date=date(2026, 9, 28),
+                    deadline=date(2026, 10, 14),
+                    is_gantt_task=True,
+                ),
+                Task(project_id=c7801.id, title="Undated", description=" |  | 25%", is_gantt_task=True),
+                Task(
+                    project_id=c7801.id,
+                    title="M3",
+                    start_date=date(2026, 11, 5),
+                    deadline=date(2026, 11, 5),
+                    is_gantt_task=True,
+                    is_milestone=True,
+                ),
+                Task(project_id=c7801.id, title="Design task", start_date=date(2026, 9, 1)),
+                Task(project_id=archived.id, title="Archived", start_date=date(2026, 9, 1), is_gantt_task=True),
+                gone,
+            ]
+        )
+        session.flush()
+        soft_delete(session, gone)
+        session.commit()
+
+
+def test_gantt_groups_shop_floor_tasks_by_project(client, gantt_db):
+    response = client.get("/api/gantt")
+
+    assert response.status_code == 200
+    projects = response.json()["projects"]
+    assert [(p["code"], p["name"]) for p in projects] == [("C7801", "C7801 Build"), ("R5301", "R5301 Refit")]
+    assert projects[1]["tasks"] == []
+    tasks = projects[0]["tasks"]
+    assert [t["name"] for t in tasks] == ["Hull moulding", "Hatch fitting", "M3", "Undated"]
+    assert tasks[1] == {
+        "id": tasks[1]["id"],
+        "name": "Hatch fitting",
+        "start_date": "2026-10-20",
+        "end_date": "2026-11-05",
+        "completion_percent": 40.0,
+        "status": "in_progress",
+        "is_milestone": False,
+    }
+
+
+def test_gantt_completion_percent(client, gantt_db):
+    tasks = client.get("/api/gantt").json()["projects"][0]["tasks"]
+
+    percent = {t["name"]: t["completion_percent"] for t in tasks}
+    assert percent == {"Hull moulding": 100.0, "Hatch fitting": 40.0, "M3": 0.0, "Undated": 25.0}
+    milestone = next(t for t in tasks if t["name"] == "M3")
+    assert milestone["is_milestone"] is True
+    undated = next(t for t in tasks if t["name"] == "Undated")
+    assert undated["start_date"] is None and undated["end_date"] is None
+
+
+def test_gantt_with_empty_database(client):
+    response = client.get("/api/gantt")
+
+    assert response.status_code == 200
+    assert response.json() == {"projects": []}
