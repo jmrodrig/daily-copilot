@@ -74,6 +74,8 @@ class Task(Versioned, Base):
     rank: Mapped[float | None]
     is_gantt_task: Mapped[bool] = mapped_column(default=False, index=True)
     is_milestone: Mapped[bool] = mapped_column(default=False)
+    # Who is personally working on the task; None means nobody has claimed it.
+    assignee: Mapped[str | None] = mapped_column(String(64), default=None)
     created_at: Mapped[dt.datetime] = mapped_column(server_default=func.now())
     completed_at: Mapped[dt.datetime | None]
 

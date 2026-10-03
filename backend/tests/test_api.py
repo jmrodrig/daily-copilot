@@ -284,6 +284,7 @@ def test_triage_item_shapes(client, triage_today, triage_db):
         "project": "C7801",
         "priority": "normal",
         "status": "in_progress",
+        "assignee": None,
         "start_date": "2026-09-20",
         "due_date": "2026-10-02",
         "created": None,
@@ -300,6 +301,7 @@ def test_triage_item_shapes(client, triage_today, triage_db):
         "project": "C7801",
         "priority": "high",
         "status": None,
+        "assignee": None,
         "start_date": None,
         "due_date": None,
         "created": "2026-10-02T10:00:00",
@@ -355,6 +357,64 @@ def test_triage_with_nothing_to_do(client, triage_today):
 
     assert response.status_code == 200
     assert response.json() == []
+
+
+def test_claim_task_sets_assignee_and_status(client, triage_today, checkin_db):
+    task_id = checkin_db["Very late resin"]
+
+    response = client.patch(f"/api/tasks/{task_id}", json={"assignee": "Jose", "status": "in_progress"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert (body["id"], body["assignee"], body["status"], body["completed_at"]) == (task_id, "Jose", "in_progress", None)
+    with database.SessionLocal() as session:
+        task = session.get(Task, task_id)
+        assert (task.assignee, task.status) == ("Jose", Status.IN_PROGRESS)
+        record = session.scalars(select(HistoryRecord).where(HistoryRecord.entity_id == str(task_id))
+                                 .order_by(HistoryRecord.id.desc())).first()
+        assert (record.action, record.source, record.snapshot["assignee"]) == ("update", "desktop", "Jose")
+    item = next(i for i in client.get("/api/triage").json() if i["id"] == f"task:{task_id}")
+    assert (item["assignee"], item["status"]) == ("Jose", "in_progress")
+
+
+def test_patch_task_only_changes_fields_sent(client, triage_today, checkin_db):
+    task_id = checkin_db["Late gelcoat"]
+    client.patch(f"/api/tasks/{task_id}", json={"assignee": " Jose "})
+
+    assert client.patch(f"/api/tasks/{task_id}", json={"status": "blocked"}).json()["assignee"] == "Jose"
+    body = client.patch(f"/api/tasks/{task_id}", json={"assignee": None}).json()
+    assert (body["assignee"], body["status"]) == (None, "blocked")
+    assert client.patch(f"/api/tasks/{task_id}", json={"assignee": ""}).json()["assignee"] is None
+
+
+def test_patch_task_status_done_sets_and_clears_completion_time(client, triage_today, checkin_db):
+    task_id = checkin_db["Late gelcoat"]
+
+    done = client.patch(f"/api/tasks/{task_id}", json={"status": "done"}).json()
+    assert done["completed_at"] is not None
+    assert client.patch(f"/api/tasks/{task_id}", json={"status": "done"}).json()["completed_at"] == done["completed_at"]
+    assert client.patch(f"/api/tasks/{task_id}", json={"status": "in_progress"}).json()["completed_at"] is None
+
+
+def test_patch_unknown_task(client, triage_today, checkin_db):
+    response = client.patch("/api/tasks/9999", json={"assignee": "Jose"})
+
+    assert response.status_code == 404
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [{"status": "finished"}, {"status": None}, {"assignee": "x" * 65}],
+)
+def test_patch_task_rejects_invalid_payloads(client, triage_today, checkin_db, payload):
+    task_id = checkin_db["Late gelcoat"]
+
+    response = client.patch(f"/api/tasks/{task_id}", json=payload)
+
+    assert response.status_code == 422
+    with database.SessionLocal() as session:
+        task = session.get(Task, task_id)
+        assert (task.assignee, task.status) == (None, Status.IN_PROGRESS)
 
 
 @pytest.fixture

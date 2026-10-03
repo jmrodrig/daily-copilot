@@ -77,9 +77,29 @@ class Task(BaseModel):
     rank: float | None = None
     is_gantt_task: bool = Field(default=False, description="True for shop floor Gantt tasks")
     is_milestone: bool = Field(default=False, description="Zero-duration Gantt event")
+    assignee: str | None = Field(default=None, description="Who has claimed the task; None if unclaimed")
     subtasks: list[Subtask] = Field(default_factory=list)
     created_at: datetime | None = None
     completed_at: datetime | None = None
+
+
+class TaskUpdate(BaseModel):
+    """`PATCH /api/tasks/{id}`: only the fields sent are changed; `assignee: null` unclaims."""
+
+    assignee: str | None = Field(default=None, max_length=64)
+    status: Status | None = None
+
+    @field_validator("assignee")
+    @classmethod
+    def _blank_is_unassigned(cls, value: str | None) -> str | None:
+        return (value.strip() or None) if value is not None else None
+
+    @field_validator("status")
+    @classmethod
+    def _status_not_null(cls, value: Status | None) -> Status:
+        if value is None:
+            raise ValueError("status cannot be null")
+        return value
 
 
 class Link(BaseModel):
@@ -189,6 +209,7 @@ class TriageItem(BaseModel):
     project: str | None = Field(description="Project code; None for Inbox captures")
     priority: Priority
     status: Status | None = Field(default=None, description="Gantt tasks only")
+    assignee: str | None = Field(default=None, description="Gantt tasks only; who has claimed the task")
     start_date: date | None = None
     due_date: date | None = None
     created: datetime | None = Field(default=None, description="Capture notes only")

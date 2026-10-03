@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
-import { formatDay, NEUTRAL_TAG, PROJECT_TAG, RANK_LABELS, Tag, type TriageItem } from "../components/TriageBoard";
+import { formatDay, ME, NEUTRAL_TAG, PROJECT_TAG, RANK_LABELS, Tag, type TriageItem } from "../components/TriageBoard";
 
 // Time sheet projects; "Inbox" is logged without a project (see TimeEntry in backend/schemas.py).
 const PROJECTS = [
@@ -24,6 +24,10 @@ type Submit =
 let nextRowKey = 0;
 const newRow = (project = PROJECTS[0].code): Row => ({ key: nextRowKey++, project, hours: "", notes: "" });
 
+/** Gantt tasks claimed from the Morning List and started (claiming starts a "todo" task). */
+const isMyActiveTask = (item: TriageItem) =>
+  item.kind === "gantt_task" && item.assignee === ME && item.status !== "todo";
+
 /** "task:12" → 12 */
 const taskId = (item: TriageItem) => Number(item.id.slice("task:".length));
 
@@ -44,7 +48,7 @@ export default function EveningCheckIn() {
       .then(async (res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const items: TriageItem[] = await res.json();
-        setTasks({ state: "ok", items: items.filter((item) => item.kind === "gantt_task") });
+        setTasks({ state: "ok", items: items.filter(isMyActiveTask) });
       })
       .catch((err: unknown) => {
         if (controller.signal.aborted) return;
@@ -116,7 +120,7 @@ export default function EveningCheckIn() {
       <div className="grid max-w-6xl gap-6 lg:grid-cols-2">
         <section>
           <h2 className="mb-3 flex items-center justify-between text-xs font-medium uppercase tracking-wider text-text-muted">
-            <span>Today's Active Tasks</span>
+            <span>My Active Tasks</span>
             {checked.size > 0 && <span className="font-mono text-accent">{checked.size} done</span>}
           </h2>
           <TaskList tasks={tasks} checked={checked} onToggle={toggle} />
@@ -223,7 +227,7 @@ function TaskList({
   if (tasks.items.length === 0) {
     return (
       <p className="rounded-lg border border-border-default bg-surface-raised p-5 text-sm text-text-secondary">
-        No active Gantt tasks.
+        No claimed tasks in progress. Claim tasks from the Morning List to check them off here.
       </p>
     );
   }

@@ -14,6 +14,7 @@ import file_layer
 from database import get_db, init_db
 from history import set_source, utcnow
 from models import Project, Task, TimeLog
+import schemas
 from schemas import (
     AccessMode,
     CaptureRequest,
@@ -25,6 +26,7 @@ from schemas import (
     GanttTask,
     Priority,
     Status,
+    TaskUpdate,
     TriageItem,
     TriageKind,
     TriageRank,
@@ -174,6 +176,7 @@ def _triage_tasks(db: Session, today: date) -> list[tuple[tuple, TriageItem]]:
             project=code,
             priority=task.priority,
             status=task.status,
+            assignee=task.assignee,
             start_date=task.start_date,
             due_date=task.deadline,
         )
@@ -251,6 +254,26 @@ def triage(db: Session = Depends(get_db)) -> list[TriageItem]:
     ranked = _triage_tasks(db, today) + _triage_notes()
     ranked.sort(key=lambda pair: (pair[1].rank, pair[0]))
     return [item for _key, item in ranked]
+
+
+TASK_UPDATE_SOURCE = "desktop"
+
+
+@app.patch("/api/tasks/{task_id}")
+def update_task(task_id: int, request: TaskUpdate, db: Session = Depends(get_db)) -> schemas.Task:
+    """Claim or unclaim a task (`assignee`) and/or change its status. Unsent fields are left alone."""
+    task = db.get(Task, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail=f"Unknown task id: {task_id}")
+    set_source(db, TASK_UPDATE_SOURCE)
+    changes = request.model_dump(exclude_unset=True)
+    if "assignee" in changes:
+        task.assignee = changes["assignee"]
+    if "status" in changes and changes["status"] != task.status:
+        task.status = changes["status"]
+        task.completed_at = utcnow() if task.status == Status.DONE else None
+    db.commit()
+    return schemas.Task.model_validate(task, from_attributes=True)
 
 
 CHECKIN_SOURCE = "evening_checkin"
