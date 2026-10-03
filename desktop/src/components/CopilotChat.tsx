@@ -63,8 +63,8 @@ export default function CopilotChat({ open, onClose }: { open: boolean; onClose:
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
-  useEffect(() => localStorage.setItem(MODE_KEY, mode), [mode]);
-  useEffect(() => bottomRef.current?.scrollIntoView({ block: "end" }), [entries, sending]);
+  useEffect(() => { localStorage.setItem(MODE_KEY, mode); }, [mode]);
+  useEffect(() => { bottomRef.current?.scrollIntoView({ block: "end" }); }, [entries, sending]);
   useEffect(() => {
     if (open) inputRef.current?.focus();
   }, [open]);
