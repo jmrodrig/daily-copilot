@@ -138,6 +138,31 @@ class CaptureResponse(BaseModel):
     path: str = Field(description="Path of the new note relative to the notes directory")
 
 
+class GanttTask(BaseModel):
+    """One bar (or milestone diamond) on the desktop Gantt chart."""
+
+    id: int
+    name: str
+    start_date: date | None = Field(description="None when the imported Gantt had no dates for the task")
+    end_date: date | None
+    completion_percent: float = Field(ge=0, le=100)
+    status: Status
+    is_milestone: bool
+
+
+class GanttProject(BaseModel):
+    """A swimlane: one project and its Gantt tasks, sorted by start date (undated last)."""
+
+    id: int
+    code: str
+    name: str
+    tasks: list[GanttTask]
+
+
+class GanttResponse(BaseModel):
+    projects: list[GanttProject]
+
+
 class Note(BaseModel):
     """A markdown note. Known front-matter keys are typed; unknown keys are kept as extras."""
 
