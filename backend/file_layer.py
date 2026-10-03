@@ -182,6 +182,16 @@ def read_note(filepath: str | Path, *, notes_dir: str | Path | None = None) -> d
     }
 
 
+def list_notes(pattern: str, *, notes_dir: str | Path | None = None) -> list[str]:
+    """Paths (relative to NOTES_DIR, sorted) of the notes matching a glob such as `*/Notes-in/*.md`."""
+    root = notes_root(notes_dir)
+    return sorted(
+        _relative(path, notes_dir)
+        for path in root.glob(pattern)
+        if path.is_file() and path.suffix.lower() == NOTE_SUFFIX
+    )
+
+
 def write_note(
     filepath: str | Path,
     content: str,

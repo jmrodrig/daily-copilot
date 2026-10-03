@@ -284,3 +284,14 @@ def test_explicit_notes_dir_argument(tmp_path):
     other = tmp_path / "other"
     write_note("n.md", "x", {"a": 1}, "write_directly", notes_dir=other)
     assert read_note("n.md", notes_dir=other) == {"path": "n.md", "frontmatter": {"a": 1}, "content": "x"}
+
+
+def test_list_notes_matches_glob_relative_to_notes_dir(notes_dir):
+    write_note("Inbox/b.md", "b", {}, "write_directly")
+    write_note("Inbox/a.md", "a", {}, "write_directly")
+    write_note("C7801/Notes-in/c.md", "c", {}, "write_directly")
+    (notes_dir / "Inbox" / "skip.txt").write_text("x", encoding="utf-8")
+
+    assert file_layer.list_notes("Inbox/*.md") == ["Inbox/a.md", "Inbox/b.md"]
+    assert file_layer.list_notes("*/Notes-in/*.md") == ["C7801/Notes-in/c.md"]
+    assert file_layer.list_notes("Missing/*.md") == []
