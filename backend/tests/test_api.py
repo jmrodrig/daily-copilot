@@ -186,3 +186,172 @@ def test_gantt_with_empty_database(client):
 
     assert response.status_code == 200
     assert response.json() == {"projects": []}
+
+
+TODAY = date(2026, 10, 3)
+
+
+@pytest.fixture
+def triage_today(monkeypatch):
+    monkeypatch.setattr(main, "_today", lambda: TODAY)
+    return TODAY
+
+
+def _write_capture(path, content, priority=None, created=None, project=None, **extra):
+    frontmatter = {"type": "capture", **extra}
+    if project is not None:
+        frontmatter["project"] = project
+    if priority is not None:
+        frontmatter["priority"] = priority
+    if created is not None:
+        frontmatter["created"] = created
+    file_layer.write_note(path, content, frontmatter, "write_directly")
+
+
+@pytest.fixture
+def triage_db():
+    """Gantt tasks around TODAY (2026-10-03), plus rows the Morning List must leave out."""
+    with database.SessionLocal() as session:
+        c7801 = Project(code="C7801", name="C7801 Build")
+        archived = Project(code="X0001", name="Old job", active=False)
+        session.add_all([c7801, archived])
+        session.flush()
+        gone = Task(project_id=c7801.id, title="Removed", start_date=date(2026, 10, 1), is_gantt_task=True)
+        session.add_all(
+            [
+                Task(project_id=c7801.id, title="Late gelcoat", start_date=date(2026, 9, 20),
+                     deadline=date(2026, 10, 2), status=Status.IN_PROGRESS, is_gantt_task=True),
+                Task(project_id=c7801.id, title="Very late resin", start_date=date(2026, 9, 1),
+                     deadline=date(2026, 9, 15), is_gantt_task=True),
+                Task(project_id=c7801.id, title="Running lamination", start_date=date(2026, 9, 28),
+                     deadline=date(2026, 10, 10), is_gantt_task=True),
+                Task(project_id=c7801.id, title="Starts today", start_date=TODAY,
+                     deadline=TODAY, is_gantt_task=True),
+                Task(project_id=c7801.id, title="Open-ended", start_date=date(2026, 10, 1), is_gantt_task=True),
+                Task(project_id=c7801.id, title="Next week fit-out", start_date=date(2026, 10, 10),
+                     deadline=date(2026, 10, 20), is_gantt_task=True),
+                Task(project_id=c7801.id, title="Too far ahead", start_date=date(2026, 10, 11), is_gantt_task=True),
+                Task(project_id=c7801.id, title="Finished", start_date=date(2026, 9, 1),
+                     deadline=date(2026, 9, 10), status=Status.DONE, is_gantt_task=True),
+                Task(project_id=c7801.id, title="Imported as complete", description="Complete: 100%",
+                     start_date=date(2026, 9, 1), deadline=date(2026, 9, 10), is_gantt_task=True),
+                Task(project_id=c7801.id, title="Undated", is_gantt_task=True),
+                Task(project_id=c7801.id, title="Design task", start_date=date(2026, 10, 1)),
+                Task(project_id=archived.id, title="Archived", start_date=date(2026, 10, 1), is_gantt_task=True),
+                gone,
+            ]
+        )
+        session.flush()
+        soft_delete(session, gone)
+        session.commit()
+
+
+def test_triage_ranks_tasks_and_notes(client, triage_today, triage_db):
+    _write_capture("Inbox/Capture_1.md", "Low idea", "low", "2026-10-01T08:00:00", "Inbox")
+    _write_capture("Inbox/Capture_2.md", "Call supplier", "normal", "2026-10-02T09:00:00", "Inbox")
+    _write_capture("C7801/Notes-in/Capture_3.md", "Check weld spec", "high", "2026-10-02T10:00:00", "C7801")
+    _write_capture("C7801/Notes-in/Capture_4.md", "Older high note", "high", "2026-10-01T10:00:00", "C7801")
+
+    response = client.get("/api/triage")
+
+    assert response.status_code == 200
+    items = response.json()
+    assert [(i["rank"], i["title"]) for i in items] == [
+        (1, "Very late resin"),
+        (1, "Late gelcoat"),
+        (2, "Starts today"),
+        (2, "Running lamination"),
+        (2, "Open-ended"),
+        (3, "Older high note"),
+        (3, "Check weld spec"),
+        (4, "Call supplier"),
+        (5, "Next week fit-out"),
+        (6, "Low idea"),
+    ]
+
+
+def test_triage_item_shapes(client, triage_today, triage_db):
+    _write_capture("C7801/Notes-in/Capture_1.md", "# Check weld spec\nOn the transom", "High", "2026-10-02T10:00:00", "C7801")
+
+    items = client.get("/api/triage").json()
+
+    task = next(i for i in items if i["title"] == "Late gelcoat")
+    assert task == {
+        "id": task["id"],
+        "kind": "gantt_task",
+        "rank": 1,
+        "title": "Late gelcoat",
+        "project": "C7801",
+        "priority": "normal",
+        "status": "in_progress",
+        "start_date": "2026-09-20",
+        "due_date": "2026-10-02",
+        "created": None,
+        "path": None,
+        "content": None,
+    }
+    assert task["id"].startswith("task:")
+    note = next(i for i in items if i["kind"] == "capture")
+    assert note == {
+        "id": "note:C7801/Notes-in/Capture_1.md",
+        "kind": "capture",
+        "rank": 3,
+        "title": "Check weld spec",
+        "project": "C7801",
+        "priority": "high",
+        "status": None,
+        "start_date": None,
+        "due_date": None,
+        "created": "2026-10-02T10:00:00",
+        "path": "C7801/Notes-in/Capture_1.md",
+        "content": "# Check weld spec\nOn the transom",
+    }
+
+
+def test_triage_notes_from_capture_endpoint(client, triage_today):
+    client.post("/api/capture", json={"content": "Call supplier", "project": "Inbox", "priority": "High"})
+    client.post("/api/capture", json={"content": "Confirm geometry", "project": "R5301", "priority": "Low"})
+
+    items = client.get("/api/triage").json()
+
+    assert [(i["rank"], i["title"], i["project"]) for i in items] == [
+        (3, "Call supplier", None),
+        (6, "Confirm geometry", "R5301"),
+    ]
+
+
+def test_triage_note_defaults_and_fallbacks(client, notes_dir, triage_today):
+    # No priority or created date, project taken from the folder, unknown priority treated as normal.
+    (notes_dir / "R5301" / "Notes-in").mkdir(parents=True)
+    (notes_dir / "R5301" / "Notes-in" / "plain.md").write_text("Hand-written note\n", encoding="utf-8")
+    _write_capture("Inbox/Capture_1.md", "Odd priority", "whenever", "not a date")
+    _write_capture("Inbox/Capture_2.md", "Urgent thing", "urgent", "2026-10-02T09:00:00")
+
+    items = client.get("/api/triage").json()
+
+    by_title = {i["title"]: i for i in items}
+    assert (by_title["Hand-written note"]["project"], by_title["Hand-written note"]["priority"]) == ("R5301", "normal")
+    assert by_title["Hand-written note"]["rank"] == 4
+    assert (by_title["Odd priority"]["rank"], by_title["Odd priority"]["created"]) == (4, None)
+    assert by_title["Odd priority"]["project"] is None
+    assert by_title["Urgent thing"]["rank"] == 3
+
+
+def test_triage_skips_broken_and_unrelated_notes(client, notes_dir, triage_today):
+    (notes_dir / "Inbox").mkdir()
+    (notes_dir / "Inbox" / "broken.md").write_text("---\n: [unclosed\n---\nBody\n", encoding="utf-8")
+    (notes_dir / "Inbox" / "readme.txt").write_text("not a note", encoding="utf-8")
+    _write_capture("Wiki/page.md", "Reference page", "high")
+    _write_capture("C7801/Notes-out/Capture_1.md", "Outgoing", "high")
+    _write_capture("Inbox/Capture_1.md", "Real capture", "normal")
+
+    items = client.get("/api/triage").json()
+
+    assert [i["title"] for i in items] == ["Real capture"]
+
+
+def test_triage_with_nothing_to_do(client, triage_today):
+    response = client.get("/api/triage")
+
+    assert response.status_code == 200
+    assert response.json() == []

@@ -163,6 +163,39 @@ class GanttResponse(BaseModel):
     projects: list[GanttProject]
 
 
+class TriageKind(str, Enum):
+    GANTT_TASK = "gantt_task"
+    CAPTURE = "capture"
+
+
+class TriageRank(int, Enum):
+    """Morning List buckets, most urgent first."""
+
+    OVERDUE = 1
+    TODAY = 2
+    CAPTURE_HIGH = 3
+    CAPTURE_NORMAL = 4
+    UPCOMING = 5
+    CAPTURE_LOW = 6
+
+
+class TriageItem(BaseModel):
+    """One entry on the Morning List: an active Gantt task or an unprocessed capture note."""
+
+    id: str = Field(description='"task:<id>" or "note:<path>"')
+    kind: TriageKind
+    rank: TriageRank
+    title: str
+    project: str | None = Field(description="Project code; None for Inbox captures")
+    priority: Priority
+    status: Status | None = Field(default=None, description="Gantt tasks only")
+    start_date: date | None = None
+    due_date: date | None = None
+    created: datetime | None = Field(default=None, description="Capture notes only")
+    path: str | None = Field(default=None, description="Capture note path relative to the notes directory")
+    content: str | None = None
+
+
 class Note(BaseModel):
     """A markdown note. Known front-matter keys are typed; unknown keys are kept as extras."""
 

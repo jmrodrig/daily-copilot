@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import GanttChart, { type GanttProject } from "../components/GanttChart";
+import TriageBoard from "../components/TriageBoard";
 
 type Health = { state: "loading" } | { state: "ok"; status: string } | { state: "error"; message: string };
 
@@ -62,9 +63,13 @@ export default function Dashboard() {
           )}
         </div>
       </section>
+      <section className="max-w-4xl">
+        <h2 className="mb-3 text-xs font-medium uppercase tracking-wider text-text-muted">Morning List</h2>
+        <TriageBoard />
+      </section>
       <section>
         <h2 className="mb-3 text-xs font-medium uppercase tracking-wider text-text-muted">Plan</h2>
-        {gantt.state === "loading" && <p className="text-sm text-text-secondary">Loading /api/gantt…</p>}
+        {gantt.state === "loading" && <p className="text-sm text-text-secondary">Loading /api/ganttâ€¦</p>}
         {gantt.state === "error" && (
           <p className="text-sm text-text-secondary">Could not load the Gantt ({gantt.message}).</p>
         )}
