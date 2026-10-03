@@ -9,7 +9,7 @@ import file_layer
 import main
 from config import Settings
 from history import soft_delete
-from models import HistoryRecord, Project, Task
+from models import HistoryRecord, Project, Task, TimeLog
 from schemas import Status
 
 
@@ -355,3 +355,166 @@ def test_triage_with_nothing_to_do(client, triage_today):
 
     assert response.status_code == 200
     assert response.json() == []
+
+
+@pytest.fixture
+def checkin_db():
+    """C7801 with two open tasks and one already done; R5301 has no row yet. Returns the task ids by title."""
+    with database.SessionLocal() as session:
+        c7801 = Project(code="C7801", name="C7801 Build")
+        session.add(c7801)
+        session.flush()
+        tasks = [
+            Task(project_id=c7801.id, title="Late gelcoat", start_date=date(2026, 9, 20),
+                 deadline=date(2026, 10, 2), status=Status.IN_PROGRESS, is_gantt_task=True),
+            Task(project_id=c7801.id, title="Very late resin", start_date=date(2026, 9, 1),
+                 deadline=date(2026, 9, 15), is_gantt_task=True),
+            Task(project_id=c7801.id, title="Finished", start_date=date(2026, 9, 1), deadline=date(2026, 9, 10),
+                 status=Status.DONE, completed_at=datetime(2026, 9, 10, 17, 0), is_gantt_task=True),
+        ]
+        session.add_all(tasks)
+        session.commit()
+        return {task.title: task.id for task in tasks}
+
+
+def _project_ids():
+    with database.SessionLocal() as session:
+        return {p.code: p.id for p in session.scalars(select(Project).execution_options(include_deleted=True))}
+
+
+def test_checkin_marks_tasks_done_and_logs_time(client, triage_today, checkin_db):
+    payload = {
+        "completed_task_ids": [checkin_db["Late gelcoat"]],
+        "time_entries": [
+            {"project": "C7801", "hours": 4, "notes": " Gelcoat repairs "},
+            {"project": "R5301", "hours": 2},
+            {"project": "Inbox", "hours": 0.5, "notes": "Emails"},
+        ],
+    }
+
+    response = client.post("/api/checkin", json=payload)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["completed_task_ids"] == [checkin_db["Late gelcoat"]]
+    assert body["total_hours"] == 6.5
+    with database.SessionLocal() as session:
+        done = session.get(Task, checkin_db["Late gelcoat"])
+        assert done.status == Status.DONE and done.completed_at is not None
+        assert session.get(Task, checkin_db["Very late resin"]).status == Status.TODO
+        logs = session.scalars(select(TimeLog).order_by(TimeLog.id)).all()
+    projects = _project_ids()
+    assert [log.id for log in logs] == body["time_log_ids"]
+    assert [(log.date, log.project_id, log.task_id, log.hours, log.notes) for log in logs] == [
+        (TODAY, projects["C7801"], None, 4.0, "Gelcoat repairs"),
+        (TODAY, projects["R5301"], None, 2.0, ""),
+        (TODAY, None, None, 0.5, "Emails"),
+    ]
+
+
+def test_checkin_removes_done_tasks_from_triage(client, triage_today, checkin_db):
+    before = [i["title"] for i in client.get("/api/triage").json()]
+    assert before == ["Very late resin", "Late gelcoat"]
+
+    client.post("/api/checkin", json={"completed_task_ids": [checkin_db["Very late resin"]]})
+
+    assert [i["title"] for i in client.get("/api/triage").json()] == ["Late gelcoat"]
+
+
+def test_checkin_records_history(client, triage_today, checkin_db):
+    task_id = checkin_db["Late gelcoat"]
+    client.post("/api/checkin", json={"completed_task_ids": [task_id], "time_entries": [{"project": "C7801", "hours": 3}]})
+
+    with database.SessionLocal() as session:
+        records = session.scalars(select(HistoryRecord).where(HistoryRecord.source == "evening_checkin")).all()
+    by_type = {r.entity_type: r for r in records}
+    assert len(records) == 2
+    assert (by_type["Task"].entity_id, by_type["Task"].action) == (str(task_id), "update")
+    assert by_type["Task"].snapshot["status"] == "done"
+    assert by_type["Task"].snapshot["completed_at"] is not None
+    assert by_type["TimeLog"].action == "create"
+    assert by_type["TimeLog"].snapshot["hours"] == 3.0
+    assert by_type["TimeLog"].snapshot["date"] == TODAY.isoformat()
+
+
+def test_checkin_keeps_completion_time_of_already_done_tasks(client, triage_today, checkin_db):
+    task_id = checkin_db["Finished"]
+
+    response = client.post("/api/checkin", json={"completed_task_ids": [task_id, task_id]})
+
+    assert response.status_code == 200
+    assert response.json()["completed_task_ids"] == [task_id]
+    with database.SessionLocal() as session:
+        assert session.get(Task, task_id).completed_at == datetime(2026, 9, 10, 17, 0)
+        assert session.scalars(select(HistoryRecord).where(HistoryRecord.source == "evening_checkin")).all() == []
+
+
+def test_checkin_project_codes(client, triage_today, checkin_db):
+    entries = [
+        {"project": "c7801", "hours": 1},
+        {"project": "Overhead", "hours": 1},
+        {"project": None, "hours": 1},
+        {"project": "p5002", "hours": 1},
+        {"project": "P5002", "hours": 1},
+    ]
+
+    client.post("/api/checkin", json={"time_entries": entries, "day": "2026-10-02"})
+
+    projects = _project_ids()
+    assert set(projects) == {"C7801", "P5002"}
+    with database.SessionLocal() as session:
+        logs = session.scalars(select(TimeLog).order_by(TimeLog.id)).all()
+        assert session.get(Project, projects["P5002"]).name == "P5002"
+    assert [log.project_id for log in logs] == [projects["C7801"], None, None, projects["P5002"], projects["P5002"]]
+    assert {log.date for log in logs} == {date(2026, 10, 2)}
+
+
+def test_checkin_unknown_task_changes_nothing(client, triage_today, checkin_db):
+    payload = {
+        "completed_task_ids": [checkin_db["Late gelcoat"], 9999],
+        "time_entries": [{"project": "C7801", "hours": 4}],
+    }
+
+    response = client.post("/api/checkin", json=payload)
+
+    assert response.status_code == 404
+    assert "9999" in response.json()["detail"]
+    with database.SessionLocal() as session:
+        assert session.get(Task, checkin_db["Late gelcoat"]).status == Status.IN_PROGRESS
+        assert session.scalars(select(TimeLog)).all() == []
+
+
+def test_checkin_ignores_soft_deleted_tasks(client, triage_today, checkin_db):
+    with database.SessionLocal() as session:
+        soft_delete(session, session.get(Task, checkin_db["Very late resin"]))
+        session.commit()
+
+    response = client.post("/api/checkin", json={"completed_task_ids": [checkin_db["Very late resin"]]})
+
+    assert response.status_code == 404
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"project": "C7801", "hours": 0},
+        {"project": "C7801", "hours": -1},
+        {"project": "C7801", "hours": 25},
+        {"project": "C7801"},
+        {"project": "../C7801", "hours": 1},
+        {"project": "", "hours": 1},
+    ],
+)
+def test_checkin_rejects_invalid_time_entries(client, triage_today, checkin_db, entry):
+    response = client.post("/api/checkin", json={"time_entries": [entry]})
+
+    assert response.status_code == 422
+    with database.SessionLocal() as session:
+        assert session.scalars(select(TimeLog)).all() == []
+
+
+def test_checkin_with_nothing_to_report(client, triage_today):
+    response = client.post("/api/checkin", json={})
+
+    assert response.status_code == 200
+    assert response.json() == {"completed_task_ids": [], "time_log_ids": [], "total_hours": 0.0}

@@ -196,6 +196,29 @@ class TriageItem(BaseModel):
     content: str | None = None
 
 
+class TimeEntry(BaseModel):
+    """One time sheet row from the evening check-in."""
+
+    # None, "Inbox" or "Overhead" log the time without a project.
+    project: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]+$", max_length=32)
+    hours: float = Field(gt=0, le=24)
+    notes: str = ""
+
+
+class CheckInRequest(BaseModel):
+    """`POST /api/checkin`: tasks finished today and the day's time sheet."""
+
+    completed_task_ids: list[int] = Field(default_factory=list)
+    time_entries: list[TimeEntry] = Field(default_factory=list)
+    day: date | None = Field(default=None, description="Day the hours are logged against; defaults to today")
+
+
+class CheckInResponse(BaseModel):
+    completed_task_ids: list[int]
+    time_log_ids: list[int]
+    total_hours: float
+
+
 class Note(BaseModel):
     """A markdown note. Known front-matter keys are typed; unknown keys are kept as extras."""
 

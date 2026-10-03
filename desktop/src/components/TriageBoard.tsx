@@ -16,7 +16,7 @@ export type TriageItem = {
   content: string | null;
 };
 
-const RANK_LABELS: Record<TriageItem["rank"], string> = {
+export const RANK_LABELS: Record<TriageItem["rank"], string> = {
   1: "Overdue",
   2: "Today",
   3: "High priority notes",
@@ -29,12 +29,12 @@ const MS_PER_DAY = 86_400_000;
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 // Full class names so Tailwind can find them; the colours come from shared/design-tokens.json.
-const PROJECT_TAG: Record<string, string> = {
+export const PROJECT_TAG: Record<string, string> = {
   c7801: "border-project-c7801/60 text-project-c7801",
   r5301: "border-project-r5301/60 text-project-r5301",
   p5002: "border-project-p5002/60 text-project-p5002",
 };
-const NEUTRAL_TAG = "border-project-neutral/60 text-text-muted";
+export const NEUTRAL_TAG = "border-project-neutral/60 text-text-muted";
 
 const PRIORITY_TAG: Record<TriageItem["priority"], string> = {
   urgent: "border-accent bg-accent/15 text-accent",
@@ -56,7 +56,7 @@ function todayDay(): number {
   return Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()) / MS_PER_DAY;
 }
 
-function formatDay(iso: string): string {
+export function formatDay(iso: string): string {
   const date = new Date(toDay(iso) * MS_PER_DAY);
   return `${date.getUTCDate()} ${MONTHS[date.getUTCMonth()]}`;
 }
@@ -182,7 +182,7 @@ function KindBadge({ isTask }: { isTask: boolean }) {
   );
 }
 
-function Tag({ className, children }: { className: string; children: string }) {
+export function Tag({ className, children }: { className: string; children: string }) {
   return (
     <span className={`rounded border px-1.5 py-px font-mono text-[10px] uppercase leading-4 ${className}`}>
       {children}

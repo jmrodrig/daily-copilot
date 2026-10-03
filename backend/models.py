@@ -113,6 +113,26 @@ class Link(Versioned, Base):
         return f"Link({self.predecessor_id!r} -> {self.successor_id!r})"
 
 
+class TimeLog(Versioned, Base):
+    """Hours logged at the evening check-in. No project means Inbox/overhead time."""
+
+    __tablename__ = "time_logs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    date: Mapped[dt.date] = mapped_column(default=dt.date.today, index=True)
+    project_id: Mapped[int | None] = mapped_column(ForeignKey("projects.id"), index=True)
+    task_id: Mapped[int | None] = mapped_column(ForeignKey("tasks.id"), index=True)
+    hours: Mapped[float]
+    notes: Mapped[str] = mapped_column(default="")
+    created_at: Mapped[dt.datetime] = mapped_column(server_default=func.now())
+
+    project: Mapped[Project | None] = relationship()
+    task: Mapped[Task | None] = relationship()
+
+    def __repr__(self) -> str:
+        return f"TimeLog(id={self.id!r}, date={self.date!r}, hours={self.hours!r})"
+
+
 class HistoryRecord(Base):
     """One entry in the append-only audit trail: the full state of an entity after a change.
 
