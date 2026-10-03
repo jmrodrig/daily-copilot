@@ -19,12 +19,13 @@ A personal AI co-pilot designed to manage daily workflows against real project G
 - **Phase 2 — Capture App:** **Complete**
 - **Phase 3 — Email Intake:** **Blocked (Waiting on IT)**
 - **Phase 4 — Desktop App Core:** **Complete**
-- **Phase 5 — Triage Engine:** **In Progress**
-- **Phase 6 — Evening Check-in:** Pending
-- **Phase 7 — Co-pilot Chat and Agent:** Pending
+- **Phase 5 — Triage Engine:** **Complete**
+- **Phase 6 — Evening Check-in:** **Complete**
+- **Phase 7 — Co-pilot Chat and Agent:** **In Progress**
 - **Phase 8 — Meeting Prep Briefs:** Pending
 - **Phase 9 — Weekly Rollup:** Pending
 - **Phase 10 — Annotations & Bulk Ingestion:** Pending
+- **Phase 11 — Android App Expansions:** Pending (Morning brief, Triage, and Evening check-in on the mobile app)
 
 ## 3. Pending Decisions
 - None currently.
