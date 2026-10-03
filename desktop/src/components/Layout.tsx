@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { NavLink, Outlet } from "react-router-dom";
 
+import CopilotChat from "./CopilotChat";
+
 const NAV_ITEMS = [
   { to: "/", label: "Dashboard", short: "D", end: true },
   { to: "/check-in", label: "Evening Check-in", short: "E", end: false },
@@ -10,6 +12,7 @@ const NAV_ITEMS = [
 
 export default function Layout() {
   const [collapsed, setCollapsed] = useState(false);
+  const [chatOpen, setChatOpen] = useState(false);
 
   return (
     <div className="flex h-full">
@@ -48,10 +51,27 @@ export default function Layout() {
             </NavLink>
           ))}
         </nav>
+        <div className="mt-auto border-t border-border-default p-2">
+          <button
+            type="button"
+            onClick={() => setChatOpen((o) => !o)}
+            title="Co-pilot chat"
+            aria-pressed={chatOpen}
+            className={`w-full rounded border-l-2 px-3 py-2 text-left text-sm ${
+              chatOpen
+                ? "border-accent bg-surface-raised text-text-primary"
+                : "border-transparent text-text-secondary hover:bg-surface-raised hover:text-text-primary"
+            }`}
+          >
+            {collapsed ? "C" : "Co-pilot"}
+          </button>
+        </div>
       </aside>
       <main className="min-w-0 flex-1 overflow-auto bg-background p-8">
         <Outlet />
       </main>
+      {/* Kept mounted while closed so the conversation survives page changes. */}
+      <CopilotChat open={chatOpen} onClose={() => setChatOpen(false)} />
     </div>
   );
 }

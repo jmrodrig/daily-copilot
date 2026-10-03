@@ -16,3 +16,41 @@ body,
 body {
   @apply bg-background font-sans text-text-primary antialiased;
 }
+
+/* Co-pilot chat replies (rendered markdown). */
+.markdown > * + * {
+  @apply mt-2;
+}
+.markdown h1,
+.markdown h2,
+.markdown h3 {
+  @apply font-semibold text-text-primary;
+}
+.markdown ul {
+  @apply list-disc pl-5;
+}
+.markdown ol {
+  @apply list-decimal pl-5;
+}
+.markdown a {
+  @apply text-accent underline;
+}
+.markdown code {
+  @apply rounded bg-surface-raised px-1 font-mono text-xs;
+}
+.markdown pre {
+  @apply overflow-x-auto rounded bg-surface-raised p-2;
+}
+.markdown pre code {
+  @apply bg-transparent p-0;
+}
+.markdown table {
+  @apply border-collapse text-xs;
+}
+.markdown th,
+.markdown td {
+  @apply border border-border-default px-2 py-1 text-left;
+}
+.markdown blockquote {
+  @apply border-l-2 border-border-light pl-3 text-text-secondary;
+}
