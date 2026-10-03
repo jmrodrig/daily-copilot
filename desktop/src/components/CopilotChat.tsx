@@ -60,8 +60,13 @@ export default function CopilotChat({ open, onClose }: { open: boolean; onClose:
   const [mode, setMode] = useState<AccessMode>(storedMode);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [model, setModel] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    fetch("/health").then(res => res.json()).then(data => setModel(data.chat_model)).catch(() => {});
+  }, []);
 
   useEffect(() => { localStorage.setItem(MODE_KEY, mode); }, [mode]);
   useEffect(() => { bottomRef.current?.scrollIntoView({ block: "end" }); }, [entries, sending]);
@@ -151,7 +156,10 @@ export default function CopilotChat({ open, onClose }: { open: boolean; onClose:
       aria-label="Co-pilot chat"
     >
       <header className="flex h-14 shrink-0 items-center gap-2 border-b border-border-default px-4">
-        <span className="flex-1 text-sm font-semibold tracking-wide">Co-pilot</span>
+        <span className="flex-1 text-sm font-semibold tracking-wide">
+          Co-pilot
+          {model && <span className="ml-2 font-mono text-[10px] font-normal text-text-muted">{model.split("/").pop()}</span>}
+        </span>
         <select
           value={mode}
           onChange={(e) => setMode(e.target.value as AccessMode)}

@@ -51,7 +51,8 @@ app = FastAPI(title="Daily Co-Pilot Backend", version="0.1.0", lifespan=lifespan
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "ok"}
+    from config import get_settings
+    return {"status": "ok", "chat_model": get_settings().chat_model}
 
 
 def _capture_path(project: str, now: datetime) -> str:
