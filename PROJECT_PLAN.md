@@ -23,7 +23,7 @@ A personal AI co-pilot designed to manage daily workflows against real project G
 - **Phase 6 — Evening Check-in:** **Complete**
 - **Phase 7 — Co-pilot Chat and Agent:** **Complete**
 - **Phase 8 — UI Realignment & Slash Commands:** **In Progress**
-- **Phase 9 — Weekly Rollup:** Pending
+- **Phase 9 — Confluence/Jira Hybrid Architecture:** Pending (Implement Spaces, flexible Content folders, and DB-backed Task Engine)
 - **Phase 10 — Annotations & Bulk Ingestion:** Pending
 - **Phase 11 — Android App Expansions:** Pending (Morning brief, Triage, and Evening check-in on the mobile app)
 
