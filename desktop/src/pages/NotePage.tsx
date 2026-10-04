@@ -40,6 +40,7 @@ export default function NotePage() {
   const [note, setNote] = useState<State>({ state: "loading" });
   const [tasks, setTasks] = useState<TaskItem[]>([]);
   const [body, setBody] = useState("");
+  const [titleDraft, setTitleDraft] = useState("");
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
@@ -73,13 +74,19 @@ export default function NotePage() {
   const parts = path.split("/");
   const fm = note.state === "ok" ? note.note.frontmatter : {};
   const title = typeof fm.title === "string" && fm.title ? fm.title : parts[parts.length - 1].replace(/\.md$/i, "");
+  // The edited title, saved to the `title` front-matter; a blank one is ignored.
+  const newTitle = titleDraft.trim() && titleDraft.trim() !== title ? titleDraft.trim() : null;
+
+  useEffect(() => {
+    setTitleDraft(title);
+  }, [title]);
   const props = Object.entries(fm).filter(
     ([key, value]) => !HIDDEN_PROPS.has(key) && !(key === "state" && !isTemplate) && value !== null && value !== "",
   );
   const state = isTemplate || note.state !== "ok" ? null : noteState(fm);
-  const dirty = note.state === "ok" && body !== note.note.content;
+  const dirty = note.state === "ok" && (body !== note.note.content || newTitle !== null);
 
-  /** Save the draft's body and/or switch the note's state (PUT /api/notes/file). */
+  /** Save the draft's title and body and/or switch the note's state (PUT /api/notes/file). */
   async function save(next?: NoteState) {
     if (note.state !== "ok" || saving) return;
     setSaving(true);
@@ -89,10 +96,12 @@ export default function NotePage() {
         space_id: spaceId,
         path,
         ...(state === "draft" && { content: body }),
+        ...(state === "draft" && newTitle && { title: newTitle }),
         ...(next && { state: next }),
       });
       setNote({ state: "ok", note: saved });
       setBody(saved.content);
+      if (!newTitle) setTitleDraft(title); // drop a blanked-out title
       refreshTree(); // the title may have changed
     } catch (err) {
       setSaveError(message(err));
@@ -123,6 +132,23 @@ export default function NotePage() {
       </button>
     ) : undefined;
 
+  const details =
+    props.length > 0 || tasks.length > 0 ? (
+      <>
+        {props.length > 0 && (
+          <dl className="flex flex-wrap gap-x-5 gap-y-1 text-xs">
+            {props.map(([key, value]) => (
+              <div key={key} className="flex gap-1.5">
+                <dt className="text-text-muted">{key}</dt>
+                <dd className="text-text-secondary">{show(value)}</dd>
+              </div>
+            ))}
+          </dl>
+        )}
+        {tasks.length > 0 && <LinkedTasks tasks={tasks} />}
+      </>
+    ) : null;
+
   return (
     <div className="mx-auto flex w-full max-w-4xl flex-col gap-5 px-9 py-7">
       {/* Breadcrumb and actions sit above the document, so the title reads as its first line. */}
@@ -135,29 +161,33 @@ export default function NotePage() {
         </div>
         {actions}
       </div>
-      <h1 className="-mb-2 text-[32px] font-semibold leading-tight">{title}</h1>
       {saveError && <p className="text-[13px] text-accent">Could not save {path} ({saveError}).</p>}
-      {note.state === "loading" && <p className="text-[13px] text-text-muted">Loading…</p>}
-      {note.state === "error" && <p className="text-[13px] text-text-secondary">Could not open {path} ({note.message}).</p>}
-      {note.state === "ok" && (
+      {state === "draft" && note.state === "ok" ? (
+        // The editor's toolbar sits above the title, which is edited in place, and the properties.
+        <NoteEditor
+          key={path}
+          spaceId={spaceId}
+          title={titleDraft}
+          onTitleChange={setTitleDraft}
+          value={body}
+          onChange={setBody}
+          onSave={() => dirty && save()}
+          disabled={saving}
+        >
+          {details}
+        </NoteEditor>
+      ) : (
         <>
-          {props.length > 0 && (
-            <dl className="flex flex-wrap gap-x-5 gap-y-1 text-xs">
-              {props.map(([key, value]) => (
-                <div key={key} className="flex gap-1.5">
-                  <dt className="text-text-muted">{key}</dt>
-                  <dd className="text-text-secondary">{show(value)}</dd>
-                </div>
-              ))}
-            </dl>
-          )}
-          {tasks.length > 0 && <LinkedTasks tasks={tasks} />}
-          {state === "draft" ? (
-            <NoteEditor key={path} value={body} onChange={setBody} onSave={() => dirty && save()} disabled={saving} />
-          ) : (
-            <article className="note-body markdown text-sm leading-relaxed text-text-secondary">
-              <Markdown remarkPlugins={[remarkGfm]}>{note.note.content}</Markdown>
-            </article>
+          <h1 className="-mb-2 text-[32px] font-semibold leading-tight">{title}</h1>
+          {note.state === "loading" && <p className="text-[13px] text-text-muted">Loading…</p>}
+          {note.state === "error" && <p className="text-[13px] text-text-secondary">Could not open {path} ({note.message}).</p>}
+          {note.state === "ok" && (
+            <>
+              {details}
+              <article className="note-body markdown text-sm leading-relaxed text-text-secondary">
+                <Markdown remarkPlugins={[remarkGfm]}>{note.note.content}</Markdown>
+              </article>
+            </>
           )}
         </>
       )}

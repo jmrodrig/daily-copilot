@@ -131,3 +131,23 @@ body {
 .ProseMirror .tableWrapper {
   @apply overflow-x-auto;
 }
+/* Resizable columns: the table lays out by the widths in its <colgroup>, and a handle shows on the hovered border. */
+.ProseMirror table {
+  @apply table-fixed;
+}
+.ProseMirror th,
+.ProseMirror td {
+  @apply relative;
+}
+.ProseMirror .column-resize-handle {
+  @apply pointer-events-none absolute -bottom-px -right-0.5 top-0 z-[1] w-1 bg-accent;
+}
+.ProseMirror.resize-cursor {
+  @apply cursor-col-resize;
+}
+.note-body img {
+  @apply my-3 h-auto max-w-full rounded border border-border-default;
+}
+.ProseMirror img.ProseMirror-selectednode {
+  @apply outline outline-2 outline-accent;
+}

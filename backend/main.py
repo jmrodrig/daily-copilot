@@ -8,7 +8,8 @@ from typing import Any
 
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
@@ -39,6 +40,7 @@ from schemas import (
     GanttResponse,
     GanttTask,
     FolderCreate,
+    ImageUpload,
     FolderMetaOut,
     FolderMetaUpdate,
     NoteCreate,
@@ -532,7 +534,7 @@ def get_note(
 
 @app.put("/api/notes/file")
 def update_note(request: NoteUpdate, db: Session = Depends(get_db)) -> NoteFile:
-    """Save a draft's body and/or switch it between draft and published (the `state` front-matter)."""
+    """Save a draft's body and/or title, and/or switch it between draft and published (the `state` front-matter)."""
     root = spaces.content_dir(_space_id_or_404(db, request.space_id))
     try:
         note = file_layer.read_note(request.path, notes_dir=root)
@@ -545,11 +547,44 @@ def update_note(request: NoteUpdate, db: Session = Depends(get_db)) -> NoteFile:
     frontmatter = dict(note["frontmatter"])
     if request.state is not None:
         frontmatter["state"] = request.state.value
+    if request.title is not None:
+        frontmatter["title"] = request.title
     content = note["content"] if request.content is None else request.content
     file_layer.write_note(
         note["path"], content, frontmatter, AccessMode.WRITE_DIRECTLY, notes_dir=root, source=DESKTOP_SOURCE
     )
     return NoteFile(path=note["path"], frontmatter=to_jsonable(frontmatter), content=content)
+
+
+MAX_IMAGE_BYTES = 20 * 1024 * 1024
+
+
+@app.post("/api/notes/image")
+async def upload_image(
+    file: UploadFile = File(...), space_id: int = Form(...), db: Session = Depends(get_db)
+) -> ImageUpload:
+    """Store an image pasted into the note editor under the space's `content/.assets/`."""
+    root = spaces.content_dir(_space_id_or_404(db, space_id))
+    data = await file.read(MAX_IMAGE_BYTES + 1)
+    if len(data) > MAX_IMAGE_BYTES:
+        raise HTTPException(status_code=413, detail=f"Images are limited to {MAX_IMAGE_BYTES // (1024 * 1024)} MB")
+    try:
+        name = file_layer.save_asset(data, file.content_type or "", notes_dir=root)
+    except file_layer.FileLayerError as exc:
+        raise HTTPException(status_code=415, detail=str(exc)) from exc
+    return ImageUpload(url=f"/api/notes/image/{name}?space_id={space_id}")
+
+
+@app.get("/api/notes/image/{name}")
+def get_image(name: str, root: Path = Depends(space_content)) -> FileResponse:
+    """A stored image; its name is random and never reused, so it can be cached for good."""
+    try:
+        path = file_layer.asset_path(name, notes_dir=root)
+    except file_layer.NotePathError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"No image {name}") from exc
+    return FileResponse(path, headers={"Cache-Control": "public, max-age=31536000, immutable"})
 
 
 @app.post("/api/notes/apply-edit")
