@@ -4,6 +4,7 @@ import { Link, useLocation, type Location } from "react-router-dom";
 import remarkGfm from "remark-gfm";
 
 import { errorDetail, getJson, message, PROMPTS_CHANGED, type SavedPrompt } from "../lib/api";
+import { notePath, useSpace } from "../lib/space";
 import { IconButton } from "./Sidebar";
 
 // Shapes of POST /api/chat and POST /api/notes/apply-edit (see ChatResponse etc. in backend/schemas.py).
@@ -47,28 +48,38 @@ function storedMode(): AccessMode {
   return MODES.some((m) => m.value === value) ? (value as AccessMode) : "ask_first";
 }
 
-/** What the chat shows as its context, and the hint sent to the model with each question. */
-function pageContext(location: Location): { label: string; hint: string | null } {
+/** What the chat shows as its context, the hint sent to the model with each question, and the open note. */
+function pageContext(location: Location, spaceId: number): { label: string; hint: string | null; notePath: string | null } {
   const { pathname } = location;
-  if (pathname === "/") return { label: "Today", hint: "the Today page (the day's schedule)" };
+  if (pathname === "/") return { label: "Today", hint: "the Today page (the day's schedule)", notePath: null };
   if (pathname === "/note") {
-    const path = new URLSearchParams(location.search).get("path") ?? "";
+    const params = new URLSearchParams(location.search);
+    const path = params.get("path") ?? "";
     const name = path.split("/").pop()?.replace(/\.md$/i, "") || "Note";
-    return { label: name, hint: path ? `the note ${path}` : null };
+    if (params.get("root") === "templates") {
+      return { label: `${name} template`, hint: path ? `the note template ${path} (not a note)` : null, notePath: null };
+    }
+    const inSpace = Number(params.get("space") ?? spaceId) === spaceId;
+    return { label: name, hint: path ? `the note ${path}` : null, notePath: path && inSpace ? path : null };
+  }
+  if (pathname.startsWith("/tasks/")) {
+    const view = pathname.slice("/tasks/".length);
+    const label = `Tasks · ${view.charAt(0).toUpperCase()}${view.slice(1)}`;
+    return { label, hint: `the ${view} view of the task database`, notePath: null };
   }
   if (pathname.startsWith("/plan/")) {
     const code = decodeURIComponent(pathname.slice("/plan/".length));
-    return { label: `${code} plan`, hint: `the ${code} Gantt plan` };
+    return { label: `${code} plan`, hint: `the ${code} Gantt plan`, notePath: null };
   }
   const labels: Record<string, string> = {
-    "/tasks": "All tasks",
+    "/triage": "Triage",
     "/check-in": "Evening check-in",
     "/settings": "Settings",
     "/emails": "Forwarded emails",
     "/graph": "Notes graph",
     "/people": "People",
   };
-  return { label: labels[pathname] ?? "Wiki", hint: null };
+  return { label: labels[pathname] ?? "Wiki", hint: null, notePath: null };
 }
 
 /** What the model sees of a turn: saved prompts expanded, plus what the user did with proposed edits. */
@@ -103,7 +114,14 @@ export default function CopilotChat({ open, onOpenChange }: { open: boolean; onO
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const location = useLocation();
-  const context = pageContext(location);
+  const { spaceId, space } = useSpace();
+  const context = pageContext(location, spaceId);
+
+  // A conversation (and its proposed edits) belongs to one space: start over when it changes.
+  useEffect(() => {
+    setEntries([]);
+    setError(null);
+  }, [spaceId]);
 
   useEffect(() => {
     getJson<{ chat_model?: string }>("/health")
@@ -175,6 +193,8 @@ export default function CopilotChat({ open, onOpenChange }: { open: boolean; onO
         body: JSON.stringify({
           messages: next.map((entry) => ({ role: entry.role, content: historyContent(entry) })),
           access_mode: mode,
+          space_id: spaceId,
+          note_path: context.notePath,
         }),
       });
       if (!res.ok) throw new Error(await errorDetail(res));
@@ -216,6 +236,7 @@ export default function CopilotChat({ open, onOpenChange }: { open: boolean; onO
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          space_id: spaceId,
           path: edit.path,
           content: edit.content,
           frontmatter: edit.frontmatter,
@@ -310,6 +331,7 @@ export default function CopilotChat({ open, onOpenChange }: { open: boolean; onO
 
       <div className="flex min-h-0 flex-1 flex-col gap-3.5 overflow-y-auto px-5 pb-3 pt-1">
         <div className="flex flex-wrap gap-1.5">
+          <span className="chip">Space: {space?.name ?? "…"}</span>
           <span className="chip">Context: {context.label}</span>
           <span className="chip">{MODE_CHIP[mode]}</span>
         </div>
@@ -346,7 +368,7 @@ export default function CopilotChat({ open, onOpenChange }: { open: boolean; onO
                 {entry.written.length > 0 && (
                   <div className="mt-2.5 flex flex-wrap gap-1.5">
                     {entry.written.map((path) => (
-                      <Link key={path} to={`/note?path=${encodeURIComponent(path)}`} className="chip" title={path}>
+                      <Link key={path} to={notePath(spaceId, path)} className="chip" title={path}>
                         <span className="h-1.5 w-1.5 rounded-full bg-project-p5002" />
                         Wrote {path.split("/").pop()}
                       </Link>

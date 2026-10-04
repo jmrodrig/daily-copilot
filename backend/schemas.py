@@ -21,6 +21,7 @@ class AccessMode(str, Enum):
 
 
 class Status(str, Enum):
+    BACKLOG = "backlog"
     TODO = "todo"
     IN_PROGRESS = "in_progress"
     BLOCKED = "blocked"
@@ -67,6 +68,7 @@ class Subtask(BaseModel):
 
 class Task(BaseModel):
     id: int | None = None
+    space_id: int | None = None
     project_id: int | None = None
     title: str = Field(min_length=1)
     description: str = ""
@@ -90,18 +92,31 @@ class TaskUpdate(BaseModel):
 
     assignee: str | None = Field(default=None, max_length=64)
     status: Status | None = None
+    title: str | None = Field(default=None, min_length=1, max_length=500)
+    description: str | None = None
+    priority: Priority | None = None
+    project_id: int | None = Field(default=None, description="null removes the task from its project")
+    start_date: date | None = None
+    deadline: date | None = None
 
     @field_validator("assignee")
     @classmethod
     def _blank_is_unassigned(cls, value: str | None) -> str | None:
         return (value.strip() or None) if value is not None else None
 
-    @field_validator("status")
+    @field_validator("status", "title", "description", "priority")
     @classmethod
-    def _status_not_null(cls, value: Status | None) -> Status:
+    def _not_null(cls, value: Any) -> Any:
         if value is None:
-            raise ValueError("status cannot be null")
+            raise ValueError("cannot be null")
         return value
+
+    @field_validator("title")
+    @classmethod
+    def _title_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("title must not be blank")
+        return value.strip()
 
 
 class Link(BaseModel):
@@ -142,6 +157,7 @@ class CaptureRequest(BaseModel):
     project: str = Field(default="Inbox", pattern=r"^[A-Za-z0-9_-]+$", max_length=64)
     priority: Priority = Priority.NORMAL
     source: str | None = Field(default=None, pattern=r"^[A-Za-z0-9 _-]+$", max_length=32, description='e.g. "verbal", "meeting"')
+    space_id: int = Field(default=1, description="Space whose content/ receives the note")
 
     @field_validator("content")
     @classmethod
@@ -289,6 +305,8 @@ class ChatRequest(BaseModel):
 
     messages: list[ChatMessage] = Field(min_length=1)
     access_mode: AccessMode = AccessMode.ASK_FIRST
+    space_id: int = Field(default=1, description="The active space: the agent only sees its notes and tasks")
+    note_path: str | None = Field(default=None, description="The note the user has open, relative to content/")
 
     @field_validator("messages")
     @classmethod
@@ -377,6 +395,7 @@ class ChatResponse(BaseModel):
 class ApplyEditRequest(BaseModel):
     """`POST /api/notes/apply-edit`: commit a `ProposedEdit` the user approved."""
 
+    space_id: int = 1
     path: str
     content: str
     frontmatter: dict[str, Any] = Field(default_factory=dict)
@@ -386,3 +405,142 @@ class ApplyEditRequest(BaseModel):
 class ApplyEditResponse(BaseModel):
     path: str
     written: bool = Field(description="False if the note already had exactly this text")
+
+
+# --- Spaces, content tree and the task engine (Phase 9) ------------------------
+
+
+class NoteRoot(str, Enum):
+    """The two folders of a space: the notes and the note templates."""
+
+    CONTENT = "content"
+    TEMPLATES = "templates"
+
+
+class SpaceIn(BaseModel):
+    """`POST /api/spaces`."""
+
+    name: str = Field(min_length=1, max_length=64)
+
+    @field_validator("name")
+    @classmethod
+    def _strip_name(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("name must not be blank")
+        return value.strip()
+
+
+class Space(SpaceIn):
+    id: int
+    created_at: datetime | None = None
+
+
+class FolderNode(BaseModel):
+    """A folder in a space's `content/` tree with its sub-folders and notes (`GET /api/tree`)."""
+
+    name: str
+    path: str = Field(description="Relative to content/; empty for the root")
+    is_project: bool = False
+    is_reference: bool = False
+    project_id: int | None = Field(default=None, description="The linked Project (its tasks) when is_project")
+    folders: list["FolderNode"] = Field(default_factory=list)
+    notes: list[NoteSummary] = Field(default_factory=list)
+
+
+class TreeResponse(BaseModel):
+    space_id: int
+    content: FolderNode
+    templates: list[NoteSummary] = Field(default_factory=list)
+
+
+class FolderMetaUpdate(BaseModel):
+    """`PUT /api/folders/meta`: mark a folder as a Project and/or Reference Data. Unsent flags are kept."""
+
+    space_id: int
+    path: str = Field(min_length=1)
+    is_project: bool | None = None
+    is_reference: bool | None = None
+
+
+class FolderMetaOut(BaseModel):
+    space_id: int
+    path: str
+    is_project: bool
+    is_reference: bool
+    project_id: int | None = None
+
+
+class FolderCreate(BaseModel):
+    """`POST /api/folders`: create an (empty) folder under content/."""
+
+    space_id: int
+    path: str = Field(min_length=1)
+
+
+class NoteCreate(BaseModel):
+    """`POST /api/notes`: a new note in content/, optionally scaffolded from a template."""
+
+    space_id: int
+    path: str = Field(min_length=1, description="Relative to content/; `.md` is added if missing")
+    template: str | None = Field(default=None, description="Template path relative to templates/")
+    title: str | None = Field(default=None, max_length=200)
+
+
+class ProjectOption(BaseModel):
+    """A project available in a space, for task filters and pickers (`GET /api/projects`)."""
+
+    id: int
+    code: str
+    name: str
+    folder_path: str | None = Field(default=None, description="The project folder in this space, if any")
+
+
+class TaskCreate(BaseModel):
+    """`POST /api/tasks`: a task in the database-backed task engine."""
+
+    space_id: int
+    project_id: int | None = None
+    title: str = Field(min_length=1, max_length=500)
+    description: str = ""
+    status: Status = Status.BACKLOG
+    priority: Priority = Priority.NORMAL
+    start_date: date | None = None
+    deadline: date | None = Field(default=None, description="Due date")
+    assignee: str | None = Field(default=None, max_length=64)
+    note_paths: list[str] = Field(default_factory=list, description="Notes to link, relative to content/")
+
+    @field_validator("title")
+    @classmethod
+    def _title_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("title must not be blank")
+        return value.strip()
+
+    @field_validator("assignee")
+    @classmethod
+    def _blank_is_unassigned(cls, value: str | None) -> str | None:
+        return (value.strip() or None) if value is not None else None
+
+
+class TaskItem(BaseModel):
+    """A task as shown on the Kanban, Backlog and Gantt views (`GET /api/tasks`)."""
+
+    id: int
+    space_id: int
+    project_id: int | None
+    project_code: str | None
+    title: str
+    description: str
+    status: Status
+    priority: Priority
+    assignee: str | None
+    start_date: date | None
+    deadline: date | None
+    completion_percent: float
+    is_gantt_task: bool
+    is_milestone: bool
+    note_paths: list[str] = Field(default_factory=list)
+
+
+class TaskNoteLinkIn(BaseModel):
+    note_path: str = Field(min_length=1)

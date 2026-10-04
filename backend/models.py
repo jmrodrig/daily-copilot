@@ -45,6 +45,46 @@ class Versioned:
     deleted_at: Mapped[dt.datetime | None] = mapped_column(default=None, index=True)
 
 
+class Space(Versioned, Base):
+    """Top-level boundary: every note, folder and task belongs to exactly one space.
+
+    Its files live under `<data_dir>/spaces/<id>/` (see `spaces`).
+    """
+
+    __tablename__ = "spaces"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[dt.datetime] = mapped_column(server_default=func.now())
+
+    def __repr__(self) -> str:
+        return f"Space(id={self.id!r}, name={self.name!r})"
+
+
+class FolderMeta(Versioned, Base):
+    """What a folder under a space's `content/` stands for: a Project (Epic) and/or Reference Data.
+
+    `path` is relative to `content/`. A project folder is linked to a `Project` row, which
+    groups its tasks (and its imported Gantt, when the codes match). Unmarking a folder
+    clears the flags but keeps the row, so the link survives being marked again.
+    """
+
+    __tablename__ = "folder_meta"
+    __table_args__ = (UniqueConstraint("space_id", "path"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    space_id: Mapped[int] = mapped_column(ForeignKey("spaces.id"), index=True)
+    path: Mapped[str]
+    is_project: Mapped[bool] = mapped_column(default=False)
+    is_reference: Mapped[bool] = mapped_column(default=False)
+    project_id: Mapped[int | None] = mapped_column(ForeignKey("projects.id"), index=True)
+
+    project: Mapped["Project | None"] = relationship()
+
+    def __repr__(self) -> str:
+        return f"FolderMeta(space_id={self.space_id!r}, path={self.path!r})"
+
+
 class Project(Versioned, Base):
     __tablename__ = "projects"
 
@@ -67,6 +107,8 @@ class Task(Versioned, Base):
     __tablename__ = "tasks"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    # None only for rows from before Phase 9; startup moves them into the Default space.
+    space_id: Mapped[int | None] = mapped_column(ForeignKey("spaces.id"), index=True)
     project_id: Mapped[int | None] = mapped_column(ForeignKey("projects.id"), index=True)
     title: Mapped[str]
     description: Mapped[str] = mapped_column(default="")
@@ -125,6 +167,19 @@ class Link(Versioned, Base):
 
     def __repr__(self) -> str:
         return f"Link({self.predecessor_id!r} -> {self.successor_id!r})"
+
+
+class TaskNoteLink(Base):
+    """Many-to-many link between a task and a note (path relative to the task's space `content/`)."""
+
+    __tablename__ = "task_note_links"
+
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id"), primary_key=True)
+    note_path: Mapped[str] = mapped_column(primary_key=True)
+    created_at: Mapped[dt.datetime] = mapped_column(server_default=func.now())
+
+    def __repr__(self) -> str:
+        return f"TaskNoteLink({self.task_id!r} -> {self.note_path!r})"
 
 
 class TimeLog(Versioned, Base):

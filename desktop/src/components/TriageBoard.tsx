@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 
+import { useSpace } from "../lib/space";
+
 // Shape returned by GET /api/triage (see TriageItem in backend/schemas.py).
 export type TriageItem = {
   id: string;
@@ -8,7 +10,7 @@ export type TriageItem = {
   title: string;
   project: string | null;
   priority: "low" | "normal" | "high" | "urgent";
-  status: "todo" | "in_progress" | "blocked" | "done" | null;
+  status: "backlog" | "todo" | "in_progress" | "blocked" | "done" | null;
   assignee: string | null;
   start_date: string | null;
   due_date: string | null;
@@ -83,10 +85,11 @@ function when(item: TriageItem, today: number): string {
 
 export default function TriageBoard() {
   const [triage, setTriage] = useState<State>({ state: "loading" });
+  const { spaceId } = useSpace();
 
   useEffect(() => {
     const controller = new AbortController();
-    fetch("/api/triage", { signal: controller.signal })
+    fetch(`/api/triage?space_id=${spaceId}`, { signal: controller.signal })
       .then(async (res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const items: TriageItem[] = await res.json();
@@ -97,7 +100,7 @@ export default function TriageBoard() {
         setTriage({ state: "error", message: err instanceof Error ? err.message : String(err) });
       });
     return () => controller.abort();
-  }, []);
+  }, [spaceId]);
 
   const replaceItem = (updated: TriageItem) =>
     setTriage((prev) =>

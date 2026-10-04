@@ -3,6 +3,7 @@ import { useParams } from "react-router-dom";
 
 import GanttChart, { type GanttProject } from "../components/GanttChart";
 import { getJson, message } from "../lib/api";
+import { useSpace } from "../lib/space";
 import PageHeader from "../components/PageHeader";
 
 type State = { state: "loading" } | { state: "ok"; project: GanttProject | null } | { state: "error"; message: string };
@@ -11,11 +12,12 @@ type State = { state: "loading" } | { state: "ok"; project: GanttProject | null 
 export default function ProjectPlan() {
   const { code = "" } = useParams();
   const [gantt, setGantt] = useState<State>({ state: "loading" });
+  const { spaceId } = useSpace();
 
   useEffect(() => {
     const controller = new AbortController();
     setGantt({ state: "loading" });
-    getJson<{ projects: GanttProject[] }>("/api/gantt", controller.signal)
+    getJson<{ projects: GanttProject[] }>(`/api/gantt?space_id=${spaceId}`, controller.signal)
       .then((body) =>
         setGantt({ state: "ok", project: body.projects.find((p) => p.code.toLowerCase() === code.toLowerCase()) ?? null }),
       )
@@ -23,7 +25,7 @@ export default function ProjectPlan() {
         if (!controller.signal.aborted) setGantt({ state: "error", message: message(err) });
       });
     return () => controller.abort();
-  }, [code]);
+  }, [code, spaceId]);
 
   const project = gantt.state === "ok" ? gantt.project : null;
   return (

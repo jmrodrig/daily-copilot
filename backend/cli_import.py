@@ -103,8 +103,10 @@ def _description(task: dict) -> str:
     return "\n".join(parts)
 
 
-def import_gantt(session: Session, data: dict, project_code: str) -> ImportResult:
+def import_gantt(session: Session, data: dict, project_code: str, space_id: int | None = None) -> ImportResult:
     """Upsert the project and replace its Gantt tasks, milestones and links.
+
+    The tasks go into space `space_id`; None means the Default space.
 
     The caller owns the transaction: commit on success, roll back on error.
     Changes are attributed to "cli_import" unless the session already has a source.
@@ -137,6 +139,7 @@ def import_gantt(session: Session, data: dict, project_code: str) -> ImportResul
     by_gantt_id: dict[str, Task] = {}
     for item in data.get("tasks", []):
         task = Task(
+            space_id=space_id,
             project_id=project.id,
             title=item["name"],
             description=_description(item),
@@ -153,6 +156,7 @@ def import_gantt(session: Session, data: dict, project_code: str) -> ImportResul
         day = _date(item.get("date"))
         session.add(
             Task(
+                space_id=space_id,
                 project_id=project.id,
                 title=item["name"],
                 start_date=day,
@@ -197,6 +201,7 @@ def main(
     parser = argparse.ArgumentParser(description="Review a Gantt PDF extraction and import it.")
     parser.add_argument("pdf", help="Path to the Gantt PDF export")
     parser.add_argument("--code", help="Project code to import under (overrides the extracted one)")
+    parser.add_argument("--space", type=int, help="Space id to import the tasks into (default: the Default space)")
     args = parser.parse_args(argv)
 
     # Windows consoles may not encode every character the PDF contains.
@@ -230,7 +235,7 @@ def main(
         session_factory = SessionLocal
 
     with session_factory() as session, session.begin():
-        result = import_gantt(session, data, project_code)
+        result = import_gantt(session, data, project_code, args.space)
 
     action = "Created" if result.created_project else "Updated"
     print(

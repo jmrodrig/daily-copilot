@@ -24,7 +24,9 @@ class Settings(BaseSettings):
     # Database
     db_path: Path = Path("copilot.db")
 
-    # Markdown file layer (wiki notes, emails)
+    # Spaces: `<data_dir>/spaces/<space_id>/content/` (notes) and `.../templates/`
+    data_dir: Path = Path("data")
+    # Pre-Phase 9 notes folder; moved into the Default space's content/ on startup
     notes_dir: Path = Path("notes")
 
     # Model endpoints
@@ -38,7 +40,7 @@ class Settings(BaseSettings):
     gemini_api_key: SecretStr | None = None
     anthropic_api_key: SecretStr | None = None
 
-    @field_validator("db_path", "notes_dir")
+    @field_validator("db_path", "data_dir", "notes_dir")
     @classmethod
     def _resolve_path(cls, value: Path) -> Path:
         """Resolve relative paths against backend/, not the current working directory."""

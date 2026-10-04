@@ -16,14 +16,6 @@ from schemas import AccessMode, ChatMessage, Status
 
 
 @pytest.fixture
-def notes_dir(tmp_path, monkeypatch):
-    root = tmp_path / "notes"
-    root.mkdir()
-    monkeypatch.setattr(file_layer, "get_settings", lambda: Settings(_env_file=None, notes_dir=root))
-    return root
-
-
-@pytest.fixture
 def settings(monkeypatch):
     settings = Settings(_env_file=None, gemini_api_key="test-key", chat_model="gemini/test-model")
     monkeypatch.setattr(agent, "get_settings", lambda: settings)

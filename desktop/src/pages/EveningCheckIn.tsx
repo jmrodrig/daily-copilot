@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
+import { useSpace } from "../lib/space";
+
 import { formatDay, ME, NEUTRAL_TAG, PROJECT_TAG, RANK_LABELS, Tag, type TriageItem } from "../components/TriageBoard";
 
 // Time sheet projects; "Inbox" is logged without a project (see TimeEntry in backend/schemas.py).
@@ -41,10 +43,11 @@ export default function EveningCheckIn() {
   const [checked, setChecked] = useState<Set<string>>(new Set());
   const [rows, setRows] = useState<Row[]>(() => [newRow()]);
   const [submit, setSubmit] = useState<Submit>({ state: "idle" });
+  const { spaceId } = useSpace();
 
   useEffect(() => {
     const controller = new AbortController();
-    fetch("/api/triage", { signal: controller.signal })
+    fetch(`/api/triage?space_id=${spaceId}`, { signal: controller.signal })
       .then(async (res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const items: TriageItem[] = await res.json();
@@ -55,7 +58,7 @@ export default function EveningCheckIn() {
         setTasks({ state: "error", message: err instanceof Error ? err.message : String(err) });
       });
     return () => controller.abort();
-  }, []);
+  }, [spaceId]);
 
   useEffect(() => {
     if (submit.state !== "done") return;

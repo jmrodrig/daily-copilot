@@ -7,7 +7,6 @@ from sqlalchemy.orm import sessionmaker
 
 import file_layer
 from cli_import import import_gantt
-from config import Settings
 from database import init_db, make_engine
 from file_layer import ApprovalRequiredError, delete_note, read_note, rename_note, write_note
 from history import restore, set_source, soft_delete
@@ -237,14 +236,6 @@ def test_gantt_import_restores_soft_deleted_project(session_factory):
 
 
 # --- Notes --------------------------------------------------------------------
-
-
-@pytest.fixture
-def notes_dir(tmp_path, monkeypatch):
-    root = tmp_path / "notes"
-    root.mkdir()
-    monkeypatch.setattr(file_layer, "get_settings", lambda: Settings(_env_file=None, notes_dir=root))
-    return root
 
 
 @pytest.fixture

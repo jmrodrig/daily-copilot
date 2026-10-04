@@ -1,5 +1,8 @@
 """Markdown file layer: read and write notes with YAML front-matter under NOTES_DIR.
 
+NOTES_DIR is a space's `content/` (or `templates/`) folder, passed as `notes_dir`;
+it defaults to the Default space's `content/` (see `spaces`).
+
 The agent access mode is enforced here, server-side, so no caller can bypass it:
 
 - `read_only`: writes are refused with `AccessDeniedError`.
@@ -8,7 +11,8 @@ The agent access mode is enforced here, server-side, so no caller can bypass it:
 - `write_directly`: writes go straight to disk.
 
 Every write, rename and delete is recorded in the `history` table (entity type
-"Note", entity id = path relative to NOTES_DIR) with a full snapshot of the note,
+"Note", entity id = path relative to the Default space's `content/`, or
+`spaces/<id>/<content|templates>/<path>` for other folders) with a full snapshot of the note,
 so an overwritten or deleted note can always be recovered.
 """
 
@@ -27,7 +31,6 @@ from sqlalchemy.engine import Engine
 
 import database
 import history
-from config import get_settings
 from schemas import AccessMode
 
 NOTE_SUFFIX = ".md"
@@ -81,7 +84,11 @@ class ApprovalRequiredError(AccessModeError):
 
 
 def notes_root(notes_dir: str | Path | None = None) -> Path:
-    return Path(notes_dir if notes_dir is not None else get_settings().notes_dir).resolve()
+    if notes_dir is None:
+        import spaces  # noqa: PLC0415  -- spaces imports this module
+
+        notes_dir = spaces.content_dir(spaces.DEFAULT_SPACE_ID)
+    return Path(notes_dir).resolve()
 
 
 def resolve_note_path(filepath: str | Path, notes_dir: str | Path | None = None) -> Path:
@@ -130,6 +137,22 @@ def serialize_note(content: str, frontmatter: dict[str, Any]) -> str:
 
 def _relative(path: Path, notes_dir: str | Path | None) -> str:
     return path.relative_to(notes_root(notes_dir)).as_posix()
+
+
+def _history_id(path: Path, notes_dir: str | Path | None) -> str:
+    """History entity id of a note, unique across spaces.
+
+    Notes in the Default space's content/ keep their bare relative path, so history from
+    before Spaces still lines up.
+    """
+    import spaces  # noqa: PLC0415  -- spaces imports this module
+
+    default, root = spaces.content_dir(spaces.DEFAULT_SPACE_ID).resolve(), spaces.spaces_root()
+    if path.is_relative_to(default):
+        return path.relative_to(default).as_posix()
+    if path.is_relative_to(root):
+        return f"spaces/{path.relative_to(root).as_posix()}"
+    return _relative(path, notes_dir)
 
 
 def _check_access(
@@ -225,7 +248,7 @@ def write_note(
 
     rel = _relative(path, notes_dir)
     state = {"path": rel, "frontmatter": frontmatter, "content": content}
-    with _recorded(rel, "update" if exists else "create", state, source):
+    with _recorded(_history_id(path, notes_dir), "update" if exists else "create", state, source):
         path.parent.mkdir(parents=True, exist_ok=True)
         # Write to a temp file and swap it in, so a crash never leaves a half-written note.
         fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
@@ -270,7 +293,8 @@ def rename_note(
         raise FileExistsError(f"{new_filepath} already exists")
 
     rel = _relative(new_path, notes_dir)
-    with _recorded(rel, "rename", {**state, "path": rel, "previous_path": state["path"]}, source):
+    state = {**state, "path": rel, "previous_path": state["path"]}
+    with _recorded(_history_id(new_path, notes_dir), "rename", state, source):
         new_path.parent.mkdir(parents=True, exist_ok=True)
         path.rename(new_path)
 
@@ -294,5 +318,5 @@ def delete_note(
         "delete",
         lambda: ApprovalRequiredError(path, state["content"], state["frontmatter"], action="delete"),
     )
-    with _recorded(state["path"], "delete", state, source):
+    with _recorded(_history_id(path, notes_dir), "delete", state, source):
         path.unlink()

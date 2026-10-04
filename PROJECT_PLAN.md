@@ -23,7 +23,7 @@ A personal AI co-pilot designed to manage daily workflows against real project G
 - **Phase 6 — Evening Check-in:** **Complete**
 - **Phase 7 — Co-pilot Chat and Agent:** **Complete**
 - **Phase 8 — UI Realignment & Slash Commands:** **In Progress**
-- **Phase 9 — Confluence/Jira Hybrid Architecture:** Pending (Implement Spaces, flexible Content folders, and DB-backed Task Engine)
+- **Phase 9 — Confluence/Jira Hybrid Architecture:** **In Progress** (Spaces, flexible Content folders, DB-backed Task Engine and Templates implemented on branch `phase-9`)
 - **Phase 10 — Annotations & Bulk Ingestion:** Pending
 - **Phase 11 — Android App Expansions:** Pending (Morning brief, Triage, and Evening check-in on the mobile app)
 
@@ -37,5 +37,6 @@ A personal AI co-pilot designed to manage daily workflows against real project G
 - **Meeting Notes:** Future evolution from manual entry to automated listening mode remains to be investigated.
 
 ## 5. Deviations Log
+- **2026-10-04:** *Task engine (Phase 9) builds on the existing tables.* The plan asked for a new `Task` table with `project_id` as a foreign key to `FolderMeta`. Instead the existing `tasks` table gained `space_id` and a `backlog` status, and `FolderMeta.project_id` links a Project folder to a `Project` row (matched by folder name, so a `C7801` folder picks up the imported C7801 Gantt). This keeps Gantt import, triage, the evening check-in and version history working unchanged. The due date stays in the existing `deadline` column. The old "All tasks" triage list moved to `/triage`.
 - **2026-10-03:** *Meeting Prep (Phase 8) Architecture Shift.* Scrapped the bespoke Meeting Prep UI route. Meeting Prep will instead be handled natively by the Co-pilot Agent using a new Saved Prompts (Slash Commands) feature. The phase was redirected to focus on this, alongside a massive UI overhaul to align with the provided Figma mockups.\n- **2026-10-02:** *Email Intake (Phase 3) modified.* Switched from dedicated email forwarding/IMAP polling to a local automation that saves emails directly to a markdown drop folder. (Decision 6 updated).
 - **2026-10-02:** *Version History Integration added.* Inserted Phase 1.5 to implement a unified SQLite history table capturing full snapshots and actor sources for all DB and file changes. Confirmed the use of application-level soft deletes (replacing DB cascades) and explicit file rename actions to guarantee history coverage.
