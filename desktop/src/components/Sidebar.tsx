@@ -279,17 +279,22 @@ export default function Sidebar({ onCollapse }: { onCollapse: () => void }) {
     ];
     if (item.kind === "folder") {
       const { folder } = item;
-      items.push(
-        {
+      // Only top-level folders can be marked; a sub-folder can still drop a flag it kept from being moved.
+      const topLevel = !folder.path.includes("/");
+      const flags: MenuItem[] = [];
+      if (topLevel || folder.is_project) {
+        flags.push({
           label: folder.is_project ? "Unmark as Project" : "Mark as Project",
-          separator: true,
           onClick: () => setFlag(folder, "is_project"),
-        },
-        {
+        });
+      }
+      if (topLevel || folder.is_reference) {
+        flags.push({
           label: folder.is_reference ? "Unmark as Reference Data" : "Mark as Reference Data",
           onClick: () => setFlag(folder, "is_reference"),
-        },
-      );
+        });
+      }
+      items.push(...flags.map((flag, i) => ({ ...flag, separator: i === 0 })));
     }
     return items;
   }

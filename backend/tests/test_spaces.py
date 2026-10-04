@@ -29,6 +29,12 @@ def write(space_id, path, text):
     file.write_text(text, encoding="utf-8")
 
 
+def flag(space_id, path, **flags):
+    """Set folder flags directly: the API only marks top-level folders, but moved folders keep theirs."""
+    with database.SessionLocal() as db:
+        return spaces.set_folder_meta(db, space_id, path, **flags).project_id
+
+
 # --- Startup migration ----------------------------------------------------------
 
 
@@ -84,7 +90,7 @@ def test_tree_nests_folders_and_flags(client):
     write(1, "Standards/ISO.md", "ISO 12215")
     write(1, ".trash/old.md", "old")
     (spaces.content_dir(1) / "Empty").mkdir()
-    client.put("/api/folders/meta", json={"space_id": 1, "path": "Yachts/C7801", "is_project": True})
+    flag(1, "Yachts/C7801", is_project=True)
     client.put("/api/folders/meta", json={"space_id": 1, "path": "Standards", "is_reference": True})
 
     tree = client.get("/api/tree", params={"space_id": 1}).json()
@@ -111,16 +117,16 @@ def test_marking_a_project_folder_links_the_gantt_project(client):
 
     first = client.put("/api/folders/meta", json={"space_id": 1, "path": "/C7801/", "is_project": True}).json()
     # A second folder with the same name gets its own project.
-    second = client.put("/api/folders/meta", json={"space_id": 1, "path": "Other/C7801", "is_project": True}).json()
+    second_id = flag(1, "Other/C7801", is_project=True)
     unmarked = client.put("/api/folders/meta", json={"space_id": 1, "path": "C7801", "is_project": False}).json()
     remarked = client.put("/api/folders/meta", json={"space_id": 1, "path": "C7801", "is_project": True}).json()
 
     assert first == {"space_id": 1, "path": "C7801", "is_project": True, "is_reference": False, "project_id": gantt.id}
-    assert second["project_id"] not in (None, gantt.id)
+    assert second_id not in (None, gantt.id)
     assert unmarked["project_id"] is None
     assert remarked["project_id"] == gantt.id
     with database.SessionLocal() as db:
-        assert db.get(Project, second["project_id"]).code == "C7801-2"
+        assert db.get(Project, second_id).code == "C7801-2"
         assert db.scalars(select(HistoryRecord).where(HistoryRecord.entity_type == "FolderMeta")).first() is not None
 
 
@@ -128,6 +134,21 @@ def test_folder_meta_errors(client):
     assert client.put("/api/folders/meta", json={"space_id": 1, "path": "Nope", "is_project": True}).status_code == 404
     assert client.put("/api/folders/meta", json={"space_id": 1, "path": "../x", "is_project": True}).status_code == 400
     assert client.put("/api/folders/meta", json={"space_id": 9, "path": "x", "is_project": True}).status_code == 404
+
+
+def test_only_top_level_folders_can_be_marked(client):
+    (spaces.content_dir(1) / "Yachts" / "C7801").mkdir(parents=True)
+    flag(1, "Yachts/C7801", is_reference=True)
+
+    for flags in ({"is_project": True}, {"is_reference": True}, {"is_project": True, "is_reference": False}):
+        response = client.put("/api/folders/meta", json={"space_id": 1, "path": "Yachts/C7801", **flags})
+        assert response.status_code == 400
+        assert "top-level" in response.json()["detail"]
+    # A sub-folder can still lose a flag it kept from being moved.
+    unmarked = client.put("/api/folders/meta", json={"space_id": 1, "path": "Yachts/C7801", "is_reference": False})
+    assert unmarked.status_code == 200
+    assert not unmarked.json()["is_reference"]
+    assert client.put("/api/folders/meta", json={"space_id": 1, "path": "/Yachts/", "is_project": True}).status_code == 200
 
 
 def test_create_folder_and_note_from_template(client, monkeypatch):
@@ -145,7 +166,7 @@ def test_create_folder_and_note_from_template(client, monkeypatch):
     assert response.status_code == 201
     note = response.json()
     assert note["path"] == "C7801/Meetings/Weekly.md"
-    assert note["frontmatter"] == {"type": "meeting", "created": "2026-10-04"}
+    assert note["frontmatter"] == {"type": "meeting", "created": "2026-10-04", "state": "draft"}
     assert note["content"].startswith("# Weekly 1\n")
     assert file_layer.read_note(note["path"], notes_dir=spaces.content_dir(1))["content"] == note["content"]
     assert client.post("/api/notes", json={"space_id": 1, "path": "C7801/Meetings/Weekly.md"}).status_code == 409
@@ -159,6 +180,50 @@ def test_create_folder_and_note_from_template(client, monkeypatch):
 
     template = client.get("/api/notes/file", params={"space_id": 1, "path": "Meeting note.md", "root": "templates"})
     assert template.json()["frontmatter"] == {"type": "meeting"}
+
+
+def test_update_note_saves_the_body_and_state(client):
+    write(1, "C7801/Keel.md", "---\ncreated: 2026-09-30\ntitle: Keel\n---\nOld body\n")
+    root = spaces.content_dir(1)
+
+    edited = client.put("/api/notes/file", json={"space_id": 1, "path": "C7801/Keel.md", "content": "New body\n"})
+    assert edited.status_code == 200
+    assert edited.json() == {
+        "path": "C7801/Keel.md",
+        "frontmatter": {"created": "2026-09-30", "title": "Keel"},
+        "content": "New body\n",
+    }
+
+    published = client.put("/api/notes/file", json={"space_id": 1, "path": "C7801/Keel.md", "state": "published"})
+    assert published.json()["frontmatter"]["state"] == "published"
+    note = file_layer.read_note("C7801/Keel.md", notes_dir=root)
+    # Untouched front-matter keeps its YAML types (the date stays a date).
+    assert note["frontmatter"] == {"created": date(2026, 9, 30), "title": "Keel", "state": "published"}
+    assert note["content"] == "New body\n"
+
+    both = client.put(
+        "/api/notes/file", json={"space_id": 1, "path": "C7801/Keel.md", "content": "Draft\n", "state": "draft"}
+    ).json()
+    assert (both["frontmatter"]["state"], both["content"]) == ("draft", "Draft\n")
+    with database.SessionLocal() as db:
+        records = db.scalars(select(HistoryRecord).where(HistoryRecord.entity_id == "C7801/Keel.md")).all()
+    assert {r.source for r in records} == {"desktop"}
+
+
+@pytest.mark.parametrize(
+    ("payload", "status"),
+    [
+        ({"path": "missing.md", "content": "x"}, 404),
+        ({"path": "../x.md", "content": "x"}, 400),
+        ({"path": ".trash/old.md", "content": "x"}, 400),
+        ({"path": "a.md", "state": "archived"}, 422),
+        ({"path": "a.md", "space_id": 9, "content": "x"}, 404),
+    ],
+)
+def test_update_note_errors(client, payload, status):
+    write(1, "a.md", "a")
+    write(1, ".trash/old.md", "old")
+    assert client.put("/api/notes/file", json={"space_id": 1, **payload}).status_code == status
 
 
 def test_notes_are_isolated_per_space(client):
@@ -202,7 +267,7 @@ def test_move_a_project_folder_keeps_its_flags_and_task_links(client):
     project_id = client.put("/api/folders/meta", json={"space_id": 1, "path": "C7801", "is_project": True}).json()[
         "project_id"
     ]
-    client.put("/api/folders/meta", json={"space_id": 1, "path": "C7801/Keel", "is_reference": True})
+    flag(1, "C7801/Keel", is_reference=True)
     task = client.post(
         "/api/tasks", json={"space_id": 1, "title": "Check", "note_paths": ["C7801/Keel/Drawings.md"]}
     ).json()

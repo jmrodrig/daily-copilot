@@ -44,7 +44,9 @@ from schemas import (
     NoteCreate,
     NoteFile,
     NoteRoot,
+    NoteState,
     NoteSummary,
+    NoteUpdate,
     Priority,
     ProjectOption,
     Status,
@@ -528,6 +530,28 @@ def get_note(
     return NoteFile(path=note["path"], frontmatter=to_jsonable(note["frontmatter"]), content=note["content"])
 
 
+@app.put("/api/notes/file")
+def update_note(request: NoteUpdate, db: Session = Depends(get_db)) -> NoteFile:
+    """Save a draft's body and/or switch it between draft and published (the `state` front-matter)."""
+    root = spaces.content_dir(_space_id_or_404(db, request.space_id))
+    try:
+        note = file_layer.read_note(request.path, notes_dir=root)
+    except file_layer.FileLayerError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"No note at {request.path}") from exc
+    if _hidden(note["path"]):
+        raise HTTPException(status_code=400, detail=f"{note['path']} is in a hidden folder")
+    frontmatter = dict(note["frontmatter"])
+    if request.state is not None:
+        frontmatter["state"] = request.state.value
+    content = note["content"] if request.content is None else request.content
+    file_layer.write_note(
+        note["path"], content, frontmatter, AccessMode.WRITE_DIRECTLY, notes_dir=root, source=DESKTOP_SOURCE
+    )
+    return NoteFile(path=note["path"], frontmatter=to_jsonable(frontmatter), content=content)
+
+
 @app.post("/api/notes/apply-edit")
 def apply_edit(request: ApplyEditRequest, db: Session = Depends(get_db)) -> ApplyEditResponse:
     """Commit an `ask_first` edit the user approved, unless the note changed since it was proposed."""
@@ -589,9 +613,17 @@ def tree(space_id: int = spaces.DEFAULT_SPACE_ID, db: Session = Depends(get_db))
 
 @app.put("/api/folders/meta")
 def update_folder_meta(request: FolderMetaUpdate, db: Session = Depends(get_db)) -> FolderMetaOut:
-    """Mark or unmark a folder as a Project (which links it to a project for tasks) or Reference Data."""
+    """Mark or unmark a top-level folder as a Project (which links it to a project for tasks) or Reference Data.
+
+    Sub-folders can only be unmarked (flags they kept from being moved under another folder).
+    """
     _space_id_or_404(db, request.space_id)
     try:
+        if request.is_project or request.is_reference:
+            if "/" in spaces.normalize_folder(request.space_id, request.path):
+                raise HTTPException(
+                    status_code=400, detail="Only top-level folders can be marked as a Project or Reference Data"
+                )
         meta = spaces.set_folder_meta(
             db, request.space_id, request.path, is_project=request.is_project, is_reference=request.is_reference
         )
@@ -664,6 +696,7 @@ def create_note(request: NoteCreate, db: Session = Depends(get_db)) -> NoteFile:
         }
         content = _fill_template(template["content"], title, today)
     frontmatter.setdefault("created", today.isoformat())
+    frontmatter.setdefault("state", NoteState.DRAFT.value)
     file_layer.write_note(rel, content, frontmatter, AccessMode.WRITE_DIRECTLY, notes_dir=root, source=DESKTOP_SOURCE)
     return NoteFile(path=rel, frontmatter=to_jsonable(frontmatter), content=content)
 

@@ -364,6 +364,25 @@ class NoteFile(BaseModel):
     content: str
 
 
+class NoteState(str, Enum):
+    """A note's `state` front-matter: drafts are edited in the desktop app, published notes are read-only there.
+
+    A note without `state` is published (notes written before Phase 9.3); new notes start as drafts.
+    """
+
+    DRAFT = "draft"
+    PUBLISHED = "published"
+
+
+class NoteUpdate(BaseModel):
+    """`PUT /api/notes/file`: save a note's body and/or set its state. Other front-matter is kept."""
+
+    space_id: int
+    path: str = Field(min_length=1, description="Relative to content/")
+    content: str | None = Field(default=None, description="The new body (without front-matter); unchanged if omitted")
+    state: NoteState | None = Field(default=None, description="Unchanged if omitted")
+
+
 class ProposedEdit(BaseModel):
     """A note write the agent wanted to make in `ask_first` mode, waiting for the user's approval."""
 
