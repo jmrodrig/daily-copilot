@@ -85,3 +85,49 @@ body {
 .markdown blockquote {
   @apply border-l-2 border-border-light pl-3 text-text-secondary;
 }
+
+/* Note bodies, read-only and in the rich-text editor: sized like a document rather than a chat reply. */
+.note-body h1 {
+  @apply mt-6 text-2xl;
+}
+.note-body h2 {
+  @apply mt-5 text-xl;
+}
+.note-body h3 {
+  @apply mt-4 text-base;
+}
+.note-body table {
+  @apply w-full text-[13px];
+}
+.note-body th {
+  @apply bg-surface-raised font-semibold text-text-primary;
+}
+.note-body th > p,
+.note-body td > p {
+  @apply m-0;
+}
+.note-body ul:has(> li > input[type="checkbox"]),
+.note-body ul[data-type="taskList"] {
+  @apply list-none pl-1;
+}
+.note-body ul[data-type="taskList"] li {
+  @apply flex items-start gap-2;
+}
+.note-body ul[data-type="taskList"] li > label {
+  @apply mt-[3px] shrink-0 select-none;
+}
+.note-body ul[data-type="taskList"] li > div {
+  @apply min-w-0 flex-1;
+}
+.note-body ul[data-type="taskList"] li[data-checked="true"] > div {
+  @apply text-text-muted line-through;
+}
+.note-body input[type="checkbox"] {
+  @apply accent-accent;
+}
+.ProseMirror .selectedCell {
+  @apply bg-accent/[0.12];
+}
+.ProseMirror .tableWrapper {
+  @apply overflow-x-auto;
+}
