@@ -17,7 +17,7 @@ import database
 import spaces
 from database import get_db, init_db
 from history import set_source, soft_delete, to_jsonable, utcnow
-from models import FolderMeta, Project, SavedPrompt, Space, Task, TaskNoteLink, TimeLog
+from models import FolderMeta, Project, SavedPrompt, Space, Task, TaskNoteLink, TaskView, TimeLog
 import schemas
 from schemas import (
     AccessMode,
@@ -62,6 +62,8 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     with database.SessionLocal() as db:
         spaces.migrate(db)
         seed_prompts(db)
+        for space in db.scalars(select(Space)).all():
+            seed_views(db, space.id)
     yield
 
 
@@ -562,8 +564,10 @@ def list_spaces(db: Session = Depends(get_db)) -> list[schemas.Space]:
 
 @app.post("/api/spaces", status_code=201)
 def create_space(request: schemas.SpaceIn, db: Session = Depends(get_db)) -> schemas.Space:
-    """A new space with empty content/ and the starter templates."""
-    return schemas.Space.model_validate(spaces.create_space(db, request.name), from_attributes=True)
+    """A new space with empty content/, the starter templates and the default task views."""
+    space = spaces.create_space(db, request.name)
+    seed_views(db, space.id)
+    return schemas.Space.model_validate(space, from_attributes=True)
 
 
 @app.get("/api/tree")
@@ -792,6 +796,96 @@ def unlink_note(task_id: int, note_path: str, db: Session = Depends(get_db)) -> 
     db.execute(delete(TaskNoteLink).where(TaskNoteLink.task_id == task.id, TaskNoteLink.note_path == note_path))
     db.commit()
     return _task_items(db, [task])[0]
+
+
+# --- Saved task views (Phase 9.1) -------------------------------------------------
+
+VIEWS_SOURCE = "desktop"
+DEFAULT_VIEWS = (
+    ("Kanban", schemas.ViewType.KANBAN),
+    ("Backlog", schemas.ViewType.BACKLOG),
+    ("Gantt", schemas.ViewType.GANTT),
+)
+
+
+def seed_views(db: Session, space_id: int) -> None:
+    """Give a space that has never had any task views (deleted ones count) one of each type."""
+    seen = select(TaskView).where(TaskView.space_id == space_id).execution_options(include_deleted=True)
+    if db.scalars(seen.limit(1)).first() is None:
+        set_source(db, VIEWS_SOURCE)
+        db.add_all(TaskView(space_id=space_id, name=name, view_type=kind, filters={}) for name, kind in DEFAULT_VIEWS)
+        db.commit()
+
+
+def _view_out(view: TaskView) -> schemas.TaskView:
+    return schemas.TaskView(
+        id=view.id,
+        space_id=view.space_id,
+        name=view.name,
+        view_type=view.view_type,
+        # Filters saved by an older version may lack keys or carry stale ones.
+        filters=schemas.TaskViewFilters.model_validate(view.filters or {}),
+        created_at=view.created_at,
+    )
+
+
+def _get_view(db: Session, view_id: int) -> TaskView:
+    view = db.get(TaskView, view_id)
+    if view is None or view.deleted_at is not None:
+        raise HTTPException(status_code=404, detail=f"Unknown view id: {view_id}")
+    return view
+
+
+@app.get("/api/views")
+def list_views(space_id: int = spaces.DEFAULT_SPACE_ID, db: Session = Depends(get_db)) -> list[schemas.TaskView]:
+    """The saved task views of a space, in the order they were created."""
+    query = select(TaskView).where(TaskView.space_id == _space_id_or_404(db, space_id)).order_by(TaskView.id)
+    return [_view_out(v) for v in db.scalars(query)]
+
+
+@app.get("/api/views/{view_id}")
+def get_view(view_id: int, db: Session = Depends(get_db)) -> schemas.TaskView:
+    return _view_out(_get_view(db, view_id))
+
+
+@app.post("/api/views", status_code=201)
+def create_view(request: schemas.TaskViewIn, db: Session = Depends(get_db)) -> schemas.TaskView:
+    _space_id_or_404(db, request.space_id)
+    _check_project(db, request.filters.project_id)
+    set_source(db, VIEWS_SOURCE)
+    view = TaskView(
+        space_id=request.space_id,
+        name=request.name,
+        view_type=request.view_type,
+        filters=request.filters.model_dump(mode="json"),
+    )
+    db.add(view)
+    db.commit()
+    return _view_out(view)
+
+
+@app.put("/api/views/{view_id}")
+def update_view(view_id: int, request: schemas.TaskViewUpdate, db: Session = Depends(get_db)) -> schemas.TaskView:
+    """Rename a view and/or replace its filters; fields left out are kept."""
+    view = _get_view(db, view_id)
+    if request.filters is not None:
+        _check_project(db, request.filters.project_id)
+    set_source(db, VIEWS_SOURCE)
+    if request.name is not None:
+        view.name = request.name
+    if request.filters is not None:
+        view.filters = request.filters.model_dump(mode="json")
+    db.commit()
+    return _view_out(view)
+
+
+@app.delete("/api/views/{view_id}", status_code=204)
+def delete_view(view_id: int, db: Session = Depends(get_db)) -> None:
+    """Soft-delete a view (it stays in `history`); its tasks are untouched."""
+    view = _get_view(db, view_id)
+    set_source(db, VIEWS_SOURCE)
+    soft_delete(db, view)
+    db.commit()
 
 
 if __name__ == "__main__":

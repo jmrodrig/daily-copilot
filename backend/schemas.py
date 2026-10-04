@@ -544,3 +544,56 @@ class TaskItem(BaseModel):
 
 class TaskNoteLinkIn(BaseModel):
     note_path: str = Field(min_length=1)
+
+
+class ViewType(str, Enum):
+    KANBAN = "kanban"
+    BACKLOG = "backlog"
+    GANTT = "gantt"
+
+
+class TaskViewFilters(BaseModel):
+    """The filters a saved task view applies to `GET /api/tasks`."""
+
+    project_id: int | None = Field(default=None, description="None means every project")
+    assignee: str | None = Field(default=None, max_length=64, description='None means everyone; "" means unassigned')
+
+    @field_validator("assignee")
+    @classmethod
+    def _strip_assignee(cls, value: str | None) -> str | None:
+        return value.strip() if value is not None else None
+
+
+class TaskViewIn(BaseModel):
+    """`POST /api/views`: a named Kanban, Backlog or Gantt view of a space's tasks."""
+
+    space_id: int
+    name: str = Field(min_length=1, max_length=64)
+    view_type: ViewType
+    filters: TaskViewFilters = Field(default_factory=TaskViewFilters)
+
+    @field_validator("name")
+    @classmethod
+    def _strip_name(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("name must not be blank")
+        return value.strip()
+
+
+class TaskViewUpdate(BaseModel):
+    """`PUT /api/views/{id}`: rename a view and/or replace its filters. Unsent fields are kept."""
+
+    name: str | None = Field(default=None, min_length=1, max_length=64)
+    filters: TaskViewFilters | None = None
+
+    @field_validator("name")
+    @classmethod
+    def _strip_name(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("name must not be blank")
+        return value.strip() if value is not None else None
+
+
+class TaskView(TaskViewIn):
+    id: int
+    created_at: datetime | None = None

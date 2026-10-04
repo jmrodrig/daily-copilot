@@ -8,7 +8,7 @@ import NotePage from "./pages/NotePage";
 import Placeholder from "./pages/Placeholder";
 import ProjectPlan from "./pages/ProjectPlan";
 import Settings from "./pages/Settings";
-import Tasks from "./pages/Tasks";
+import SavedTaskView, { AdHocTasks } from "./pages/Tasks";
 
 export default function App() {
   return (
@@ -17,7 +17,8 @@ export default function App() {
         <Route index element={<Dashboard />} />
         <Route path="triage" element={<AllTasks />} />
         <Route path="tasks" element={<Navigate to="/tasks/kanban" replace />} />
-        <Route path="tasks/:view" element={<Tasks />} />
+        <Route path="tasks/:view" element={<AdHocTasks />} />
+        <Route path="views/:id" element={<SavedTaskView />} />
         <Route path="check-in" element={<EveningCheckIn />} />
         <Route path="plan/:code" element={<ProjectPlan />} />
         <Route path="note" element={<NotePage />} />
