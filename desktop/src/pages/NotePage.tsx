@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useState } from "react";
 import Markdown from "react-markdown";
 import { Link, useSearchParams } from "react-router-dom";
 import remarkGfm from "remark-gfm";
@@ -7,7 +7,7 @@ import { formatDay, NEUTRAL_TAG, PROJECT_TAG, Tag } from "../components/TriageBo
 import { getJson, message, sendJson } from "../lib/api";
 import { useSpace } from "../lib/space";
 import { isOverdue, STATUS_LABELS, type TaskItem } from "../lib/tasks";
-import PageHeader from "../components/PageHeader";
+import NoteEditor from "../components/NoteEditor";
 
 // GET /api/notes/file (see NoteFile in backend/schemas.py).
 type NoteFile = { path: string; frontmatter: Record<string, unknown>; content: string };
@@ -18,7 +18,12 @@ type NoteState = "draft" | "published";
 const noteState = (frontmatter: Record<string, unknown>): NoteState =>
   frontmatter.state === "draft" ? "draft" : "published";
 
+// Front-matter keys that aren't shown: the title is the heading, and priorities belong to tasks, not notes.
+const HIDDEN_PROPS = new Set(["title", "priority"]);
+
 function show(value: unknown): string {
+  // ISO timestamps (`2026-10-02T22:46:19`) read as `2026-10-02 22:46`.
+  if (typeof value === "string") return value.replace(/^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?$/, "$1 $2");
   return Array.isArray(value) ? value.map(String).join(", ") : typeof value === "object" ? JSON.stringify(value) : String(value);
 }
 
@@ -69,7 +74,7 @@ export default function NotePage() {
   const fm = note.state === "ok" ? note.note.frontmatter : {};
   const title = typeof fm.title === "string" && fm.title ? fm.title : parts[parts.length - 1].replace(/\.md$/i, "");
   const props = Object.entries(fm).filter(
-    ([key, value]) => key !== "title" && !(key === "state" && !isTemplate) && value !== null && value !== "",
+    ([key, value]) => !HIDDEN_PROPS.has(key) && !(key === "state" && !isTemplate) && value !== null && value !== "",
   );
   const state = isTemplate || note.state !== "ok" ? null : noteState(fm);
   const dirty = note.state === "ok" && body !== note.note.content;
@@ -98,10 +103,16 @@ export default function NotePage() {
 
   const actions =
     state === "draft" ? (
-      <div className="flex items-center gap-2">
-        <button type="button" className="btn" onClick={() => save()} disabled={saving || !dirty}>
-          {dirty ? "Save draft" : "Saved"}
-        </button>
+      <div className="flex items-center gap-3">
+        {dirty && !saving ? (
+          <button type="button" className="btn" onClick={() => save()}>
+            Save draft
+          </button>
+        ) : (
+          <span role="status" className="text-xs text-text-muted">
+            {saving ? "Saving…" : "Saved"}
+          </span>
+        )}
         <button type="button" className="btn-primary" onClick={() => save("published")} disabled={saving}>
           Publish
         </button>
@@ -113,22 +124,27 @@ export default function NotePage() {
     ) : undefined;
 
   return (
-    <div className="flex max-w-4xl flex-col gap-5 px-9 py-7">
-      <PageHeader
-        eyebrow={isTemplate ? "TEMPLATE" : parts.slice(0, -1).join(" / ").toUpperCase() || "NOTES"}
-        title={title}
-        badge={state && <Tag className={state === "draft" ? DRAFT_TAG : NEUTRAL_TAG}>{state}</Tag>}
-        actions={actions}
-      />
+    <div className="mx-auto flex w-full max-w-4xl flex-col gap-5 px-9 py-7">
+      {/* Breadcrumb and actions sit above the document, so the title reads as its first line. */}
+      <div className="flex min-h-10 flex-wrap items-center justify-between gap-4">
+        <div className="flex min-w-0 items-center gap-3">
+          <span className="truncate font-mono text-xs tracking-[0.06em] text-text-muted">
+            {isTemplate ? "TEMPLATE" : parts.slice(0, -1).join(" / ").toUpperCase() || "NOTES"}
+          </span>
+          {state && <Tag className={state === "draft" ? DRAFT_TAG : NEUTRAL_TAG}>{state}</Tag>}
+        </div>
+        {actions}
+      </div>
+      <h1 className="-mb-2 text-[32px] font-semibold leading-tight">{title}</h1>
       {saveError && <p className="text-[13px] text-accent">Could not save {path} ({saveError}).</p>}
       {note.state === "loading" && <p className="text-[13px] text-text-muted">Loading…</p>}
       {note.state === "error" && <p className="text-[13px] text-text-secondary">Could not open {path} ({note.message}).</p>}
       {note.state === "ok" && (
         <>
           {props.length > 0 && (
-            <dl className="grid grid-cols-[120px_minmax(0,1fr)] gap-x-4 gap-y-1.5 border-b border-border-default pb-4 text-[13px]">
+            <dl className="flex flex-wrap gap-x-5 gap-y-1 text-xs">
               {props.map(([key, value]) => (
-                <div key={key} className="contents">
+                <div key={key} className="flex gap-1.5">
                   <dt className="text-text-muted">{key}</dt>
                   <dd className="text-text-secondary">{show(value)}</dd>
                 </div>
@@ -137,9 +153,9 @@ export default function NotePage() {
           )}
           {tasks.length > 0 && <LinkedTasks tasks={tasks} />}
           {state === "draft" ? (
-            <DraftEditor value={body} onChange={setBody} onSave={() => dirty && save()} disabled={saving} />
+            <NoteEditor key={path} value={body} onChange={setBody} onSave={() => dirty && save()} disabled={saving} />
           ) : (
-            <article className="markdown text-sm leading-relaxed text-text-secondary">
+            <article className="note-body markdown text-sm leading-relaxed text-text-secondary">
               <Markdown remarkPlugins={[remarkGfm]}>{note.note.content}</Markdown>
             </article>
           )}
@@ -150,50 +166,6 @@ export default function NotePage() {
 }
 
 const DRAFT_TAG = "border-accent/60 text-accent";
-
-/** The draft's markdown body (front-matter is kept by the backend): grows with its text; Ctrl/Cmd+S saves. */
-function DraftEditor({
-  value,
-  onChange,
-  onSave,
-  disabled,
-}: {
-  value: string;
-  onChange: (value: string) => void;
-  onSave: () => void;
-  disabled: boolean;
-}) {
-  const ref = useRef<HTMLTextAreaElement>(null);
-
-  useLayoutEffect(() => {
-    const area = ref.current;
-    if (!area) return;
-    area.style.height = "auto";
-    area.style.height = `${area.scrollHeight + 2}px`;
-  }, [value]);
-
-  function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
-    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
-      event.preventDefault();
-      onSave();
-    }
-  }
-
-  return (
-    <label>
-      <span className="sr-only">Note body (markdown)</span>
-      <textarea
-        ref={ref}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        onKeyDown={handleKeyDown}
-        readOnly={disabled}
-        spellCheck
-        className="field block min-h-64 resize-none overflow-hidden font-mono text-[13px] leading-relaxed"
-      />
-    </label>
-  );
-}
 
 function LinkedTasks({ tasks }: { tasks: TaskItem[] }) {
   return (
