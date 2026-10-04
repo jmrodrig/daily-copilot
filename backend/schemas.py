@@ -381,6 +381,20 @@ class NoteUpdate(BaseModel):
     path: str = Field(min_length=1, description="Relative to content/")
     content: str | None = Field(default=None, description="The new body (without front-matter); unchanged if omitted")
     state: NoteState | None = Field(default=None, description="Unchanged if omitted")
+    title: str | None = Field(default=None, description="The new front-matter `title`; unchanged if omitted")
+
+    @field_validator("title")
+    @classmethod
+    def _title_not_blank(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("title must not be blank")
+        return None if value is None else value.strip()
+
+
+class ImageUpload(BaseModel):
+    """`POST /api/notes/image`: where a pasted image is served from, for the note's markdown."""
+
+    url: str
 
 
 class ProposedEdit(BaseModel):

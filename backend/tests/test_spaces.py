@@ -226,6 +226,49 @@ def test_update_note_errors(client, payload, status):
     assert client.put("/api/notes/file", json={"space_id": 1, **payload}).status_code == status
 
 
+def test_update_note_sets_the_title(client):
+    write(1, "Keel.md", "---\ntitle: Keel\nstate: draft\n---\nBody\n")
+
+    renamed = client.put("/api/notes/file", json={"space_id": 1, "path": "Keel.md", "title": "  Keel layout  "})
+    assert renamed.json()["frontmatter"] == {"title": "Keel layout", "state": "draft"}
+    assert file_layer.read_note("Keel.md", notes_dir=spaces.content_dir(1))["content"].strip() == "Body"
+    assert client.get("/api/notes", params={"space_id": 1}).json() == [{"path": "Keel.md", "title": "Keel layout"}]
+    assert client.put("/api/notes/file", json={"space_id": 1, "path": "Keel.md", "title": " "}).status_code == 422
+
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"\0" * 16
+
+
+def test_pasted_images_are_stored_and_served(client):
+    other = client.post("/api/spaces", json={"name": "Private"}).json()["id"]
+
+    uploaded = client.post("/api/notes/image", data={"space_id": 1}, files={"file": ("image.png", PNG, "image/png")})
+    assert uploaded.status_code == 200
+    url = uploaded.json()["url"]
+    name = url.removeprefix("/api/notes/image/").removesuffix("?space_id=1")
+    assert (spaces.content_dir(1) / ".assets" / name).read_bytes() == PNG
+    # Hidden from the note list (and the tree).
+    assert client.get("/api/notes", params={"space_id": 1}).json() == []
+
+    served = client.get(url)
+    assert (served.status_code, served.content, served.headers["content-type"]) == (200, PNG, "image/png")
+    assert client.get(f"/api/notes/image/{name}", params={"space_id": other}).status_code == 404
+    assert client.get("/api/notes/image/notes.md", params={"space_id": 1}).status_code == 400
+    assert client.get("/api/notes/image/..%2F..%2Fcopilot.db", params={"space_id": 1}).status_code in (400, 404)
+
+
+@pytest.mark.parametrize(
+    ("space_id", "file", "status"),
+    [
+        (1, ("notes.txt", b"text", "text/plain"), 415),
+        (1, ("big.png", b"\0" * (main.MAX_IMAGE_BYTES + 1), "image/png"), 413),
+        (9, ("image.png", PNG, "image/png"), 404),
+    ],
+)
+def test_image_upload_errors(client, space_id, file, status):
+    assert client.post("/api/notes/image", data={"space_id": space_id}, files={"file": file}).status_code == status
+
+
 def test_notes_are_isolated_per_space(client):
     other = client.post("/api/spaces", json={"name": "Private"}).json()["id"]
     write(1, "work.md", "work")

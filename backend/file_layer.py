@@ -23,6 +23,7 @@ import os
 import re
 import shutil
 import tempfile
+import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -465,3 +466,42 @@ def delete_folder(
     ]
     with _recorded_all(changes, source):
         shutil.rmtree(path)
+
+
+# --- Assets (pasted images) -------------------------------------------------------
+
+ASSETS_DIR = ".assets"
+# The image types the editor may paste, by MIME type, with the suffix they're stored under.
+IMAGE_SUFFIXES = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+}
+# Stored names are `<uuid hex><suffix>`, so a name from a URL can't point anywhere else.
+_ASSET_NAME_RE = re.compile(r"\A[0-9a-f]{32}\.(?:png|jpg|gif|webp)\Z")
+
+
+def save_asset(data: bytes, content_type: str, *, notes_dir: str | Path | None = None) -> str:
+    """Store an image under NOTES_DIR/.assets/ with a fresh name, returning that name.
+
+    Raises `FileLayerError` for a type that isn't in `IMAGE_SUFFIXES`. Assets aren't notes: no history is kept.
+    """
+    suffix = IMAGE_SUFFIXES.get(content_type)
+    if suffix is None:
+        raise FileLayerError(f"{content_type or 'This file'} is not a supported image type")
+    folder = notes_root(notes_dir) / ASSETS_DIR
+    folder.mkdir(parents=True, exist_ok=True)
+    name = uuid.uuid4().hex + suffix
+    (folder / name).write_bytes(data)
+    return name
+
+
+def asset_path(name: str, *, notes_dir: str | Path | None = None) -> Path:
+    """The file of a stored asset. Raises `NotePathError` for a malformed name, `FileNotFoundError` if it's missing."""
+    if not _ASSET_NAME_RE.match(name):
+        raise NotePathError(f"{name} is not an asset name")
+    path = notes_root(notes_dir) / ASSETS_DIR / name
+    if not path.is_file():
+        raise FileNotFoundError(f"No asset {name}")
+    return path
