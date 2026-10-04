@@ -67,6 +67,9 @@ function pageContext(location: Location, spaceId: number): { label: string; hint
     const label = `Tasks · ${view.charAt(0).toUpperCase()}${view.slice(1)}`;
     return { label, hint: `the ${view} view of the task database`, notePath: null };
   }
+  if (pathname.startsWith("/views/")) {
+    return { label: "Tasks · Saved view", hint: "a saved view of the task database", notePath: null };
+  }
   if (pathname.startsWith("/plan/")) {
     const code = decodeURIComponent(pathname.slice("/plan/".length));
     return { label: `${code} plan`, hint: `the ${code} Gantt plan`, notePath: null };

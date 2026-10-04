@@ -15,7 +15,7 @@ from sqlalchemy import JSON, Enum, ForeignKey, String, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from database import Base
-from schemas import LinkType, Priority, Status
+from schemas import LinkType, Priority, Status, ViewType
 
 
 def _str_enum(enum_cls: type[enum.Enum]) -> Enum:
@@ -219,6 +219,25 @@ class SavedPrompt(Versioned, Base):
 
     def __repr__(self) -> str:
         return f"SavedPrompt(id={self.id!r}, command={self.command!r})"
+
+
+class TaskView(Versioned, Base):
+    """A saved Kanban, Backlog or Gantt view of a space's tasks, listed under TASKS in the sidebar.
+
+    `filters` holds a `schemas.TaskViewFilters` dict (`project_id`, `assignee`).
+    """
+
+    __tablename__ = "task_views"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    space_id: Mapped[int] = mapped_column(ForeignKey("spaces.id"), index=True)
+    name: Mapped[str] = mapped_column(String(64))
+    view_type: Mapped[ViewType] = mapped_column(_str_enum(ViewType))
+    filters: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[dt.datetime] = mapped_column(server_default=func.now())
+
+    def __repr__(self) -> str:
+        return f"TaskView(id={self.id!r}, name={self.name!r}, view_type={self.view_type!r})"
 
 
 class HistoryRecord(Base):

@@ -401,3 +401,84 @@ def test_folder_meta_is_per_space(two_spaces):
     with database.SessionLocal() as db:
         assert [m.path for m in db.scalars(select(FolderMeta).where(FolderMeta.space_id == two_spaces.other))] == []
     assert Status.BACKLOG.value == "backlog"
+
+
+# --- Saved task views (Phase 9.1) -------------------------------------------------
+
+
+def test_default_views_are_seeded_per_space(client):
+    views = client.get("/api/views?space_id=1").json()
+    assert [(v["name"], v["view_type"]) for v in views] == [("Kanban", "kanban"), ("Backlog", "backlog"), ("Gantt", "gantt")]
+    assert views[0]["filters"] == {"project_id": None, "assignee": None}
+
+    space = client.post("/api/spaces", json={"name": "Private"}).json()
+    assert [v["view_type"] for v in client.get(f"/api/views?space_id={space['id']}").json()] == ["kanban", "backlog", "gantt"]
+    assert client.get("/api/views?space_id=99").status_code == 404
+
+
+def test_deleted_views_are_not_seeded_again(client):
+    for view in client.get("/api/views?space_id=1").json():
+        assert client.delete(f"/api/views/{view['id']}").status_code == 204
+    with database.SessionLocal() as db:
+        main.seed_views(db, 1)
+    assert client.get("/api/views?space_id=1").json() == []
+
+
+def test_view_crud(client):
+    with database.SessionLocal() as db:
+        db.add(Project(code="C7801", name="Hull"))
+        db.commit()
+        project_id = db.scalars(select(Project.id)).one()
+
+    created = client.post(
+        "/api/views",
+        json={"space_id": 1, "name": " C7801 Kanban ", "view_type": "kanban", "filters": {"project_id": project_id}},
+    )
+    assert created.status_code == 201
+    view = created.json()
+    assert (view["name"], view["view_type"]) == ("C7801 Kanban", "kanban")
+    assert view["filters"] == {"project_id": project_id, "assignee": None}
+    assert client.get(f"/api/views/{view['id']}").json() == view
+
+    renamed = client.put(f"/api/views/{view['id']}", json={"name": "Hull board"}).json()
+    assert renamed["name"] == "Hull board"
+    assert renamed["filters"]["project_id"] == project_id
+
+    refiltered = client.put(f"/api/views/{view['id']}", json={"filters": {"assignee": " Jose "}}).json()
+    assert refiltered["name"] == "Hull board"
+    assert refiltered["filters"] == {"project_id": None, "assignee": "Jose"}
+
+    assert client.delete(f"/api/views/{view['id']}").status_code == 204
+    assert view["id"] not in [v["id"] for v in client.get("/api/views?space_id=1").json()]
+    assert client.get(f"/api/views/{view['id']}").status_code == 404
+    assert client.put(f"/api/views/{view['id']}", json={"name": "x"}).status_code == 404
+    assert client.delete(f"/api/views/{view['id']}").status_code == 404
+
+    with database.SessionLocal() as db:
+        actions = db.scalars(
+            select(HistoryRecord.action).where(
+                HistoryRecord.entity_type == "TaskView", HistoryRecord.entity_id == str(view["id"])
+            )
+        ).all()
+    assert actions == ["create", "update", "update", "delete"]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"space_id": 1, "name": "  ", "view_type": "kanban"},
+        {"space_id": 1, "name": "Board", "view_type": "calendar"},
+        {"space_id": 1, "name": "x" * 65, "view_type": "kanban"},
+    ],
+)
+def test_create_view_validation(client, payload):
+    assert client.post("/api/views", json=payload).status_code == 422
+
+
+def test_view_references_must_exist(client):
+    assert client.post("/api/views", json={"space_id": 99, "name": "A", "view_type": "gantt"}).status_code == 404
+    unknown_project = {"space_id": 1, "name": "A", "view_type": "gantt", "filters": {"project_id": 999}}
+    assert client.post("/api/views", json=unknown_project).status_code == 400
+    view_id = client.get("/api/views?space_id=1").json()[0]["id"]
+    assert client.put(f"/api/views/{view_id}", json={"filters": {"project_id": 999}}).status_code == 400
+    assert client.put(f"/api/views/{view_id}", json={"name": " "}).status_code == 422

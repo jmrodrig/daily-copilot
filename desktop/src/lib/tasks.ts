@@ -1,3 +1,5 @@
+import type { ViewFilters } from "./views";
+
 // Shapes of the task engine endpoints (see TaskItem, ProjectOption etc. in backend/schemas.py).
 export type TaskStatus = "backlog" | "todo" | "in_progress" | "blocked" | "done";
 export type TaskPriority = "low" | "normal" | "high" | "urgent";
@@ -57,10 +59,10 @@ export function isOverdue(task: TaskItem): boolean {
   return Date.UTC(y, m - 1, d) / MS_PER_DAY < today;
 }
 
-/** Query string for `GET /api/tasks` and the task views: the space plus the Project/Assignee filters. */
-export function taskQuery(spaceId: number, filters: { project: string | null; assignee: string | null }): string {
+/** Query string for `GET /api/tasks` and the task views: the space plus a view's Project/Assignee filters. */
+export function taskQuery(spaceId: number, filters: ViewFilters): string {
   const params = new URLSearchParams({ space_id: String(spaceId) });
-  if (filters.project) params.set("project_id", filters.project);
+  if (filters.project_id !== null) params.set("project_id", String(filters.project_id));
   // An empty assignee asks for unassigned tasks.
   if (filters.assignee !== null) params.set("assignee", filters.assignee);
   return params.toString();

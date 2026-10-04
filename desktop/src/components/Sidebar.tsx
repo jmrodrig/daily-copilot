@@ -3,6 +3,7 @@ import { NavLink, useLocation, useNavigate } from "react-router-dom";
 
 import { getJson, message, sendJson } from "../lib/api";
 import { notePath, useSpace } from "../lib/space";
+import { VIEW_TYPES, VIEWS_CHANGED, viewPath, type TaskView, type ViewType } from "../lib/views";
 
 // GET /api/tree (see TreeResponse and FolderNode in backend/schemas.py).
 type NoteSummary = { path: string; title: string };
@@ -25,12 +26,6 @@ const NAV_ITEMS = [
   { to: "/people", label: "People", end: false },
 ];
 
-const TASK_VIEWS = [
-  { to: "/tasks/kanban", label: "Kanban" },
-  { to: "/tasks/backlog", label: "Backlog" },
-  { to: "/tasks/gantt", label: "Gantt" },
-];
-
 const EXPANDED_KEY = "copilot.treeExpanded";
 const POLL_MS = 30_000;
 const NEW_SPACE = "new";
@@ -47,6 +42,7 @@ function storedExpanded(): Set<string> {
 
 type Health = "loading" | "ok" | "error";
 type Menu = { x: number; y: number; folder: FolderNode };
+type ViewMenu = { x: number; y: number; view: TaskView | null }; // null: the TASKS "+" menu
 type Dialog = { kind: "note" | "folder"; parent: string };
 
 export default function Sidebar({ onCollapse }: { onCollapse: () => void }) {
@@ -57,7 +53,26 @@ export default function Sidebar({ onCollapse }: { onCollapse: () => void }) {
   const [menu, setMenu] = useState<Menu | null>(null);
   const [dialog, setDialog] = useState<Dialog | null>(null);
   const [menuError, setMenuError] = useState<string | null>(null);
+  const [views, setViews] = useState<{ spaceId: number; views: TaskView[] } | null>(null);
+  const [viewMenu, setViewMenu] = useState<ViewMenu | null>(null);
+  const [renaming, setRenaming] = useState<number | null>(null);
+  const [viewError, setViewError] = useState<string | null>(null);
   const location = useLocation();
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const load = () =>
+      getJson<TaskView[]>(`/api/views?space_id=${spaceId}`, controller.signal)
+        .then((body) => setViews({ spaceId, views: body }))
+        .catch(() => {});
+    load();
+    window.addEventListener(VIEWS_CHANGED, load);
+    return () => {
+      window.removeEventListener(VIEWS_CHANGED, load);
+      controller.abort();
+    };
+  }, [spaceId]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -108,6 +123,58 @@ export default function Sidebar({ onCollapse }: { onCollapse: () => void }) {
     }
   }
 
+  const spaceViews = views?.spaceId === spaceId ? views.views : null;
+
+  /** Run a view change from the sidebar, then reload the sidebar and the open view. */
+  async function changeViews<T>(action: string, change: () => Promise<T>): Promise<T | undefined> {
+    setViewMenu(null);
+    setViewError(null);
+    try {
+      const result = await change();
+      window.dispatchEvent(new Event(VIEWS_CHANGED));
+      return result;
+    } catch (err: unknown) {
+      setViewError(`Could not ${action}: ${message(err)}`);
+      return undefined;
+    }
+  }
+
+  async function createView(viewType: ViewType, name: string, filters?: TaskView["filters"]) {
+    const created = await changeViews("create the view", () =>
+      sendJson<TaskView>("POST", "/api/views", { space_id: spaceId, name: name.slice(0, 64), view_type: viewType, filters }),
+    );
+    if (created) navigate(viewPath(created.id));
+    return created;
+  }
+
+  async function newView(viewType: ViewType) {
+    const taken = new Set(spaceViews?.map((v) => v.name));
+    let name: string = VIEW_TYPES[viewType];
+    for (let n = 2; taken.has(name); n++) name = `${VIEW_TYPES[viewType]} ${n}`;
+    const created = await createView(viewType, name);
+    // Let the user name it straight away.
+    if (created) setRenaming(created.id);
+  }
+
+  async function renameView(view: TaskView, name: string) {
+    setRenaming(null);
+    if (!name.trim() || name.trim() === view.name) return;
+    await changeViews(`rename ${view.name}`, () => sendJson("PUT", `/api/views/${view.id}`, { name: name.trim() }));
+  }
+
+  async function deleteView(view: TaskView) {
+    setViewMenu(null);
+    if (!window.confirm(`Delete the view "${view.name}"? Its tasks are kept.`)) return;
+    const deleted = await changeViews(`delete ${view.name}`, async () => {
+      await sendJson("DELETE", `/api/views/${view.id}`);
+      return true;
+    });
+    if (deleted && location.pathname === viewPath(view.id)) {
+      const next = spaceViews?.find((v) => v.id !== view.id);
+      navigate(next ? viewPath(next.id) : "/");
+    }
+  }
+
   const current = location.pathname + location.search;
   const content = tree?.space_id === spaceId ? tree.content : null;
   const isEmpty = content !== null && content.folders.length === 0 && content.notes.length === 0;
@@ -127,11 +194,35 @@ export default function Sidebar({ onCollapse }: { onCollapse: () => void }) {
           </NavLink>
         ))}
 
-        <SectionHeader>TASKS</SectionHeader>
-        {TASK_VIEWS.map(({ to, label }) => (
-          <NavLink key={to} to={to} className={({ isActive }) => navClass(isActive)}>
-            {label}
-          </NavLink>
+        <SectionHeader
+          actions={
+            <SmallButton
+              label="New task view"
+              onClick={(event) => {
+                const rect = event.currentTarget.getBoundingClientRect();
+                setViewMenu({ x: rect.left, y: rect.bottom + 4, view: null });
+              }}
+            >
+              +
+            </SmallButton>
+          }
+        >
+          TASKS
+        </SectionHeader>
+        {viewError && <p className="px-2 py-1 text-xs text-accent">{viewError}</p>}
+        {spaceViews?.length === 0 && <p className="px-2 py-1 text-xs text-text-muted">No task views. Add one with +.</p>}
+        {spaceViews?.map((view) => (
+          <TaskViewRow
+            key={view.id}
+            view={view}
+            renaming={renaming === view.id}
+            onRename={(name) => renameView(view, name)}
+            onCancelRename={() => setRenaming(null)}
+            onMenu={(event) => {
+              const rect = event.currentTarget.getBoundingClientRect();
+              setViewMenu({ x: rect.left, y: rect.bottom + 4, view });
+            }}
+          />
         ))}
 
         <SectionHeader
@@ -209,14 +300,59 @@ export default function Sidebar({ onCollapse }: { onCollapse: () => void }) {
       </div>
 
       {menu && (
-        <FolderMenu
-          menu={menu}
+        <PopupMenu
+          x={menu.x}
+          y={menu.y}
+          label={`${menu.folder.name} options`}
+          heading={menu.folder.path}
           onClose={() => setMenu(null)}
-          onFlag={(flag) => setFlag(menu.folder, flag)}
-          onNew={(kind) => {
-            setMenu(null);
-            setDialog({ kind, parent: menu.folder.path });
-          }}
+          items={[
+            {
+              label: menu.folder.is_project ? "Unmark as Project" : "Mark as Project",
+              onClick: () => setFlag(menu.folder, "is_project"),
+            },
+            {
+              label: menu.folder.is_reference ? "Unmark as Reference Data" : "Mark as Reference Data",
+              onClick: () => setFlag(menu.folder, "is_reference"),
+            },
+            ...(["note", "folder"] as const).map((kind, i) => ({
+              label: `New ${kind} here…`,
+              separator: i === 0,
+              onClick: () => {
+                setMenu(null);
+                setDialog({ kind, parent: menu.folder.path });
+              },
+            })),
+          ]}
+        />
+      )}
+      {viewMenu && (
+        <PopupMenu
+          x={viewMenu.x}
+          y={viewMenu.y}
+          label={viewMenu.view ? `${viewMenu.view.name} options` : "New task view"}
+          onClose={() => setViewMenu(null)}
+          items={
+            viewMenu.view
+              ? [
+                  {
+                    label: "Rename",
+                    onClick: () => {
+                      setViewMenu(null);
+                      setRenaming(viewMenu.view!.id);
+                    },
+                  },
+                  {
+                    label: "Duplicate",
+                    onClick: () => createView(viewMenu.view!.view_type, `${viewMenu.view!.name} copy`, viewMenu.view!.filters),
+                  },
+                  { label: "Delete", separator: true, onClick: () => deleteView(viewMenu.view!) },
+                ]
+              : (Object.keys(VIEW_TYPES) as ViewType[]).map((viewType) => ({
+                  label: `New ${VIEW_TYPES[viewType]}`,
+                  onClick: () => newView(viewType),
+                }))
+          }
         />
       )}
       {dialog && (
@@ -252,8 +388,12 @@ function SpaceSwitcher() {
       return;
     }
     setSpaceId(Number(value));
-    // An open note belongs to the old space.
-    if (location.pathname === "/note") navigate("/");
+    leaveOldSpace();
+  }
+
+  // An open note or saved view belongs to the old space.
+  function leaveOldSpace() {
+    if (location.pathname === "/note" || location.pathname.startsWith("/views/")) navigate("/");
   }
 
   async function submit(event: FormEvent) {
@@ -264,7 +404,7 @@ function SpaceSwitcher() {
       setCreating(false);
       setName("");
       setError(null);
-      if (location.pathname === "/note") navigate("/");
+      leaveOldSpace();
     } catch (err: unknown) {
       setError(message(err));
     }
@@ -330,7 +470,15 @@ function SectionHeader({ children, actions }: { children: string; actions?: Reac
   );
 }
 
-function SmallButton({ label, onClick, children }: { label: string; onClick: () => void; children: ReactNode }) {
+function SmallButton({
+  label,
+  onClick,
+  children,
+}: {
+  label: string;
+  onClick: (event: ReactMouseEvent<HTMLButtonElement>) => void;
+  children: ReactNode;
+}) {
   return (
     <button
       type="button"
@@ -456,16 +604,23 @@ function Badge({ className, children }: { className: string; children: string })
   );
 }
 
-function FolderMenu({
-  menu,
+type MenuItem = { label: string; onClick: () => void; separator?: boolean };
+
+/** A small menu at (x, y), closed by clicking outside it or Escape. */
+function PopupMenu({
+  x,
+  y,
+  label,
+  heading,
+  items,
   onClose,
-  onFlag,
-  onNew,
 }: {
-  menu: Menu;
+  x: number;
+  y: number;
+  label: string;
+  heading?: string;
+  items: MenuItem[];
   onClose: () => void;
-  onFlag: (flag: "is_project" | "is_reference") => void;
-  onNew: (kind: "note" | "folder") => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
 
@@ -483,39 +638,118 @@ function FolderMenu({
     };
   }, [onClose]);
 
-  const { folder } = menu;
-  const items: { label: string; onClick: () => void }[] = [
-    { label: folder.is_project ? "Unmark as Project" : "Mark as Project", onClick: () => onFlag("is_project") },
-    {
-      label: folder.is_reference ? "Unmark as Reference Data" : "Mark as Reference Data",
-      onClick: () => onFlag("is_reference"),
-    },
-    { label: "New note here…", onClick: () => onNew("note") },
-    { label: "New folder here…", onClick: () => onNew("folder") },
-  ];
+  const height = items.length * 32 + (heading ? 30 : 10);
   return (
     <div
       ref={ref}
       role="menu"
-      aria-label={`${folder.name} options`}
+      aria-label={label}
       className="fixed z-50 min-w-[200px] rounded-lg border border-border-light bg-surface-raised py-1 shadow-xl"
-      style={{ left: Math.min(menu.x, window.innerWidth - 220), top: Math.min(menu.y, window.innerHeight - 170) }}
+      style={{ left: Math.min(x, window.innerWidth - 220), top: Math.min(y, window.innerHeight - height) }}
     >
-      <div className="truncate px-3 pb-1 pt-0.5 font-mono text-[11px] text-text-muted">{folder.path}</div>
-      {items.map((item, i) => (
+      {heading && <div className="truncate px-3 pb-1 pt-0.5 font-mono text-[11px] text-text-muted">{heading}</div>}
+      {items.map((item) => (
         <button
           key={item.label}
           type="button"
           role="menuitem"
           onClick={item.onClick}
           className={`block w-full px-3 py-1.5 text-left text-[13px] text-text-secondary hover:bg-surface-hover hover:text-text-primary focus:bg-surface-hover focus:outline-none ${
-            i === 2 ? "border-t border-border-default" : ""
+            item.separator ? "border-t border-border-default" : ""
           }`}
         >
           {item.label}
         </button>
       ))}
     </div>
+  );
+}
+
+/** A saved task view under TASKS: a link, a "…" menu on hover, or an inline name field while renaming. */
+function TaskViewRow({
+  view,
+  renaming,
+  onRename,
+  onCancelRename,
+  onMenu,
+}: {
+  view: TaskView;
+  renaming: boolean;
+  onRename: (name: string) => void;
+  onCancelRename: () => void;
+  onMenu: (event: ReactMouseEvent<HTMLButtonElement>) => void;
+}) {
+  const cancelled = useRef(false);
+
+  if (renaming) {
+    return (
+      <div className="flex min-h-7 items-center gap-1.5 px-2">
+        <ViewIcon viewType={view.view_type} />
+        <input
+          autoFocus
+          defaultValue={view.name}
+          maxLength={64}
+          aria-label={`Rename ${view.name}`}
+          onFocus={(e) => {
+            cancelled.current = false;
+            e.target.select();
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") e.currentTarget.blur();
+            if (e.key === "Escape") {
+              cancelled.current = true;
+              onCancelRename();
+            }
+          }}
+          onBlur={(e) => !cancelled.current && onRename(e.target.value)}
+          className="field min-w-0 flex-1 px-1.5 py-0.5 text-[13px]"
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div className="group relative">
+      <NavLink
+        to={viewPath(view.id)}
+        title={`${view.name} · ${VIEW_TYPES[view.view_type]}`}
+        className={({ isActive }) => `${navClass(isActive)} gap-1.5 pr-7`}
+      >
+        <ViewIcon viewType={view.view_type} />
+        <span className="truncate">{view.name}</span>
+      </NavLink>
+      <button
+        type="button"
+        onClick={onMenu}
+        aria-label={`${view.name} options`}
+        title="Rename, duplicate or delete"
+        className="absolute right-1 top-1/2 flex h-5 w-5 -translate-y-1/2 items-center justify-center rounded text-[13px] leading-none text-text-muted opacity-0 hover:bg-surface-active hover:text-text-primary focus:opacity-100 group-hover:opacity-100"
+      >
+        …
+      </button>
+    </div>
+  );
+}
+
+function ViewIcon({ viewType }: { viewType: ViewType }) {
+  const paths: Record<ViewType, string> = {
+    kanban: "M4 4h4v16H4zM10 4h4v10h-4zM16 4h4v13h-4z",
+    backlog: "M4 6h16M4 12h16M4 18h16",
+    gantt: "M4 6h9M8 12h10M6 18h7",
+  };
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      className="h-3.5 w-3.5 shrink-0"
+    >
+      <path d={paths[viewType]} />
+    </svg>
   );
 }
 

@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useState, type DragEvent, type FormEvent } from "react";
-import { Link, NavLink, Navigate, useParams, useSearchParams } from "react-router-dom";
+import { useCallback, useEffect, useMemo, useState, type DragEvent, type FormEvent, type ReactNode } from "react";
+import { Link, NavLink, Navigate, useNavigate, useParams, useSearchParams } from "react-router-dom";
 
 import GanttChart, { type GanttProject } from "../components/GanttChart";
 import PageHeader from "../components/PageHeader";
@@ -17,10 +17,18 @@ import {
   type TaskPatch,
   type TaskStatus,
 } from "../lib/tasks";
+import {
+  NO_FILTERS,
+  sameFilters,
+  VIEW_TYPES,
+  VIEWS_CHANGED,
+  viewPath,
+  type TaskView,
+  type ViewFilters,
+  type ViewType,
+} from "../lib/views";
 
-const VIEWS = { kanban: "Kanban", backlog: "Backlog", gantt: "Gantt" } as const;
-type View = keyof typeof VIEWS;
-const SUBTITLES: Record<View, string> = {
+const SUBTITLES: Record<ViewType, string> = {
   kanban: "Tasks from the task database. Drag cards between columns to change their status.",
   backlog: "Every task, earliest due date first. Click a task for its dates and linked notes.",
   gantt: "Tasks with start and due dates, grouped by project.",
@@ -34,19 +42,184 @@ function projectTag(code: string | null): string {
   return (code && PROJECT_TAG[code.toLowerCase()]) || NEUTRAL_TAG;
 }
 
-/** The task engine (`/tasks/:view`): the active space's tasks from the database as a Kanban, Backlog or Gantt. */
-export default function Tasks() {
+/** A saved view (`/views/:id`) from the sidebar. Changed filters apply at once; "Save view" keeps them. */
+export default function SavedTaskView() {
+  const { id = "" } = useParams();
+  const [view, setView] = useState<TaskView | null>(null);
+  const [filters, setFilters] = useState<ViewFilters>(NO_FILTERS);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const fetchView = () => getJson<TaskView>(`/api/views/${id}`, controller.signal);
+    const failed = (err: unknown) => {
+      if (!controller.signal.aborted) setLoadError(message(err));
+    };
+    setView(null);
+    setLoadError(null);
+    setSaveError(null);
+    fetchView()
+      .then((body) => {
+        setView(body);
+        setFilters(body.filters);
+      })
+      .catch(failed);
+    // Renamed from the sidebar: refresh the saved view but keep any unsaved filters.
+    const reload = () => fetchView().then(setView).catch(failed);
+    window.addEventListener(VIEWS_CHANGED, reload);
+    return () => {
+      window.removeEventListener(VIEWS_CHANGED, reload);
+      controller.abort();
+    };
+  }, [id]);
+
+  async function save() {
+    if (!view) return;
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const updated = await sendJson<TaskView>("PUT", `/api/views/${view.id}`, { filters });
+      setView(updated);
+      setFilters(updated.filters);
+      window.dispatchEvent(new Event(VIEWS_CHANGED));
+    } catch (err: unknown) {
+      setSaveError(`Could not save the view: ${message(err)}`);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (loadError) return <p className="px-9 py-7 text-[13px] text-text-secondary">Could not load this view ({loadError}).</p>;
+  if (!view) return <p className="px-9 py-7 text-[13px] text-text-muted">Loading view…</p>;
+  const dirty = !sameFilters(filters, view.filters);
+
+  return (
+    <TaskBoard
+      spaceId={view.space_id}
+      viewType={view.view_type}
+      title={view.name}
+      filters={filters}
+      onFilters={setFilters}
+      actions={() => (
+        <>
+          {saveError && <span className="text-xs text-accent">{saveError}</span>}
+          {dirty && (
+            <button type="button" className="btn min-h-8 px-3 text-xs" onClick={() => setFilters(view.filters)}>
+              Revert
+            </button>
+          )}
+          <button type="button" className="btn-primary min-h-8 px-3 text-xs" disabled={!dirty || saving} onClick={save}>
+            {saving ? "Saving…" : dirty ? "Save view" : "Saved"}
+          </button>
+        </>
+      )}
+    />
+  );
+}
+
+/** An unsaved view (`/tasks/:view?project=&assignee=`), e.g. a project folder's Tasks link. "Save as view" adds it to the sidebar. */
+export function AdHocTasks() {
   const { view = "" } = useParams();
   const [params, setParams] = useSearchParams();
-  const { spaceId, space } = useSpace();
+  const { spaceId } = useSpace();
+  const navigate = useNavigate();
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  const project = Number(params.get("project") ?? "");
+  const filters: ViewFilters = {
+    project_id: params.get("project") && Number.isInteger(project) ? project : null,
+    assignee: params.get("assignee"),
+  };
+  const setFilters = (next: ViewFilters) =>
+    setParams(
+      () => {
+        const query = new URLSearchParams();
+        if (next.project_id !== null) query.set("project", String(next.project_id));
+        if (next.assignee !== null) query.set("assignee", next.assignee);
+        return query;
+      },
+      { replace: true },
+    );
+
+  if (!(view in VIEW_TYPES)) return <Navigate to="/tasks/kanban" replace />;
+  const viewType = view as ViewType;
+
+  async function saveAs(projects: ProjectOption[]) {
+    const code = projects.find((p) => p.id === filters.project_id)?.code;
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const created = await sendJson<TaskView>("POST", "/api/views", {
+        space_id: spaceId,
+        name: code ? `${code} ${VIEW_TYPES[viewType]}` : VIEW_TYPES[viewType],
+        view_type: viewType,
+        filters,
+      });
+      window.dispatchEvent(new Event(VIEWS_CHANGED));
+      navigate(viewPath(created.id));
+    } catch (err: unknown) {
+      setSaveError(`Could not save the view: ${message(err)}`);
+      setSaving(false);
+    }
+  }
+
+  return (
+    <TaskBoard
+      spaceId={spaceId}
+      viewType={viewType}
+      title={VIEW_TYPES[viewType]}
+      filters={filters}
+      onFilters={setFilters}
+      nav={
+        <nav aria-label="Task views" className="flex gap-2">
+          {(Object.keys(VIEW_TYPES) as ViewType[]).map((key) => (
+            <NavLink key={key} to={{ pathname: `/tasks/${key}`, search: params.toString() }} className={key === viewType ? "seg-on" : "seg"}>
+              <span className="flex h-full items-center">{VIEW_TYPES[key]}</span>
+            </NavLink>
+          ))}
+        </nav>
+      }
+      actions={(projects) => (
+        <>
+          {saveError && <span className="text-xs text-accent">{saveError}</span>}
+          <button type="button" className="btn min-h-8 px-3 text-xs" disabled={saving} onClick={() => saveAs(projects)}>
+            {saving ? "Saving…" : "Save as view"}
+          </button>
+        </>
+      )}
+    />
+  );
+}
+
+/** A space's tasks from the database as a Kanban, Backlog or Gantt, narrowed by the Project/Assignee filters. */
+function TaskBoard({
+  spaceId,
+  viewType,
+  title,
+  filters,
+  onFilters,
+  nav,
+  actions,
+}: {
+  spaceId: number;
+  viewType: ViewType;
+  title: string;
+  filters: ViewFilters;
+  onFilters: (filters: ViewFilters) => void;
+  nav?: ReactNode;
+  actions?: (projects: ProjectOption[]) => ReactNode;
+}) {
+  const { spaces } = useSpace();
   const [tasks, setTasks] = useState<State>({ state: "loading" });
   const [projects, setProjects] = useState<ProjectOption[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [reload, setReload] = useState(0);
 
-  const project = params.get("project");
-  const assignee = params.get("assignee");
-  const query = taskQuery(spaceId, { project, assignee });
+  const query = taskQuery(spaceId, filters);
+  const spaceName = spaces.find((s) => s.id === spaceId)?.name ?? "";
 
   useEffect(() => {
     const controller = new AbortController();
@@ -66,17 +239,6 @@ export default function Tasks() {
       .catch(() => {});
     return () => controller.abort();
   }, [spaceId]);
-
-  const setFilter = (key: "project" | "assignee", value: string | null) =>
-    setParams(
-      (prev) => {
-        const next = new URLSearchParams(prev);
-        if (value === null) next.delete(key);
-        else next.set(key, value);
-        return next;
-      },
-      { replace: true },
-    );
 
   /** Optimistic update: show the change at once, roll back if the server refuses it. */
   const patchTask = useCallback(async (task: TaskItem, patch: TaskPatch) => {
@@ -106,39 +268,37 @@ export default function Tasks() {
   const assignees = useMemo(() => {
     const names = new Set<string>([ME]);
     if (tasks.state === "ok") tasks.tasks.forEach((t) => t.assignee && names.add(t.assignee));
-    if (assignee) names.add(assignee);
+    if (filters.assignee) names.add(filters.assignee);
     return [...names].sort((a, b) => a.localeCompare(b));
-  }, [tasks, assignee]);
+  }, [tasks, filters.assignee]);
 
-  if (!(view in VIEWS)) return <Navigate to="/tasks/kanban" replace />;
-  const current = view as View;
+  // A saved filter can point at a project this space no longer lists.
+  const projectChoices =
+    filters.project_id === null || projects.some((p) => p.id === filters.project_id)
+      ? projects
+      : [...projects, { id: filters.project_id, code: `#${filters.project_id}`, name: `#${filters.project_id}`, folder_path: null }];
 
   return (
     <div className="flex flex-col gap-5 px-9 py-7">
       <PageHeader
-        eyebrow={`${(space?.name ?? "").toUpperCase()} · TASKS`}
-        title={VIEWS[current]}
-        subtitle={SUBTITLES[current]}
+        eyebrow={`${spaceName.toUpperCase()} · ${VIEW_TYPES[viewType].toUpperCase()} VIEW`}
+        title={title}
+        subtitle={SUBTITLES[viewType]}
+        actions={actions && <div className="flex flex-wrap items-center gap-2">{actions(projects)}</div>}
       />
 
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <nav aria-label="Task views" className="flex gap-2">
-          {(Object.keys(VIEWS) as View[]).map((key) => (
-            <NavLink key={key} to={{ pathname: `/tasks/${key}`, search: params.toString() }} className={key === current ? "seg-on" : "seg"}>
-              <span className="flex h-full items-center">{VIEWS[key]}</span>
-            </NavLink>
-          ))}
-        </nav>
+        {nav ?? <span />}
         <div className="flex flex-wrap items-center gap-2 text-xs text-text-muted">
           <label className="flex items-center gap-1.5">
             Project
             <select
-              value={project ?? ""}
-              onChange={(e) => setFilter("project", e.target.value || null)}
+              value={filters.project_id ?? ""}
+              onChange={(e) => onFilters({ ...filters, project_id: e.target.value ? Number(e.target.value) : null })}
               className="field w-auto py-1.5 text-[13px]"
             >
               <option value="">All projects</option>
-              {projects.map((p) => (
+              {projectChoices.map((p) => (
                 <option key={p.id} value={p.id}>
                   {p.code}
                   {p.name !== p.code ? ` · ${p.name}` : ""}
@@ -149,8 +309,8 @@ export default function Tasks() {
           <label className="flex items-center gap-1.5">
             Assignee
             <select
-              value={assignee === null ? "*" : assignee}
-              onChange={(e) => setFilter("assignee", e.target.value === "*" ? null : e.target.value)}
+              value={filters.assignee === null ? "*" : filters.assignee}
+              onChange={(e) => onFilters({ ...filters, assignee: e.target.value === "*" ? null : e.target.value })}
               className="field w-auto py-1.5 text-[13px]"
             >
               <option value="*">Everyone</option>
@@ -168,8 +328,8 @@ export default function Tasks() {
       <NewTaskForm
         spaceId={spaceId}
         projects={projects}
-        defaultProject={project}
-        defaultStatus={current === "kanban" ? "todo" : "backlog"}
+        defaultProject={filters.project_id === null ? null : String(filters.project_id)}
+        defaultStatus={viewType === "kanban" ? "todo" : "backlog"}
         onCreated={(task) =>
           setTasks((prev) => (prev.state === "ok" ? { ...prev, tasks: [task, ...prev.tasks] } : prev))
         }
@@ -178,11 +338,11 @@ export default function Tasks() {
       {error && <p className="text-[13px] text-accent">{error}</p>}
       {tasks.state === "loading" && <p className="text-[13px] text-text-muted">Loading tasks…</p>}
       {tasks.state === "error" && <p className="text-[13px] text-text-secondary">Could not load the tasks ({tasks.message}).</p>}
-      {tasks.state === "ok" && current === "kanban" && <Kanban tasks={tasks.tasks} onPatch={patchTask} />}
-      {tasks.state === "ok" && current === "backlog" && (
+      {tasks.state === "ok" && viewType === "kanban" && <Kanban tasks={tasks.tasks} onPatch={patchTask} />}
+      {tasks.state === "ok" && viewType === "backlog" && (
         <Backlog tasks={tasks.tasks} projects={projects} spaceId={spaceId} onPatch={patchTask} onDelete={deleteTask} />
       )}
-      {tasks.state === "ok" && current === "gantt" && <TaskGantt tasks={tasks.tasks} projects={projects} />}
+      {tasks.state === "ok" && viewType === "gantt" && <TaskGantt tasks={tasks.tasks} projects={projects} />}
     </div>
   );
 }

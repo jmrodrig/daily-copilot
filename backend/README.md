@@ -120,6 +120,16 @@ Gantt imports land here too (`is_gantt_task=True`).
 - `GET /api/projects?space_id=1` lists the space's projects (those with tasks or a project
   folder in it; a project with neither belongs to the Default space) for filters and pickers.
 
+**Saved views.** The sidebar's TASKS list is `TaskView` rows: a named Kanban, Backlog or
+Gantt view of a space with saved `filters` (`project_id`, `assignee`; `null` means all, an
+empty assignee means unassigned). Every space starts with one view of each type (only once:
+deleting them all does not bring them back).
+
+- `GET /api/views?space_id=1` lists a space's views; `GET /api/views/{id}` returns one.
+- `POST /api/views` `{"space_id", "name", "view_type", "filters"?}` creates one (201).
+- `PUT /api/views/{id}` `{"name"?, "filters"?}` renames it and/or replaces its filters.
+- `DELETE /api/views/{id}` soft-deletes it (204).
+
 `/api/gantt`, `/api/triage` and `/api/capture` are per space too. `cli_import.py`
 imports into the Default space unless given `--space <id>`.
 
