@@ -1,6 +1,8 @@
 import Image from "@tiptap/extension-image";
 import { TaskItem, TaskList } from "@tiptap/extension-list";
 import { TableKit } from "@tiptap/extension-table";
+import TextAlign from "@tiptap/extension-text-align";
+import { Color } from "@tiptap/extension-text-style";
 import { Markdown } from "@tiptap/markdown";
 import type { EditorView } from "@tiptap/pm/view";
 import { EditorContent, useEditor, useEditorState, type Editor } from "@tiptap/react";
@@ -8,6 +10,7 @@ import StarterKit from "@tiptap/starter-kit";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 
 import { errorDetail, message } from "../lib/api";
+import { ALIGNMENTS, AlignedBlocks, AlignedHeading, AlignedParagraph, ColoredTextStyle, type Alignment } from "./noteFormatting";
 
 /**
  * A rich-text editor over a note's title and markdown body (front-matter is kept by the backend), laid out like a
@@ -65,7 +68,14 @@ export default function NoteEditor({
 
   const editor = useEditor({
     extensions: [
-      StarterKit.configure({ link: { openOnClick: false } }),
+      // Paragraphs and headings are swapped for ones that save their alignment (see noteFormatting).
+      StarterKit.configure({ link: { openOnClick: false }, paragraph: false, heading: false }),
+      AlignedParagraph,
+      AlignedHeading,
+      AlignedBlocks,
+      TextAlign.configure({ types: ["heading", "paragraph"], alignments: [...ALIGNMENTS] }),
+      ColoredTextStyle,
+      Color,
       TaskList,
       TaskItem.configure({ nested: true }),
       TableKit.configure({ table: { resizable: true, cellMinWidth: 60 } }),
@@ -199,6 +209,10 @@ function Toolbar({ editor, status }: { editor: Editor | null; status: string | n
         orderedList: e.isActive("orderedList"),
         taskList: e.isActive("taskList"),
         table: e.isActive("table"),
+        align: (ALIGNMENTS.find((a) => e.isActive({ textAlign: a })) ?? "left") as Alignment,
+        // Only top-level blocks keep their alignment in markdown (see noteFormatting).
+        alignable: e.state.selection.$from.depth === 1 && e.state.selection.$to.depth === 1,
+        color: (e.getAttributes("textStyle").color as string | undefined) ?? null,
         editable: e.isEditable,
       },
   });
@@ -221,6 +235,23 @@ function Toolbar({ editor, status }: { editor: Editor | null; status: string | n
       <ToolButton label="Strikethrough" on={active.strike} disabled={off} onClick={() => chain().toggleStrike().run()}>
         <span className="line-through">S</span>
       </ToolButton>
+      <ColorPicker
+        color={active.color}
+        disabled={off}
+        onPick={(color) => (color ? chain().setColor(color).run() : chain().unsetColor().run())}
+      />
+      <Divider />
+      {ALIGNMENTS.map((align) => (
+        <ToolButton
+          key={align}
+          label={`Align ${align}`}
+          on={active.alignable && active.align === align}
+          disabled={off || !active.alignable}
+          onClick={() => chain().setTextAlign(align).run()}
+        >
+          <AlignIcon align={align} />
+        </ToolButton>
+      ))}
       <Divider />
       <ToolButton label="Bullet list" on={active.bulletList} disabled={off} onClick={() => chain().toggleBulletList().run()}>
         •≡
@@ -298,6 +329,99 @@ function ToolButton({
     >
       {children}
     </button>
+  );
+}
+
+/** Text colors that read on the dark page, plus the default (no color). */
+const TEXT_COLORS = [
+  { name: "Red", value: "#ef6461" },
+  { name: "Orange", value: "#f59e4b" },
+  { name: "Yellow", value: "#f2d45c" },
+  { name: "Green", value: "#56c8a8" },
+  { name: "Blue", value: "#6cb6ea" },
+  { name: "Purple", value: "#b7a3f2" },
+  { name: "Pink", value: "#f28bc0" },
+  { name: "Grey", value: "#97a5ae" },
+];
+
+/** The text color control: an "A" underlined in the current color, opening a row of swatches and a custom picker. */
+function ColorPicker({ color, disabled, onPick }: { color: string | null; disabled: boolean; onPick: (color: string | null) => void }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: MouseEvent) => {
+      if (!ref.current?.contains(e.target as Node)) setOpen(false);
+    };
+    const escape = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", escape);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("keydown", escape);
+    };
+  }, [open]);
+  const pick = (value: string | null) => {
+    onPick(value);
+    setOpen(false);
+  };
+
+  return (
+    <div ref={ref} className="relative">
+      <ToolButton label="Text color" on={open} disabled={disabled} onClick={() => setOpen((o) => !o)}>
+        <span className="flex flex-col items-center leading-none">
+          <span className="font-semibold">A</span>
+          <span className="mt-0.5 h-[3px] w-3.5 rounded-sm" style={{ background: color ?? "currentColor" }} />
+        </span>
+      </ToolButton>
+      {open && (
+        <div className="absolute left-0 top-full z-20 mt-1 w-[184px] rounded-md border border-border-default bg-surface-raised p-2 shadow-lg">
+          <div className="grid grid-cols-4 gap-1.5">
+            {TEXT_COLORS.map((c) => (
+              <button
+                key={c.value}
+                type="button"
+                title={c.name}
+                aria-label={c.name}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => pick(c.value)}
+                className={`h-7 rounded border ${color?.toLowerCase() === c.value ? "border-text-primary" : "border-transparent"} hover:border-border-strong`}
+                style={{ background: c.value }}
+              />
+            ))}
+          </div>
+          <div className="mt-2 flex items-center justify-between gap-2 border-t border-border-default pt-2">
+            <ToolText label="Remove text color" disabled={false} onClick={() => pick(null)}>
+              Default
+            </ToolText>
+            <label className="flex cursor-pointer items-center gap-1.5 rounded px-2 py-1 text-xs text-text-secondary hover:bg-surface-hover hover:text-text-primary">
+              Custom
+              <input
+                type="color"
+                aria-label="Custom text color"
+                value={color?.startsWith("#") && color.length === 7 ? color : "#ffffff"}
+                // Applied as it's dragged; the editor's selection is kept, so the change lands on the same text.
+                onChange={(e) => onPick(e.target.value)}
+                className="h-5 w-6 cursor-pointer border-0 bg-transparent p-0"
+              />
+            </label>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Four lines, ragged to show the alignment. */
+function AlignIcon({ align }: { align: Alignment }) {
+  const lines = [14, 9, 14, 9];
+  const x = (width: number) => (align === "left" ? 1 : align === "right" ? 15 - width : (16 - width) / 2);
+  return (
+    <svg aria-hidden width="16" height="16" viewBox="0 0 16 16" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+      {lines.map((width, i) => (
+        <line key={i} x1={x(width)} x2={x(width) + width} y1={3 + i * 3.4} y2={3 + i * 3.4} />
+      ))}
+    </svg>
   );
 }
 
