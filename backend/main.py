@@ -5,16 +5,19 @@ from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
 from typing import Any
 
+from pathlib import Path
+
 from fastapi import Depends, FastAPI, HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 import agent
 import file_layer
 import database
+import spaces
 from database import get_db, init_db
 from history import set_source, soft_delete, to_jsonable, utcnow
-from models import Project, SavedPrompt, Task, TimeLog
+from models import FolderMeta, Project, SavedPrompt, Space, Task, TaskNoteLink, TimeLog
 import schemas
 from schemas import (
     AccessMode,
@@ -29,11 +32,21 @@ from schemas import (
     GanttProject,
     GanttResponse,
     GanttTask,
+    FolderCreate,
+    FolderMetaOut,
+    FolderMetaUpdate,
+    NoteCreate,
     NoteFile,
+    NoteRoot,
     NoteSummary,
     Priority,
+    ProjectOption,
     Status,
+    TaskCreate,
+    TaskItem,
+    TaskNoteLinkIn,
     TaskUpdate,
+    TreeResponse,
     TriageItem,
     TriageKind,
     TriageRank,
@@ -47,11 +60,23 @@ CAPTURE_SOURCE = "android_app"
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     init_db()
     with database.SessionLocal() as db:
+        spaces.migrate(db)
         seed_prompts(db)
     yield
 
 
 app = FastAPI(title="Daily Co-Pilot Backend", version="0.1.0", lifespan=lifespan)
+
+
+def _space_id_or_404(db: Session, space_id: int) -> int:
+    if spaces.get_space(db, space_id) is None:
+        raise HTTPException(status_code=404, detail=f"Unknown space id: {space_id}")
+    return space_id
+
+
+def space_content(space_id: int = spaces.DEFAULT_SPACE_ID, db: Session = Depends(get_db)) -> Path:
+    """Dependency: the `content/` folder of the `space_id` query parameter (404 for an unknown space)."""
+    return spaces.content_dir(_space_id_or_404(db, space_id))
 
 
 @app.get("/health")
@@ -60,22 +85,23 @@ def health() -> dict[str, str]:
     return {"status": "ok", "chat_model": get_settings().chat_model}
 
 
-def _capture_path(project: str, now: datetime) -> str:
+def _capture_path(project: str, now: datetime, root: Path) -> str:
     """`Inbox/Capture_<ts>.md` or `<project>/Notes-in/Capture_<ts>.md`, never an existing file."""
     folder = INBOX if project.lower() == INBOX.lower() else f"{project}/Notes-in"
     stem = f"{folder}/Capture_{now:%Y%m%d_%H%M%S}"
     path, n = f"{stem}.md", 1
-    while file_layer.resolve_note_path(path).exists():
+    while file_layer.resolve_note_path(path, root).exists():
         n += 1
         path = f"{stem}_{n}.md"
     return path
 
 
 @app.post("/api/capture")
-def capture(request: CaptureRequest) -> CaptureResponse:
-    """Save a quick note from the Android app as a markdown file."""
+def capture(request: CaptureRequest, db: Session = Depends(get_db)) -> CaptureResponse:
+    """Save a quick note from the Android app as a markdown file in the space's content/."""
+    root = spaces.content_dir(_space_id_or_404(db, request.space_id))
     now = datetime.now().replace(microsecond=0)
-    path = _capture_path(request.project, now)
+    path = _capture_path(request.project, now, root)
     frontmatter = {
         "type": "capture",
         "project": request.project,
@@ -85,7 +111,9 @@ def capture(request: CaptureRequest) -> CaptureResponse:
     if request.source:
         frontmatter["source"] = request.source.strip().lower()
     # The capture is the user's own new note, so it is written without an approval step.
-    file_layer.write_note(path, request.content, frontmatter, AccessMode.WRITE_DIRECTLY, source=CAPTURE_SOURCE)
+    file_layer.write_note(
+        path, request.content, frontmatter, AccessMode.WRITE_DIRECTLY, notes_dir=root, source=CAPTURE_SOURCE
+    )
     return CaptureResponse(path=path)
 
 
@@ -93,12 +121,37 @@ def _gantt_sort_key(task: Task) -> tuple[bool, date, int]:
     return (task.start_date is None, task.start_date or date.min, task.id)
 
 
-@app.get("/api/gantt")
-def gantt(db: Session = Depends(get_db)) -> GanttResponse:
-    """Active projects with their shop floor Gantt tasks, for the desktop Gantt chart."""
+def _in_space(space_id: int):
+    """Filter for the tasks of a space (rows from before Phase 9 count as the Default space)."""
+    return func.coalesce(Task.space_id, spaces.DEFAULT_SPACE_ID) == space_id
+
+
+def _space_projects(db: Session, space_id: int) -> list[Project]:
+    """Active projects of a space, by code: those with tasks or a project folder in it.
+
+    A project with neither (e.g. created by a time sheet entry) belongs to the Default space.
+    """
     projects = db.scalars(select(Project).where(Project.active.is_(True)).order_by(Project.code)).all()
+    homes: dict[int, set[int]] = {}
+    task_spaces = select(Task.project_id, func.coalesce(Task.space_id, spaces.DEFAULT_SPACE_ID)).where(
+        Task.project_id.is_not(None), Task.deleted_at.is_(None)
+    )
+    folder_spaces = select(FolderMeta.project_id, FolderMeta.space_id).where(
+        FolderMeta.is_project.is_(True), FolderMeta.project_id.is_not(None)
+    )
+    for project_id, sid in [*db.execute(task_spaces.distinct()), *db.execute(folder_spaces)]:
+        homes.setdefault(project_id, set()).add(sid)
+    return [p for p in projects if space_id in homes.get(p.id, {spaces.DEFAULT_SPACE_ID})]
+
+
+@app.get("/api/gantt")
+def gantt(space_id: int = spaces.DEFAULT_SPACE_ID, db: Session = Depends(get_db)) -> GanttResponse:
+    """Active projects of a space with their shop floor Gantt tasks, for the desktop Gantt chart."""
+    projects = _space_projects(db, _space_id_or_404(db, space_id))
     tasks = db.scalars(
-        select(Task).where(Task.is_gantt_task.is_(True), Task.project_id.in_([p.id for p in projects]))
+        select(Task).where(
+            Task.is_gantt_task.is_(True), Task.project_id.in_([p.id for p in projects]), _in_space(space_id)
+        )
     ).all()
     by_project: dict[int, list[Task]] = {p.id: [] for p in projects}
     for task in tasks:
@@ -137,7 +190,6 @@ _CAPTURE_RANK = {
     Priority.NORMAL: TriageRank.CAPTURE_NORMAL,
     Priority.LOW: TriageRank.CAPTURE_LOW,
 }
-_TITLE_MAX = 100
 
 
 def _today() -> date:
@@ -152,13 +204,14 @@ def _gantt_rank(task: Task, today: date) -> TriageRank:
     return TriageRank.TODAY
 
 
-def _triage_tasks(db: Session, today: date) -> list[tuple[tuple, TriageItem]]:
+def _triage_tasks(db: Session, today: date, space_id: int) -> list[tuple[tuple, TriageItem]]:
     """Unfinished Gantt tasks of active projects that have started or start within the lookahead."""
     rows = db.execute(
         select(Task, Project.code)
         .join(Project, Task.project_id == Project.id)
         .where(
             Project.active.is_(True),
+            _in_space(space_id),
             Task.is_gantt_task.is_(True),
             Task.status != Status.DONE,
             Task.start_date.is_not(None),
@@ -208,10 +261,7 @@ def _note_created(value: Any) -> datetime | None:
     return created.astimezone().replace(tzinfo=None) if created.tzinfo else created
 
 
-def _note_title(content: str) -> str:
-    line = next((ln.strip() for ln in content.splitlines() if ln.strip()), "(empty note)")
-    line = line.lstrip("#").strip() or line
-    return line if len(line) <= _TITLE_MAX else line[: _TITLE_MAX - 1] + "…"
+_note_title = spaces.note_title
 
 
 def _note_project(frontmatter: dict[str, Any], path: str) -> str | None:
@@ -220,12 +270,12 @@ def _note_project(frontmatter: dict[str, Any], path: str) -> str | None:
     return None if project.lower() == INBOX.lower() else project
 
 
-def _triage_notes() -> list[tuple[tuple, TriageItem]]:
+def _triage_notes(root: Path) -> list[tuple[tuple, TriageItem]]:
     items = []
-    paths = sorted({path for pattern in TRIAGE_NOTE_GLOBS for path in file_layer.list_notes(pattern)})
+    paths = sorted({path for pattern in TRIAGE_NOTE_GLOBS for path in file_layer.list_notes(pattern, notes_dir=root)})
     for path in paths:
         try:
-            note = file_layer.read_note(path)
+            note = file_layer.read_note(path, notes_dir=root)
         except (file_layer.FileLayerError, OSError, UnicodeDecodeError):
             continue  # A hand-edited note with broken front-matter must not break the whole list.
         frontmatter, content = note["frontmatter"], note["content"]
@@ -249,10 +299,11 @@ def _triage_notes() -> list[tuple[tuple, TriageItem]]:
 
 
 @app.get("/api/triage")
-def triage(db: Session = Depends(get_db)) -> list[TriageItem]:
-    """The Morning List: active Gantt tasks and capture notes, ranked by `TriageRank`."""
+def triage(space_id: int = spaces.DEFAULT_SPACE_ID, db: Session = Depends(get_db)) -> list[TriageItem]:
+    """The Morning List of a space: active Gantt tasks and capture notes, ranked by `TriageRank`."""
+    root = spaces.content_dir(_space_id_or_404(db, space_id))
     today = _today()
-    ranked = _triage_tasks(db, today) + _triage_notes()
+    ranked = _triage_tasks(db, today, space_id) + _triage_notes(root)
     ranked.sort(key=lambda pair: (pair[1].rank, pair[0]))
     return [item for _key, item in ranked]
 
@@ -260,16 +311,32 @@ def triage(db: Session = Depends(get_db)) -> list[TriageItem]:
 TASK_UPDATE_SOURCE = "desktop"
 
 
+def _get_task(db: Session, task_id: int) -> Task:
+    task = db.get(Task, task_id)
+    if task is None or task.deleted_at is not None:
+        raise HTTPException(status_code=404, detail=f"Unknown task id: {task_id}")
+    return task
+
+
+def _check_project(db: Session, project_id: int | None) -> None:
+    if project_id is not None:
+        project = db.get(Project, project_id)
+        if project is None or project.deleted_at is not None:
+            raise HTTPException(status_code=400, detail=f"Unknown project id: {project_id}")
+
+
 @app.patch("/api/tasks/{task_id}")
 def update_task(task_id: int, request: TaskUpdate, db: Session = Depends(get_db)) -> schemas.Task:
-    """Claim or unclaim a task (`assignee`) and/or change its status. Unsent fields are left alone."""
-    task = db.get(Task, task_id)
-    if task is None:
-        raise HTTPException(status_code=404, detail=f"Unknown task id: {task_id}")
+    """Change a task: claim or unclaim it (`assignee`), move it on the board (`status`), or edit its
+    title, dates or project. Unsent fields are left alone."""
+    task = _get_task(db, task_id)
     set_source(db, TASK_UPDATE_SOURCE)
     changes = request.model_dump(exclude_unset=True)
-    if "assignee" in changes:
-        task.assignee = changes["assignee"]
+    if "project_id" in changes:
+        _check_project(db, changes["project_id"])
+    for key in ("assignee", "title", "description", "priority", "project_id", "start_date", "deadline"):
+        if key in changes:
+            setattr(task, key, changes[key])
     if "status" in changes and changes["status"] != task.status:
         task.status = changes["status"]
         task.completed_at = utcnow() if task.status == Status.DONE else None
@@ -336,10 +403,13 @@ def checkin(request: CheckInRequest, db: Session = Depends(get_db)) -> CheckInRe
 
 
 @app.post("/api/chat")
-def chat(request: ChatRequest) -> ChatResponse:
-    """One Co-pilot turn: the agent answers the last user message, honouring `access_mode`."""
+def chat(request: ChatRequest, db: Session = Depends(get_db)) -> ChatResponse:
+    """One Co-pilot turn in the active space: the agent answers the last user message, honouring `access_mode`."""
+    _space_id_or_404(db, request.space_id)
     try:
-        return agent.run_chat(request.messages, request.access_mode)
+        return agent.run_chat(
+            request.messages, request.access_mode, space_id=request.space_id, note_path=request.note_path
+        )
     except agent.AgentNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except agent.AgentError as exc:
@@ -426,28 +496,23 @@ def _hidden(path: str) -> bool:
 
 
 @app.get("/api/notes")
-def list_notes() -> list[NoteSummary]:
-    """Every note with a display title, for the desktop page tree."""
-    summaries = []
-    for path in file_layer.list_notes("**/*.md"):
-        if _hidden(path):
-            continue
-        try:
-            note = file_layer.read_note(path)
-            title = str(note["frontmatter"].get("title") or "").strip() or _note_title(note["content"])
-        except (file_layer.FileLayerError, OSError, UnicodeDecodeError):
-            title = ""
-        if not title or title == "(empty note)":
-            title = path.rsplit("/", 1)[-1].removesuffix(".md")
-        summaries.append(NoteSummary(path=path, title=title))
-    return summaries
+def list_notes(root: Path = Depends(space_content)) -> list[NoteSummary]:
+    """Every note of a space with a display title (hidden folders skipped)."""
+    paths = file_layer.list_notes("**/*.md", notes_dir=root)
+    return [spaces.note_summary(path, root) for path in paths if not _hidden(path)]
 
 
 @app.get("/api/notes/file")
-def get_note(path: str) -> NoteFile:
-    """One note with its front-matter, for the desktop note page."""
+def get_note(
+    path: str,
+    space_id: int = spaces.DEFAULT_SPACE_ID,
+    root: NoteRoot = NoteRoot.CONTENT,
+    db: Session = Depends(get_db),
+) -> NoteFile:
+    """One note (or a template, with `root=templates`) with its front-matter, for the desktop note page."""
+    folder = spaces.root_dir(_space_id_or_404(db, space_id), root)
     try:
-        note = file_layer.read_note(path)
+        note = file_layer.read_note(path, notes_dir=folder)
     except file_layer.FileLayerError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except FileNotFoundError as exc:
@@ -456,16 +521,17 @@ def get_note(path: str) -> NoteFile:
 
 
 @app.post("/api/notes/apply-edit")
-def apply_edit(request: ApplyEditRequest) -> ApplyEditResponse:
+def apply_edit(request: ApplyEditRequest, db: Session = Depends(get_db)) -> ApplyEditResponse:
     """Commit an `ask_first` edit the user approved, unless the note changed since it was proposed."""
+    root = spaces.content_dir(_space_id_or_404(db, request.space_id))
     try:
-        if file_layer.note_hash(request.path) != request.base_hash:
+        if file_layer.note_hash(request.path, notes_dir=root) != request.base_hash:
             raise HTTPException(
                 status_code=409, detail=f"{request.path} changed since the edit was proposed; ask the Co-pilot again"
             )
         frontmatter = request.frontmatter
         if request.base_hash is not None:
-            current = file_layer.read_note(request.path)["frontmatter"]
+            current = file_layer.read_note(request.path, notes_dir=root)["frontmatter"]
             # Unchanged front-matter came back through JSON (dates as strings); keep the original types.
             if to_jsonable(current) == frontmatter:
                 frontmatter = current
@@ -475,12 +541,257 @@ def apply_edit(request: ApplyEditRequest) -> ApplyEditResponse:
             frontmatter,
             AccessMode.ASK_FIRST,
             approved=True,
+            notes_dir=root,
             source=agent.APPROVED_SOURCE,
         )
     except file_layer.FileLayerError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    path = file_layer.resolve_note_path(request.path).relative_to(file_layer.notes_root()).as_posix()
+    path = file_layer.resolve_note_path(request.path, root).relative_to(root.resolve()).as_posix()
     return ApplyEditResponse(path=path, written=written)
+
+
+# --- Spaces, content tree and templates (Phase 9) -----------------------------
+
+DESKTOP_SOURCE = "desktop"
+
+
+@app.get("/api/spaces")
+def list_spaces(db: Session = Depends(get_db)) -> list[schemas.Space]:
+    return [schemas.Space.model_validate(s, from_attributes=True) for s in db.scalars(select(Space).order_by(Space.id))]
+
+
+@app.post("/api/spaces", status_code=201)
+def create_space(request: schemas.SpaceIn, db: Session = Depends(get_db)) -> schemas.Space:
+    """A new space with empty content/ and the starter templates."""
+    return schemas.Space.model_validate(spaces.create_space(db, request.name), from_attributes=True)
+
+
+@app.get("/api/tree")
+def tree(space_id: int = spaces.DEFAULT_SPACE_ID, db: Session = Depends(get_db)) -> TreeResponse:
+    """A space's content/ folder tree (with Project / Reference Data flags) and its templates."""
+    _space_id_or_404(db, space_id)
+    return TreeResponse(
+        space_id=space_id,
+        content=spaces.build_tree(space_id, spaces.folder_metas(db, space_id)),
+        templates=spaces.list_templates(space_id),
+    )
+
+
+@app.put("/api/folders/meta")
+def update_folder_meta(request: FolderMetaUpdate, db: Session = Depends(get_db)) -> FolderMetaOut:
+    """Mark or unmark a folder as a Project (which links it to a project for tasks) or Reference Data."""
+    _space_id_or_404(db, request.space_id)
+    try:
+        meta = spaces.set_folder_meta(
+            db, request.space_id, request.path, is_project=request.is_project, is_reference=request.is_reference
+        )
+    except file_layer.NotePathError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return FolderMetaOut(
+        space_id=meta.space_id,
+        path=meta.path,
+        is_project=meta.is_project,
+        is_reference=meta.is_reference,
+        project_id=meta.project_id if meta.is_project else None,
+    )
+
+
+@app.post("/api/folders", status_code=201)
+def create_folder(request: FolderCreate, db: Session = Depends(get_db)) -> schemas.FolderNode:
+    """Create an empty folder under a space's content/ (parents included)."""
+    root = spaces.content_dir(_space_id_or_404(db, request.space_id))
+    try:
+        rel = spaces.normalize_folder(request.space_id, request.path)
+    except file_layer.NotePathError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    folder = root / rel
+    if folder.exists():
+        raise HTTPException(status_code=409, detail=f"{rel} already exists")
+    folder.mkdir(parents=True)
+    return schemas.FolderNode(name=folder.name, path=rel)
+
+
+def _fill_template(text: str, title: str, today: date) -> str:
+    return text.replace("{title}", title).replace("{date}", today.isoformat())
+
+
+@app.post("/api/notes", status_code=201)
+def create_note(request: NoteCreate, db: Session = Depends(get_db)) -> NoteFile:
+    """Create a note in content/, scaffolded from a template when `template` is given.
+
+    Templates may use `{title}` and `{date}` placeholders in their body and front-matter values.
+    """
+    root = spaces.content_dir(_space_id_or_404(db, request.space_id))
+    path = request.path.strip().strip("/")
+    if not path.lower().endswith(file_layer.NOTE_SUFFIX):
+        path += file_layer.NOTE_SUFFIX
+    try:
+        resolved = file_layer.resolve_note_path(path, root)
+    except file_layer.NotePathError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    rel = resolved.relative_to(root.resolve()).as_posix()
+    if _hidden(rel):
+        raise HTTPException(status_code=400, detail=f"{rel} is in a hidden folder")
+    if resolved.exists():
+        raise HTTPException(status_code=409, detail=f"{rel} already exists")
+
+    today = _today()
+    title = (request.title or "").strip() or resolved.stem
+    frontmatter: dict[str, Any] = {}
+    content = f"# {title}\n"
+    if request.template:
+        try:
+            template = file_layer.read_note(request.template, notes_dir=spaces.templates_dir(request.space_id))
+        except file_layer.FileLayerError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=f"No template at {request.template}") from exc
+        frontmatter = {
+            key: _fill_template(value, title, today) if isinstance(value, str) else value
+            for key, value in template["frontmatter"].items()
+        }
+        content = _fill_template(template["content"], title, today)
+    frontmatter.setdefault("created", today.isoformat())
+    file_layer.write_note(rel, content, frontmatter, AccessMode.WRITE_DIRECTLY, notes_dir=root, source=DESKTOP_SOURCE)
+    return NoteFile(path=rel, frontmatter=to_jsonable(frontmatter), content=content)
+
+
+# --- Task engine (Phase 9) ----------------------------------------------------
+
+
+@app.get("/api/projects")
+def list_projects(space_id: int = spaces.DEFAULT_SPACE_ID, db: Session = Depends(get_db)) -> list[ProjectOption]:
+    """The projects of a space, for task filters and pickers, with their project folder if any."""
+    projects = _space_projects(db, _space_id_or_404(db, space_id))
+    folders = {
+        meta.project_id: meta.path
+        for meta in spaces.folder_metas(db, space_id).values()
+        if meta.is_project and meta.project_id is not None
+    }
+    return [ProjectOption(id=p.id, code=p.code, name=p.name, folder_path=folders.get(p.id)) for p in projects]
+
+
+def _task_items(db: Session, tasks: list[Task]) -> list[TaskItem]:
+    ids = [t.id for t in tasks]
+    links: dict[int, list[str]] = {}
+    for link in db.scalars(select(TaskNoteLink).where(TaskNoteLink.task_id.in_(ids)).order_by(TaskNoteLink.note_path)):
+        links.setdefault(link.task_id, []).append(link.note_path)
+    project_ids = {t.project_id for t in tasks if t.project_id is not None}
+    codes = dict(
+        db.execute(
+            select(Project.id, Project.code).where(Project.id.in_(project_ids)).execution_options(include_deleted=True)
+        ).all()
+    )
+    return [
+        TaskItem(
+            id=t.id,
+            space_id=t.space_id or spaces.DEFAULT_SPACE_ID,
+            project_id=t.project_id,
+            project_code=codes.get(t.project_id),
+            title=t.title,
+            description=t.description,
+            status=t.status,
+            priority=t.priority,
+            assignee=t.assignee,
+            start_date=t.start_date,
+            deadline=t.deadline,
+            completion_percent=t.completion_percent,
+            is_gantt_task=t.is_gantt_task,
+            is_milestone=t.is_milestone,
+            note_paths=links.get(t.id, []),
+        )
+        for t in tasks
+    ]
+
+
+def _link_path(root: Path, note_path: str) -> str:
+    """A linkable note: an existing note in the space's content/, as a path relative to it."""
+    try:
+        path = file_layer.resolve_note_path(note_path, root)
+    except file_layer.NotePathError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not path.is_file():
+        raise HTTPException(status_code=400, detail=f"No note at {note_path}")
+    return path.relative_to(root.resolve()).as_posix()
+
+
+@app.get("/api/tasks")
+def list_tasks(
+    space_id: int = spaces.DEFAULT_SPACE_ID,
+    project_id: int | None = None,
+    assignee: str | None = None,
+    status: Status | None = None,
+    note_path: str | None = None,
+    db: Session = Depends(get_db),
+) -> list[TaskItem]:
+    """The tasks of a space for the Kanban, Backlog and Gantt views, earliest due date first.
+
+    Filters: `project_id`, `status`, `note_path` (tasks linked to that note), and `assignee`
+    (an empty `assignee=` means unassigned).
+    """
+    query = select(Task).where(_in_space(_space_id_or_404(db, space_id)))
+    if project_id is not None:
+        query = query.where(Task.project_id == project_id)
+    if assignee is not None:
+        query = query.where(Task.assignee.is_(None) if not assignee.strip() else Task.assignee == assignee.strip())
+    if status is not None:
+        query = query.where(Task.status == status)
+    if note_path is not None:
+        query = query.where(Task.id.in_(select(TaskNoteLink.task_id).where(TaskNoteLink.note_path == note_path)))
+    query = query.order_by(Task.deadline.is_(None), Task.deadline, Task.start_date.is_(None), Task.start_date, Task.id)
+    return _task_items(db, list(db.scalars(query)))
+
+
+@app.post("/api/tasks", status_code=201)
+def create_task(request: TaskCreate, db: Session = Depends(get_db)) -> TaskItem:
+    """Create a task in a space, optionally in a project and linked to notes."""
+    root = spaces.content_dir(_space_id_or_404(db, request.space_id))
+    _check_project(db, request.project_id)
+    note_paths = list(dict.fromkeys(_link_path(root, p) for p in request.note_paths))
+    set_source(db, DESKTOP_SOURCE)
+    task = Task(**request.model_dump(exclude={"note_paths"}), is_gantt_task=False)
+    if task.status == Status.DONE:
+        task.completed_at = utcnow()
+    db.add(task)
+    db.flush()
+    db.add_all(TaskNoteLink(task_id=task.id, note_path=path) for path in note_paths)
+    db.commit()
+    return _task_items(db, [task])[0]
+
+
+@app.get("/api/tasks/{task_id}")
+def get_task(task_id: int, db: Session = Depends(get_db)) -> TaskItem:
+    return _task_items(db, [_get_task(db, task_id)])[0]
+
+
+@app.delete("/api/tasks/{task_id}", status_code=204)
+def delete_task(task_id: int, db: Session = Depends(get_db)) -> None:
+    """Soft-delete a task (it stays in `history`)."""
+    task = _get_task(db, task_id)
+    set_source(db, DESKTOP_SOURCE)
+    soft_delete(db, task)
+    db.commit()
+
+
+@app.post("/api/tasks/{task_id}/links")
+def link_note(task_id: int, request: TaskNoteLinkIn, db: Session = Depends(get_db)) -> TaskItem:
+    """Link a note of the task's space to the task (linking twice is harmless)."""
+    task = _get_task(db, task_id)
+    path = _link_path(spaces.content_dir(task.space_id or spaces.DEFAULT_SPACE_ID), request.note_path)
+    if db.get(TaskNoteLink, (task.id, path)) is None:
+        db.add(TaskNoteLink(task_id=task.id, note_path=path))
+        db.commit()
+    return _task_items(db, [task])[0]
+
+
+@app.delete("/api/tasks/{task_id}/links")
+def unlink_note(task_id: int, note_path: str, db: Session = Depends(get_db)) -> TaskItem:
+    task = _get_task(db, task_id)
+    db.execute(delete(TaskNoteLink).where(TaskNoteLink.task_id == task.id, TaskNoteLink.note_path == note_path))
+    db.commit()
+    return _task_items(db, [task])[0]
 
 
 if __name__ == "__main__":

@@ -7,18 +7,9 @@ from sqlalchemy import select
 import database
 import file_layer
 import main
-from config import Settings
 from history import soft_delete
 from models import HistoryRecord, Project, Task, TimeLog
 from schemas import Status
-
-
-@pytest.fixture
-def notes_dir(tmp_path, monkeypatch):
-    root = tmp_path / "notes"
-    root.mkdir()
-    monkeypatch.setattr(file_layer, "get_settings", lambda: Settings(_env_file=None, notes_dir=root))
-    return root
 
 
 @pytest.fixture

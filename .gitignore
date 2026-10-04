@@ -29,3 +29,4 @@ local.properties
 
 # Local notes (user data)
 backend/notes/
+backend/data/

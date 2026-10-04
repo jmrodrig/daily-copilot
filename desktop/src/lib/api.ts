@@ -14,6 +14,17 @@ export async function getJson<T>(url: string, signal?: AbortSignal): Promise<T> 
   return res.json();
 }
 
+/** POST/PUT/PATCH/DELETE JSON, throwing the backend's error message on failure. */
+export async function sendJson<T>(method: string, url: string, body?: unknown): Promise<T> {
+  const res = await fetch(url, {
+    method,
+    headers: body === undefined ? undefined : { "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await errorDetail(res));
+  return res.status === 204 ? (undefined as T) : res.json();
+}
+
 export function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }

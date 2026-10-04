@@ -22,7 +22,8 @@ Settings are read from system environment variables and from `backend/.env`
 | Variable                    | Default                  | Notes                                             |
 |-----------------------------|--------------------------|---------------------------------------------------|
 | `COPILOT_DB_PATH`           | `copilot.db`             | Relative paths resolve against `backend/`         |
-| `COPILOT_NOTES_DIR`         | `notes`                  | Markdown notes root; relative to `backend/`       |
+| `COPILOT_DATA_DIR`          | `data`                   | Spaces root (`data/spaces/<id>/content`, `/templates`); relative to `backend/` |
+| `COPILOT_NOTES_DIR`         | `notes`                  | Pre-Phase 9 notes folder, moved into the Default space on startup |
 | `COPILOT_HOST`              | `127.0.0.1`              | Used by `python main.py`                          |
 | `COPILOT_PORT`              | `8000`                   | Used by `python main.py`                          |
 | `COPILOT_OLLAMA_BASE_URL`   | `http://localhost:11434` | Local model endpoint                              |
@@ -40,7 +41,8 @@ uvicorn main:app --reload
 ```
 
 Then open http://localhost:8000/health; it should return `{"status": "ok"}`.
-On startup the app creates `copilot.db` in this directory if it doesn't exist yet.
+On startup the app creates `copilot.db` in this directory if it doesn't exist yet,
+and runs the Spaces migration (see [Spaces](#spaces)).
 `python main.py` does the same but uses `COPILOT_HOST`/`COPILOT_PORT`.
 
 ### Exposing over Tailscale
@@ -55,6 +57,72 @@ uvicorn main:app --host 100.x.y.z --port 8000
 
 Don't bind to `0.0.0.0`: that would also expose the API on the office LAN.
 
+## Spaces
+
+A **Space** is the top-level boundary: every note, folder and task belongs to one
+space, and the desktop app, task views and Co-pilot only ever see the active one.
+Each space has a folder under `COPILOT_DATA_DIR`:
+
+```
+data/spaces/<space_id>/content/     the notes: a free folder tree (Confluence-style)
+data/spaces/<space_id>/templates/   markdown templates for new notes
+```
+
+On startup `spaces.migrate` (called from `main.py`) makes a pre-Phase 9 install fit:
+it creates the `Default` space (id 1), moves `COPILOT_NOTES_DIR` (`notes/`) to
+`data/spaces/1/content/`, puts tasks without a space into it, and gives every space its
+`content/` and `templates/` folders (a new `templates/` gets two starter templates). It
+runs on every start and does nothing once done. If `data/spaces/1/content/` already has
+notes, the old folder is left alone and a warning is logged: merge it by hand. Note
+paths relative to the root don't change, so note history still lines up.
+
+Every endpoint that reads notes or tasks takes a `space_id` (query parameter or body
+field, default `1`); an unknown space returns 404.
+
+- `GET /api/spaces` lists the spaces; `POST /api/spaces` `{"name": "Private"}` creates one (201).
+- `GET /api/tree?space_id=1` returns the `content/` tree, empty folders included and
+  hidden ones skipped: `{"space_id", "content": FolderNode, "templates": [{"path", "title"}]}`,
+  where a `FolderNode` is `{"name", "path", "is_project", "is_reference", "project_id",
+  "folders": [...], "notes": [{"path", "title"}]}`.
+- `PUT /api/folders/meta` `{"space_id", "path", "is_project"?, "is_reference"?}` marks or
+  unmarks a folder (`FolderMeta` row; unsent flags are kept).
+- `POST /api/folders` `{"space_id", "path"}` creates a folder (409 if it exists).
+- `POST /api/notes` `{"space_id", "path", "title"?, "template"?}` creates a note (409 if it
+  exists; `.md` is added if missing). With `template` (a path in `templates/`) the note
+  gets the template's front-matter and body, with `{title}` and `{date}` filled in.
+
+**Project folders.** Marking a folder as a Project links it to a `Project` row: the one
+whose code is the folder name (so a `C7801` folder picks up the imported C7801 Gantt),
+unless another folder already claims it, else a new project. Tasks are grouped by that
+project. Unmarking keeps the link, so marking the folder again brings its tasks back.
+A note belongs to its nearest enclosing project folder.
+
+**Reference Data folders.** The Co-pilot puts the notes of every Reference Data folder of
+the space into its system prompt (up to 40,000 characters; the rest are listed by path).
+
+## Task engine
+
+Tasks are `Task` rows in SQLite (not markdown checklists), each in a space and
+optionally in a project. Statuses: `backlog`, `todo`, `in_progress`, `blocked`, `done`.
+Gantt imports land here too (`is_gantt_task=True`).
+
+- `GET /api/tasks?space_id=1` lists a space's tasks, earliest due date first, as
+  `TaskItem`s (`project_code`, `completion_percent`, linked `note_paths`, …). Filters:
+  `project_id`, `status`, `note_path` (tasks linked to that note) and `assignee` (an
+  empty `assignee=` means unassigned).
+- `POST /api/tasks` `{"space_id", "title", "project_id"?, "status"?, "start_date"?,
+  "deadline"?, "assignee"?, "note_paths"?}` creates a task (201; default status `backlog`).
+- `GET /api/tasks/{id}`; `PATCH /api/tasks/{id}` changes any of `title`, `description`,
+  `status`, `priority`, `assignee`, `project_id`, `start_date`, `deadline`;
+  `DELETE /api/tasks/{id}` soft-deletes it (204).
+- `POST /api/tasks/{id}/links` `{"note_path"}` links a note of the task's space
+  (`TaskNoteLink`, many-to-many); `DELETE /api/tasks/{id}/links?note_path=...` unlinks it.
+- `GET /api/projects?space_id=1` lists the space's projects (those with tasks or a project
+  folder in it; a project with neither belongs to the Default space) for filters and pickers.
+
+`/api/gantt`, `/api/triage` and `/api/capture` are per space too. `cli_import.py`
+imports into the Default space unless given `--space <id>`.
+
 ## Capture API
 
 `POST /api/capture` saves a quick note from the Android app as a markdown file:
@@ -65,10 +133,10 @@ Don't bind to `0.0.0.0`: that would also expose the API on the office LAN.
 
 `project` defaults to `Inbox` and must be a plain code (letters, digits, `-`, `_`);
 `priority` is `Low`, `Normal`, `High` or `Urgent` (any case). The note is written to
-`<project>/Notes-in/Capture_<YYYYMMDD_HHMMSS>.md` (or `Inbox/Capture_<...>.md`) under
-`COPILOT_NOTES_DIR`, with front-matter `type: capture`, `project`, `priority` and
+`<project>/Notes-in/Capture_<YYYYMMDD_HHMMSS>.md` (or `Inbox/Capture_<...>.md`) in the
+`content/` folder of `space_id` (optional, default the Default space), with front-matter `type: capture`, `project`, `priority` and
 `created`, plus `source` (e.g. `verbal`, `meeting`) if the request sends one. The
-response is `{"path": "<path relative to the notes dir>"}`, and the change is logged in
+response is `{"path": "<path relative to content/>"}`, and the change is logged in
 `history` with source `android_app`.
 
 ## Evening check-in API
@@ -99,9 +167,16 @@ chat state, so the client sends the whole conversation, ending with a user messa
 ```json
 {
   "messages": [{"role": "user", "content": "What is currently overdue on C7801?"}],
-  "access_mode": "ask_first"
+  "access_mode": "ask_first",
+  "space_id": 1,
+  "note_path": "C7801/Meetings/Design review.md"
 }
 ```
+
+The agent only sees the `space_id` space: its tools search, read and write that space's
+`content/` and list its tasks. Its system prompt includes the space's Reference Data
+notes and, when `note_path` (the note the user has open) is inside a Project folder, that
+project's open tasks plus any tasks linked to the note.
 
 The model (`COPILOT_CHAT_MODEL`, via litellm) can call `search_notes`, `read_note`,
 `list_tasks` (tasks from SQLite with an `overdue` flag) and `write_note`, for up to
@@ -118,7 +193,7 @@ The response is `{"reply": "<markdown>", "proposed_edits": [...], "written_paths
 `content`/`frontmatter`, the current `previous_content`/`previous_frontmatter` (null for
 a new note) and `base_hash`, the SHA-256 of the note file when it was proposed.
 
-`POST /api/notes/apply-edit` commits an edit the user approved: send `path`, `content`,
+`POST /api/notes/apply-edit` commits an edit the user approved: send `space_id`, `path`, `content`,
 `frontmatter` and `base_hash` from the proposal. If the note changed since then (or a
 "new" note now exists) it returns 409 and writes nothing. The write is recorded in
 `history` with source `copilot_agent_approved`. Without `COPILOT_GEMINI_API_KEY`,
@@ -148,11 +223,11 @@ any text after the command. The agent's system prompt tells it to follow such ro
 
 ## Notes API
 
-`GET /api/notes` lists every note (hidden folders skipped) as `{"path", "title"}` for
-the desktop page tree; the title is the front-matter `title`, else the first line of the
-content, else the file name. `GET /api/notes/file?path=<path>` returns one note as
-`{"path", "frontmatter", "content"}` (404 if missing, 400 for paths outside the notes
-directory).
+`GET /api/notes?space_id=1` lists every note of a space (hidden folders skipped) as
+`{"path", "title"}`; the title is the front-matter `title`, else the first line of the
+content, else the file name. `GET /api/notes/file?space_id=1&path=<path>` returns one note
+as `{"path", "frontmatter", "content"}` (404 if missing, 400 for paths outside the
+folder); add `root=templates` to read a template instead.
 
 ## Gantt PDF parser
 
@@ -199,7 +274,7 @@ Every change is appended to the `history` table with a full JSON snapshot:
 | Column        | Meaning                                                        |
 |---------------|----------------------------------------------------------------|
 | `entity_type` | `Project`, `Task`, `Link` or `Note`                            |
-| `entity_id`   | Row id, or the note path relative to `COPILOT_NOTES_DIR`       |
+| `entity_id`   | Row id; for notes the path in the Default space's `content/`, else `spaces/<id>/content/<path>` |
 | `action`      | `create`, `update`, `delete` or `rename` (notes only)          |
 | `source`      | Who made the change: `manual` (default), `cli_import`, `copilot_agent`, ... |
 | `timestamp`   | UTC                                                            |

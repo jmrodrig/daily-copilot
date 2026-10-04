@@ -7,7 +7,7 @@ export type GanttTask = {
   start_date: string | null;
   end_date: string | null;
   completion_percent: number;
-  status: "todo" | "in_progress" | "blocked" | "done";
+  status: "backlog" | "todo" | "in_progress" | "blocked" | "done";
   is_milestone: boolean;
 };
 

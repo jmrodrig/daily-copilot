@@ -1,11 +1,19 @@
 """Co-pilot chat agent: an LLM (via litellm) with tools over the notes and the task database.
 
+Everything the agent sees is limited to the active space: its `content/` notes and its tasks.
+
 The tools the model may call:
 
-- `search_notes`: keyword search across the markdown notes.
+- `search_notes`: keyword search across the space's markdown notes.
 - `read_note`: read one note with its front-matter.
-- `list_tasks`: project tasks from SQLite (status, dates, overdue flag).
+- `list_tasks`: the space's tasks from SQLite (status, dates, overdue flag).
 - `write_note`: create or replace a note. Only offered outside `read_only` mode.
+
+Context injected into the system prompt (see `space_context`):
+
+- the contents of every folder marked as Reference Data in the space;
+- when the user has a note open inside a Project folder, that project's open tasks
+  (and the tasks linked to the note).
 
 Writes go through `file_layer.write_note`, which enforces the access mode and records
 every change in `history`. In `ask_first` mode the file layer refuses the write with
@@ -13,20 +21,23 @@ every change in `history`. In `ask_first` mode the file layer refuses the write 
 approve (see `POST /api/notes/apply-edit`).
 """
 
+import functools
+import glob
 import json
-import re
 from collections.abc import Callable, Sequence
 from datetime import date
+from pathlib import Path
 from typing import Any
 
 import litellm
 import yaml
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 
 import database
 import file_layer
+import spaces
 from config import Settings, get_settings
-from models import Project, Task
+from models import FolderMeta, Project, Space, Task, TaskNoteLink
 from schemas import AccessMode, ChatMessage, ChatResponse, ProposedEdit, Status, ToolCallSummary
 
 # History sources: the agent writing by itself, and the user approving a proposed edit.
@@ -37,7 +48,8 @@ MAX_TOOL_ROUNDS = 8
 SEARCH_LIMIT = 10
 READ_LIMIT = 20_000  # characters of note content returned to the model
 _SNIPPET_RADIUS = 80
-_PROJECT_RE = re.compile(r"^[A-Za-z0-9_-]+$")  # a project code is also a folder name
+REFERENCE_LIMIT = 40_000  # characters of Reference Data notes put into the system prompt
+CONTEXT_TASK_LIMIT = 50  # project tasks put into the system prompt
 
 
 class AgentError(Exception):
@@ -60,8 +72,11 @@ imported from the shop floor Gantt charts.
 
 Today is {today}.
 
-Notes layout: `<project>/...` folders per project; quick captures land in `<project>/Notes-in/` \
-or `Inbox/`. Notes may start with YAML front-matter (type, project, tags, created).
+You work inside one Space ("{space_name}"): every note path and task you see belongs to it.
+
+Notes layout: a free folder tree. Folders marked as Projects group a project's notes, and its tasks live \
+in the task database. Quick captures land in `<project>/Notes-in/` or `Inbox/`. \
+Notes may start with YAML front-matter (type, project, tags, created).
 
 Rules:
 - Look things up with the tools before answering; do not guess. Cite note paths you relied on.
@@ -70,7 +85,7 @@ Rules:
 - A message starting with `[Saved prompt /<command>]` is one of the user's saved routines (e.g. /prep for \
 meeting prep): carry out its instruction with the tools, using any `User input:` that follows it.
 - `[The user is looking at ...]` says which page or note the user has open; "this page" or "this note" means it.
-{write_rules}"""
+{write_rules}{context}"""
 
 _WRITE_RULES = {
     AccessMode.READ_ONLY: "- You are in READ ONLY mode: you cannot create or change notes. "
@@ -95,7 +110,10 @@ TOOLS: dict[str, dict[str, Any]] = {
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "Keywords, e.g. `keel design`"},
-                "project": {"type": "string", "description": "Optional project code to limit the search to"},
+                "project": {
+                    "type": "string",
+                    "description": "Optional project code or folder path (e.g. `C7801/Design`) to limit the search to",
+                },
             },
             "required": ["query"],
         },
@@ -110,7 +128,7 @@ TOOLS: dict[str, dict[str, Any]] = {
         "parameters": {
             "type": "object",
             "properties": {
-                "project": {"type": "string", "description": "Optional project code, e.g. C7801"},
+                "project": {"type": "string", "description": "Optional project code or project folder, e.g. C7801"},
                 "overdue_only": {"type": "boolean", "description": "Only tasks past their deadline"},
                 "include_done": {"type": "boolean", "description": "Also list finished tasks"},
             },
@@ -155,16 +173,22 @@ def _snippet(text: str, terms: Sequence[str]) -> str:
     return ("…" if start else "") + snippet + ("…" if hit + _SNIPPET_RADIUS < len(text) else "")
 
 
-def search_notes(query: str, project: str | None = None) -> dict[str, Any]:
-    if project and not _PROJECT_RE.match(project):
-        raise ToolError(f"Not a project code: {project}")
+def _folder_pattern(root: Path, folder: str) -> str:
+    """Glob for the notes under `folder` (relative to `root`), refusing folders outside it."""
+    resolved = (root / folder.strip().strip("/")).resolve()
+    if not resolved.is_relative_to(root) or resolved == root:
+        raise ToolError(f"Not a project or folder: {folder}")
+    return f"{glob.escape(resolved.relative_to(root).as_posix())}/**/*.md"
+
+
+def search_notes(query: str, project: str | None = None, *, notes_dir: Path | None = None) -> dict[str, Any]:
+    root = file_layer.notes_root(notes_dir)
     terms = [t for t in query.lower().split() if len(t) > 1]
-    pattern = f"{project}/**/*.md" if project else "**/*.md"
-    root = file_layer.notes_root()
+    pattern = _folder_pattern(root, project) if project else "**/*.md"
     scored = []
-    for path in file_layer.list_notes(pattern):
+    for path in file_layer.list_notes(pattern, notes_dir=root):
         try:
-            note = file_layer.read_note(path)
+            note = file_layer.read_note(path, notes_dir=root)
         except (file_layer.FileLayerError, OSError, UnicodeDecodeError):
             continue  # A broken note must not break the search.
         text = _note_text(note)
@@ -190,9 +214,9 @@ def search_notes(query: str, project: str | None = None) -> dict[str, Any]:
     }
 
 
-def read_note(path: str) -> dict[str, Any]:
+def read_note(path: str, *, notes_dir: Path | None = None) -> dict[str, Any]:
     try:
-        note = file_layer.read_note(path)
+        note = file_layer.read_note(path, notes_dir=notes_dir)
     except FileNotFoundError:
         raise ToolError(f"No note at {path}; use search_notes to find the right path") from None
     content = note["content"]
@@ -201,12 +225,39 @@ def read_note(path: str) -> dict[str, Any]:
     return {"path": note["path"], "frontmatter": note["frontmatter"], "content": content}
 
 
-def list_tasks(project: str | None = None, overdue_only: bool = False, include_done: bool = False) -> dict[str, Any]:
+def _project_id(session: Any, space_id: int, project: str) -> int | None:
+    """A project by its folder in the space (case-insensitive) or by its code."""
+    folder = project.strip().strip("/").lower()
+    for meta in session.scalars(select(FolderMeta).where(FolderMeta.space_id == space_id, FolderMeta.is_project.is_(True))):
+        if meta.path.lower() == folder:
+            return meta.project_id
+    return session.scalar(select(Project.id).where(func.upper(Project.code) == project.strip().upper()))
+
+
+def list_tasks(
+    project: str | None = None,
+    overdue_only: bool = False,
+    include_done: bool = False,
+    *,
+    space_id: int = spaces.DEFAULT_SPACE_ID,
+    project_id: int | None = None,
+) -> dict[str, Any]:
     today = date.today()
-    query = select(Task, Project.code).join(Project, Task.project_id == Project.id).where(Project.active.is_(True))
-    if project:
-        query = query.where(Project.code == project.upper())
+    query = (
+        select(Task, Project.code)
+        .outerjoin(Project, Task.project_id == Project.id)
+        .where(
+            func.coalesce(Task.space_id, spaces.DEFAULT_SPACE_ID) == space_id,
+            or_(Task.project_id.is_(None), Project.active.is_(True)),
+        )
+    )
     with database.SessionLocal() as session:
+        if project and project_id is None:
+            project_id = _project_id(session, space_id, project)
+            if project_id is None:
+                raise ToolError(f"No project {project} in this space")
+        if project_id is not None:
+            query = query.where(Task.project_id == project_id)
         rows = session.execute(query).all()
     tasks = []
     for task, code in rows:
@@ -229,24 +280,104 @@ def list_tasks(project: str | None = None, overdue_only: bool = False, include_d
                 "is_milestone": task.is_milestone,
             }
         )
-    tasks.sort(key=lambda t: (t["project"], t["deadline"] is None, t["deadline"] or "", t["id"]))
+    tasks.sort(key=lambda t: (t["project"] or "", t["deadline"] is None, t["deadline"] or "", t["id"]))
     return {"today": today.isoformat(), "count": len(tasks), "tasks": tasks}
 
 
-class _Turn:
-    """Tool state for one chat turn: the access mode and what the agent wrote or proposed."""
+# --- Space context -------------------------------------------------------------
 
-    def __init__(self, mode: AccessMode):
+
+def _reference_block(root: Path, folders: Sequence[str]) -> str:
+    """The notes of the Reference Data folders, up to `REFERENCE_LIMIT` characters in total."""
+    included, skipped, budget = [], [], REFERENCE_LIMIT
+    for folder in folders:
+        for path in file_layer.list_notes(f"{glob.escape(folder)}/**/*.md", notes_dir=root):
+            try:
+                text = _note_text(file_layer.read_note(path, notes_dir=root))
+            except (file_layer.FileLayerError, OSError, UnicodeDecodeError):
+                continue
+            if len(text) > budget:
+                skipped.append(path)
+                continue
+            budget -= len(text)
+            included.append(f"<reference_note>\n{text.strip()}\n</reference_note>")
+    lines = [
+        "\n\nReference Data (always relevant in this space; folders: "
+        + ", ".join(f"`{f}`" for f in folders)
+        + "). Use it without being asked:"
+    ]
+    lines += included or ["(The reference folders have no notes yet.)"]
+    if skipped:
+        lines.append("Not included for length (use `read_note`): " + ", ".join(f"`{p}`" for p in skipped))
+    return "\n".join(lines)
+
+
+def _task_line(task: dict[str, Any]) -> str:
+    parts = [f"#{task['id']} {task['title']}", task["status"]]
+    if task["assignee"]:
+        parts.append(f"assignee {task['assignee']}")
+    if task["start_date"]:
+        parts.append(f"start {task['start_date']}")
+    if task["deadline"]:
+        parts.append(f"due {task['deadline']}" + (" (OVERDUE)" if task["overdue"] else ""))
+    return "- " + " · ".join(parts)
+
+
+def space_context(space_id: int, note_path: str | None = None) -> tuple[str, str]:
+    """(space name, extra system prompt text) for a chat in `space_id` with `note_path` open."""
+    root = spaces.content_dir(space_id)
+    with database.SessionLocal() as session:
+        space = session.get(Space, space_id)
+        metas = spaces.folder_metas(session, space_id)
+        project_meta = spaces.project_folder_for(metas, note_path) if note_path else None
+        project = session.get(Project, project_meta.project_id) if project_meta and project_meta.project_id else None
+        linked_ids = (
+            list(session.scalars(select(TaskNoteLink.task_id).where(TaskNoteLink.note_path == note_path)))
+            if note_path
+            else []
+        )
+    name = space.name if space else spaces.DEFAULT_SPACE_NAME
+    blocks = []
+
+    references = sorted(path for path, meta in metas.items() if meta.is_reference and (root / path).is_dir())
+    if references:
+        blocks.append(_reference_block(root, references))
+
+    if project is not None:
+        tasks = list_tasks(space_id=space_id, project_id=project.id)["tasks"]
+        lines = [
+            f"\n\nThe open note is in the project folder `{project_meta.path}` (project {project.code}, "
+            f"{project.name}). Its open tasks ({len(tasks)}):"
+        ]
+        lines += [_task_line(t) for t in tasks[:CONTEXT_TASK_LIMIT]] or ["(no open tasks)"]
+        if len(tasks) > CONTEXT_TASK_LIMIT:
+            lines.append(f"… and {len(tasks) - CONTEXT_TASK_LIMIT} more; use `list_tasks`.")
+        blocks.append("\n".join(lines))
+
+    if linked_ids:
+        everything = list_tasks(space_id=space_id, include_done=True)["tasks"]
+        linked = [t for t in everything if t["id"] in set(linked_ids)]
+        if linked:
+            blocks.append("\n\nTasks linked to the open note:\n" + "\n".join(_task_line(t) for t in linked))
+    return name, "".join(blocks)
+
+
+class _Turn:
+    """Tool state for one chat turn: the access mode, the space, and what the agent wrote or proposed."""
+
+    def __init__(self, mode: AccessMode, space_id: int = spaces.DEFAULT_SPACE_ID):
         self.mode = mode
+        self.space_id = space_id
+        self.root = spaces.content_dir(space_id)
         self.proposed: dict[str, ProposedEdit] = {}  # by path; a later proposal replaces an earlier one
         self.written: list[str] = []
 
     def write_note(self, path: str, content: str, frontmatter: dict[str, Any] | None = None) -> dict[str, Any]:
         if self.mode is AccessMode.READ_ONLY:
             raise ToolError("Notes are read only in this conversation")
-        rel = file_layer.resolve_note_path(path).relative_to(file_layer.notes_root()).as_posix()
+        rel = file_layer.resolve_note_path(path, self.root).relative_to(self.root.resolve()).as_posix()
         try:
-            current = file_layer.read_note(rel)
+            current = file_layer.read_note(rel, notes_dir=self.root)
         except FileNotFoundError:
             current = None
         if frontmatter is None:
@@ -255,7 +386,9 @@ class _Turn:
             raise ToolError("frontmatter must be an object")
 
         try:
-            written = file_layer.write_note(rel, content, frontmatter, self.mode, source=AGENT_SOURCE)
+            written = file_layer.write_note(
+                rel, content, frontmatter, self.mode, notes_dir=self.root, source=AGENT_SOURCE
+            )
         except file_layer.ApprovalRequiredError:
             if current is not None and (current["content"], current["frontmatter"]) == (content, frontmatter):
                 return {"status": "unchanged", "path": rel}
@@ -265,7 +398,7 @@ class _Turn:
                 frontmatter=frontmatter,
                 previous_content=current["content"] if current else None,
                 previous_frontmatter=current["frontmatter"] if current else None,
-                base_hash=file_layer.note_hash(rel),
+                base_hash=file_layer.note_hash(rel, notes_dir=self.root),
             )
             return {"status": "proposed", "path": rel, "message": "Waiting for the user's approval in the chat"}
         if written and rel not in self.written:
@@ -274,9 +407,9 @@ class _Turn:
 
     def call(self, name: str, arguments: dict[str, Any]) -> Any:
         tools: dict[str, Callable[..., Any]] = {
-            "search_notes": search_notes,
-            "read_note": read_note,
-            "list_tasks": list_tasks,
+            "search_notes": functools.partial(search_notes, notes_dir=self.root),
+            "read_note": functools.partial(read_note, notes_dir=self.root),
+            "list_tasks": functools.partial(list_tasks, space_id=self.space_id),
             "write_note": self.write_note,
         }
         if name not in tools or (name == "write_note" and self.mode is AccessMode.READ_ONLY):
@@ -312,19 +445,28 @@ def _run_tool(turn: _Turn, name: str, raw_arguments: str | None) -> tuple[str, T
 
 
 def run_chat(
-    messages: Sequence[ChatMessage], access_mode: AccessMode, *, settings: Settings | None = None
+    messages: Sequence[ChatMessage],
+    access_mode: AccessMode,
+    *,
+    space_id: int = spaces.DEFAULT_SPACE_ID,
+    note_path: str | None = None,
+    settings: Settings | None = None,
 ) -> ChatResponse:
-    """Answer the last user message, calling tools as the model asks, for up to `MAX_TOOL_ROUNDS` rounds."""
+    """Answer the last user message in `space_id`, calling tools as the model asks, for up to
+    `MAX_TOOL_ROUNDS` rounds. `note_path` is the note the user has open, if any."""
     settings = settings or get_settings()
     if settings.gemini_api_key is None:
         raise AgentNotConfiguredError("COPILOT_GEMINI_API_KEY is not set; add it to backend/.env")
 
     mode = AccessMode(access_mode)
     write_rules = _WRITE_RULES[mode] + ("" if mode is AccessMode.READ_ONLY else _WRITE_GUIDE)
-    system = SYSTEM_PROMPT.format(today=date.today().isoformat(), write_rules=write_rules)
+    space_name, context = space_context(space_id, note_path)
+    system = SYSTEM_PROMPT.format(
+        today=date.today().isoformat(), write_rules=write_rules, space_name=space_name, context=context
+    )
     history: list[Any] = [{"role": "system", "content": system}]
     history += [{"role": m.role.value, "content": m.content} for m in messages]
-    turn, summaries = _Turn(mode), []
+    turn, summaries = _Turn(mode, space_id), []
 
     for round_ in range(MAX_TOOL_ROUNDS + 1):
         last = round_ == MAX_TOOL_ROUNDS  # Out of rounds: make the model answer with what it has.

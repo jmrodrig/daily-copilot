@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 
 import { formatDay, ME, type TriageItem } from "../components/TriageBoard";
 import { getJson, message } from "../lib/api";
+import { useSpace } from "../lib/space";
 import { projectSwatch } from "../lib/projects";
 
 // The visible working day and its scale (the mockups use 64px per hour).
@@ -69,7 +70,7 @@ export function planDay(items: TriageItem[]): Plan {
       start: WORK_START - TRIAGE_MINUTES,
       end: WORK_START,
       detail: `${captures} captured note${captures === 1 ? "" : "s"}`,
-      to: "/tasks",
+      to: "/triage",
       variant: "triage",
     });
   }
@@ -95,7 +96,7 @@ export function planDay(items: TriageItem[]): Plan {
       detail: parts.join(" · "),
       project: item.project,
       chip: item.rank === 1 ? "Overdue" : item.status === "blocked" ? "Blocked" : item.assignee === ME ? "Claimed by you" : undefined,
-      to: item.project ? `/plan/${encodeURIComponent(item.project)}` : "/tasks",
+      to: item.project ? `/plan/${encodeURIComponent(item.project)}` : "/triage",
       variant: "task",
     });
     cursor += TASK_MINUTES;
@@ -116,16 +117,17 @@ function nowMinutes(): number {
 export default function Dashboard() {
   const [triage, setTriage] = useState<State>({ state: "loading" });
   const [now, setNow] = useState(nowMinutes);
+  const { spaceId } = useSpace();
 
   const load = useCallback((signal?: AbortSignal) => {
     setTriage({ state: "loading" });
-    getJson<TriageItem[]>("/api/triage", signal)
+    getJson<TriageItem[]>(`/api/triage?space_id=${spaceId}`, signal)
       .then((items) => setTriage({ state: "ok", items }))
       .catch((err: unknown) => {
         if (signal?.aborted) return;
         setTriage({ state: "error", message: message(err) });
       });
-  }, []);
+  }, [spaceId]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -171,7 +173,7 @@ export default function Dashboard() {
           {plan && plan.unscheduled > 0 && (
             <p className="mt-3 text-[13px] text-text-muted">
               {plan.unscheduled} more task{plan.unscheduled === 1 ? "" : "s"} due today did not fit.{" "}
-              <Link to="/tasks" className="text-accent hover:underline">
+              <Link to="/triage" className="text-accent hover:underline">
                 See all tasks
               </Link>
             </p>
@@ -186,7 +188,7 @@ export default function Dashboard() {
           {plan?.comingUp.map((item) => (
             <Link
               key={item.id}
-              to={item.project ? `/plan/${encodeURIComponent(item.project)}` : "/tasks"}
+              to={item.project ? `/plan/${encodeURIComponent(item.project)}` : "/triage"}
               className="flex flex-col gap-0.5 border-t border-border-default px-1.5 py-2.5 hover:bg-surface-hover"
             >
               <span className="font-mono text-xs text-text-muted">

@@ -15,14 +15,6 @@ from file_layer import (
 from schemas import AccessMode, Note
 
 
-@pytest.fixture
-def notes_dir(tmp_path, monkeypatch):
-    root = tmp_path / "notes"
-    root.mkdir()
-    monkeypatch.setattr(file_layer, "get_settings", lambda: Settings(_env_file=None, notes_dir=root))
-    return root
-
-
 # --- Settings ---------------------------------------------------------------
 
 
