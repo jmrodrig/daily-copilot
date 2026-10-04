@@ -10,7 +10,8 @@ The agent access mode is enforced here, server-side, so no caller can bypass it:
   unless the caller passes `approved=True` after the user has confirmed.
 - `write_directly`: writes go straight to disk.
 
-Every write, rename and delete is recorded in the `history` table (entity type
+Every write, rename, copy and delete (of a note, or of every note in a moved, copied or
+deleted folder) is recorded in the `history` table (entity type
 "Note", entity id = path relative to the Default space's `content/`, or
 `spaces/<id>/<content|templates>/<path>` for other folders) with a full snapshot of the note,
 so an overwritten or deleted note can always be recovered.
@@ -20,6 +21,7 @@ import functools
 import hashlib
 import os
 import re
+import shutil
 import tempfile
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -99,6 +101,15 @@ def resolve_note_path(filepath: str | Path, notes_dir: str | Path | None = None)
         raise NotePathError(f"{filepath} is outside the notes directory")
     if path.suffix.lower() != NOTE_SUFFIX:
         raise NotePathError(f"{filepath} is not a {NOTE_SUFFIX} file")
+    return path
+
+
+def resolve_folder_path(folderpath: str | Path, notes_dir: str | Path | None = None) -> Path:
+    """Resolve a folder `folderpath` against NOTES_DIR, refusing NOTES_DIR itself and anything outside it."""
+    root = notes_root(notes_dir)
+    path = (root / folderpath).resolve()
+    if not path.is_relative_to(root) or path == root:
+        raise NotePathError(f"{folderpath} is outside the notes directory")
     return path
 
 
@@ -182,14 +193,21 @@ def _ensure_history_table(bind: Engine) -> None:
 
 
 @contextmanager
-def _recorded(entity_id: str, action: str, state: dict[str, Any], source: str) -> Iterator[None]:
-    """Record a note change in `history`; it is committed only if the file operation succeeds."""
+def _recorded_all(changes: list[tuple[str, str, dict[str, Any]]], source: str) -> Iterator[None]:
+    """Record note changes `(entity id, action, state)` in `history`, committed only if the
+    file operation succeeds."""
     with database.SessionLocal() as session:
         _ensure_history_table(session.get_bind())
         with session.begin():
-            history.record(session, "Note", entity_id, action, state, source)
+            for entity_id, action, state in changes:
+                history.record(session, "Note", entity_id, action, state, source)
             session.flush()
             yield
+
+
+def _recorded(entity_id: str, action: str, state: dict[str, Any], source: str):
+    """Record one note change in `history`; it is committed only if the file operation succeeds."""
+    return _recorded_all([(entity_id, action, state)], source)
 
 
 def read_note(filepath: str | Path, *, notes_dir: str | Path | None = None) -> dict[str, Any]:
@@ -320,3 +338,130 @@ def delete_note(
     )
     with _recorded(_history_id(path, notes_dir), "delete", state, source):
         path.unlink()
+
+
+def copy_note(
+    filepath: str | Path,
+    new_filepath: str | Path,
+    access_mode: AccessMode | str,
+    *,
+    approved: bool = False,
+    notes_dir: str | Path | None = None,
+    source: str = history.DEFAULT_SOURCE,
+) -> None:
+    """Copy a note byte for byte, recording a "create" whose snapshot's `copied_from` names the original.
+
+    Raises `FileNotFoundError` / `FileExistsError` for a missing note or a taken destination.
+    """
+    mode = AccessMode(access_mode)
+    path = resolve_note_path(filepath, notes_dir)
+    new_path = resolve_note_path(new_filepath, notes_dir)
+    state = _note_state(path, notes_dir)
+    _check_access(
+        mode,
+        approved,
+        new_path,
+        "write",
+        lambda: ApprovalRequiredError(new_path, state["content"], state["frontmatter"]),
+    )
+    if new_path.exists():
+        raise FileExistsError(f"{new_filepath} already exists")
+
+    state = {**state, "path": _relative(new_path, notes_dir), "copied_from": state["path"]}
+    with _recorded(_history_id(new_path, notes_dir), "create", state, source):
+        new_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(path, new_path)
+
+
+# --- Folders --------------------------------------------------------------------
+
+
+def _folder_notes(folder: Path) -> list[Path]:
+    return sorted(p for p in folder.rglob("*") if p.is_file() and p.suffix.lower() == NOTE_SUFFIX)
+
+
+def _folder_pair(folderpath: str | Path, new_folderpath: str | Path, notes_dir: str | Path | None) -> tuple[Path, Path]:
+    """The source and destination of a folder move or copy, checked."""
+    path = resolve_folder_path(folderpath, notes_dir)
+    new_path = resolve_folder_path(new_folderpath, notes_dir)
+    if not path.is_dir():
+        raise FileNotFoundError(f"No folder at {folderpath}")
+    if new_path.is_relative_to(path):
+        raise NotePathError(f"{new_folderpath} is inside {folderpath}")
+    if new_path.exists():
+        raise FileExistsError(f"{new_folderpath} already exists")
+    return path, new_path
+
+
+def move_folder(
+    folderpath: str | Path,
+    new_folderpath: str | Path,
+    access_mode: AccessMode | str,
+    *,
+    approved: bool = False,
+    notes_dir: str | Path | None = None,
+    source: str = history.DEFAULT_SOURCE,
+) -> None:
+    """Move (or rename) a folder within NOTES_DIR, recording a "rename" for every note in it.
+
+    Raises `FileNotFoundError` / `FileExistsError` for a missing folder or a taken destination,
+    and `NotePathError` for a move into the folder itself.
+    """
+    mode = AccessMode(access_mode)
+    path, new_path = _folder_pair(folderpath, new_folderpath, notes_dir)
+    _check_access(
+        mode, approved, path, "move", lambda: ApprovalRequiredError(path, "", {}, action="rename", new_path=new_path)
+    )
+    changes = []
+    for note in _folder_notes(path):
+        target = new_path / note.relative_to(path)
+        state = _note_state(note, notes_dir)
+        state = {**state, "path": _relative(target, notes_dir), "previous_path": state["path"]}
+        changes.append((_history_id(target, notes_dir), "rename", state))
+    with _recorded_all(changes, source):
+        new_path.parent.mkdir(parents=True, exist_ok=True)
+        path.rename(new_path)
+
+
+def copy_folder(
+    folderpath: str | Path,
+    new_folderpath: str | Path,
+    access_mode: AccessMode | str,
+    *,
+    approved: bool = False,
+    notes_dir: str | Path | None = None,
+    source: str = history.DEFAULT_SOURCE,
+) -> None:
+    """Copy a folder with everything in it, recording a "create" for every note in the copy."""
+    mode = AccessMode(access_mode)
+    path, new_path = _folder_pair(folderpath, new_folderpath, notes_dir)
+    _check_access(mode, approved, new_path, "write", lambda: ApprovalRequiredError(new_path, "", {}))
+    changes = []
+    for note in _folder_notes(path):
+        target = new_path / note.relative_to(path)
+        state = _note_state(note, notes_dir)
+        state = {**state, "path": _relative(target, notes_dir), "copied_from": state["path"]}
+        changes.append((_history_id(target, notes_dir), "create", state))
+    with _recorded_all(changes, source):
+        shutil.copytree(path, new_path)
+
+
+def delete_folder(
+    folderpath: str | Path,
+    access_mode: AccessMode | str,
+    *,
+    approved: bool = False,
+    notes_dir: str | Path | None = None,
+    source: str = history.DEFAULT_SOURCE,
+) -> None:
+    """Delete a folder with everything in it. The last state of every note in it is kept in `history`."""
+    mode = AccessMode(access_mode)
+    path = resolve_folder_path(folderpath, notes_dir)
+    if not path.is_dir():
+        raise FileNotFoundError(f"No folder at {folderpath}")
+    _check_access(mode, approved, path, "delete", lambda: ApprovalRequiredError(path, "", {}, action="delete"))
+    changes = [
+        (_history_id(note, notes_dir), "delete", _note_state(note, notes_dir)) for note in _folder_notes(path)
+    ]
+    with _recorded_all(changes, source):
+        shutil.rmtree(path)

@@ -91,6 +91,23 @@ field, default `1`); an unknown space returns 404.
   exists; `.md` is added if missing). With `template` (a path in `templates/`) the note
   gets the template's front-matter and body, with `{title}` and `{date}` filled in.
 
+Organizing `content/` (the sidebar's drag and drop and its `…` menu). Each returns the
+item as `{"kind": "note" | "folder", "path"}`; a missing item is 404, a taken destination 409.
+
+- `POST /api/content/move` `{"space_id", "path", "destination"}` moves a note or folder into
+  the folder `destination` (`""` for `content/` itself), keeping its name. A folder cannot
+  move into itself (400).
+- `POST /api/content/rename` `{"space_id", "path", "name"}` renames in place; a note keeps
+  `.md` and its displayed title follows (its front-matter `title`, or a first-line heading).
+- `POST /api/content/duplicate` `{"space_id", "path"}` copies next to the original as
+  `<name> (copy)`, `<name> (copy 2)`, … (201). A copied folder is not flagged.
+- `DELETE /api/content?space_id=1&path=<path>` deletes a note, or a folder with everything in it (204).
+
+Moves and renames carry the folders' `FolderMeta` flags (so a project folder stays linked to
+its project) and the task-note links along; a delete drops them, keeping the tasks and the
+project. Every note involved gets a `history` entry (`rename` with `previous_path`, `create`
+with `copied_from`, or `delete`), so deleted notes can be recovered.
+
 **Project folders.** Marking a folder as a Project links it to a `Project` row: the one
 whose code is the folder name (so a `C7801` folder picks up the imported C7801 Gantt),
 unless another folder already claims it, else a new project. Tasks are grouped by that

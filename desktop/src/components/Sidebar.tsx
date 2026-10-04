@@ -1,4 +1,12 @@
-import { useEffect, useRef, useState, type FormEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type DragEvent,
+  type FormEvent,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+} from "react";
 import { NavLink, useLocation, useNavigate } from "react-router-dom";
 
 import { getJson, message, sendJson } from "../lib/api";
@@ -17,6 +25,18 @@ export type FolderNode = {
   notes: NoteSummary[];
 };
 type Tree = { space_id: number; content: FolderNode; templates: NoteSummary[] };
+// POST /api/content/{move,rename,duplicate} (see ContentEntry in backend/schemas.py).
+type ContentEntry = { kind: "note" | "folder"; path: string };
+type TreeItem = { kind: "note"; note: NoteSummary } | { kind: "folder"; folder: FolderNode };
+
+const itemPath = (item: TreeItem) => (item.kind === "note" ? item.note.path : item.folder.path);
+const itemLabel = (item: TreeItem) => (item.kind === "note" ? item.note.title : item.folder.name);
+const parentOf = (path: string) => path.slice(0, Math.max(path.lastIndexOf("/"), 0));
+
+/** Whether the note or folder at `source` can be dropped into `folder` ("" for content/ itself). */
+function canDrop(source: string | null, folder: string): boolean {
+  return source !== null && parentOf(source) !== folder && source !== folder && !folder.startsWith(`${source}/`);
+}
 
 const NAV_ITEMS = [
   { to: "/", label: "Today", end: true },
@@ -29,6 +49,7 @@ const NAV_ITEMS = [
 const EXPANDED_KEY = "copilot.treeExpanded";
 const POLL_MS = 30_000;
 const NEW_SPACE = "new";
+const DRAG_TYPE = "application/x-copilot-content";
 
 /** The expanded folders (as `<space id>:<path>`) from the last visit. */
 function storedExpanded(): Set<string> {
@@ -41,9 +62,9 @@ function storedExpanded(): Set<string> {
 }
 
 type Health = "loading" | "ok" | "error";
-type Menu = { x: number; y: number; folder: FolderNode };
+type Menu = { x: number; y: number; item: TreeItem; add: boolean }; // add: a folder's "+" menu
 type ViewMenu = { x: number; y: number; view: TaskView | null }; // null: the TASKS "+" menu
-type Dialog = { kind: "note" | "folder"; parent: string };
+type Dialog = { kind: "note" | "folder"; parent: string; template?: string };
 
 export default function Sidebar({ onCollapse }: { onCollapse: () => void }) {
   const { spaceId, treeVersion, refreshTree } = useSpace();
@@ -57,6 +78,9 @@ export default function Sidebar({ onCollapse }: { onCollapse: () => void }) {
   const [viewMenu, setViewMenu] = useState<ViewMenu | null>(null);
   const [renaming, setRenaming] = useState<number | null>(null);
   const [viewError, setViewError] = useState<string | null>(null);
+  const [renamingItem, setRenamingItem] = useState<string | null>(null);
+  const [dragging, setDragging] = useState<string | null>(null);
+  const [dropTarget, setDropTarget] = useState<string | null>(null);
   const location = useLocation();
   const navigate = useNavigate();
 
@@ -93,34 +117,181 @@ export default function Sidebar({ onCollapse }: { onCollapse: () => void }) {
     };
   }, [spaceId, treeVersion, location.key]);
 
+  /** The path of the content note open in this space, if any. */
+  function openNote(): string | null {
+    if (location.pathname !== "/note") return null;
+    const params = new URLSearchParams(location.search);
+    if (Number(params.get("space") ?? spaceId) !== spaceId || params.get("root") === "templates") return null;
+    return params.get("path");
+  }
+
   // Reveal the open note in the tree.
   useEffect(() => {
-    if (location.pathname !== "/note") return;
-    const params = new URLSearchParams(location.search);
-    if (Number(params.get("space") ?? spaceId) !== spaceId || params.get("root") === "templates") return;
-    const parts = (params.get("path") ?? "").split("/").slice(0, -1);
+    const parts = (openNote() ?? "").split("/").slice(0, -1);
     const keys = parts.map((_, i) => `${spaceId}:${parts.slice(0, i + 1).join("/")}`);
     setExpanded((prev) => (keys.every((key) => prev.has(key)) ? prev : new Set([...prev, ...keys])));
-  }, [location.pathname, location.search, spaceId]);
+  },[location.pathname, location.search, spaceId]);
 
-  const toggle = (path: string) =>
+  const updateExpanded = (change: (prev: Set<string>) => Set<string>) =>
     setExpanded((prev) => {
-      const next = new Set(prev);
-      const key = `${spaceId}:${path}`;
-      if (!next.delete(key)) next.add(key);
+      const next = change(prev);
       localStorage.setItem(EXPANDED_KEY, JSON.stringify([...next]));
       return next;
     });
 
-  async function setFlag(folder: FolderNode, flag: "is_project" | "is_reference") {
+  const toggle = (path: string) =>
+    updateExpanded((prev) => {
+      const next = new Set(prev);
+      const key = `${spaceId}:${path}`;
+      if (!next.delete(key)) next.add(key);
+      return next;
+    });
+
+  /** Run a change to content/ from the tree, then reload the tree. */
+  async function changeContent<T>(action: string, change: () => Promise<T>): Promise<T | undefined> {
     setMenu(null);
     setMenuError(null);
     try {
-      await sendJson("PUT", "/api/folders/meta", { space_id: spaceId, path: folder.path, [flag]: !folder[flag] });
+      const result = await change();
       refreshTree();
+      return result;
     } catch (err: unknown) {
-      setMenuError(`Could not update ${folder.name}: ${message(err)}`);
+      setMenuError(`Could not ${action}: ${message(err)}`);
+      return undefined;
     }
+  }
+
+  async function setFlag(folder: FolderNode, flag: "is_project" | "is_reference") {
+    await changeContent(`update ${folder.name}`, () =>
+      sendJson("PUT", "/api/folders/meta", { space_id: spaceId, path: folder.path, [flag]: !folder[flag] }),
+    );
+  }
+
+  /** After a note or folder moved from `from` to `to`: keep its folders open, reveal it, and follow the open note. */
+  function followMove(from: string, to: string) {
+    const moved = (path: string) =>
+      path === from ? to : path.startsWith(`${from}/`) ? to + path.slice(from.length) : path;
+    const prefix = `${spaceId}:`;
+    updateExpanded((prev) => {
+      const next = new Set([...prev].map((key) => (key.startsWith(prefix) ? prefix + moved(key.slice(prefix.length)) : key)));
+      if (parentOf(to)) next.add(prefix + parentOf(to));
+      return next;
+    });
+    const open = openNote();
+    if (open && moved(open) !== open) navigate(notePath(spaceId, moved(open)), { replace: true });
+  }
+
+  async function moveItem(path: string, destination: string) {
+    const moved = await changeContent(`move ${path}`, () =>
+      sendJson<ContentEntry>("POST", "/api/content/move", { space_id: spaceId, path, destination }),
+    );
+    if (moved) followMove(path, moved.path);
+  }
+
+  async function renameItem(item: TreeItem, name: string) {
+    setRenamingItem(null);
+    const clean = name.trim().replace(/[\\/]+/g, "-");
+    if (!clean || clean === itemLabel(item)) return;
+    const path = itemPath(item);
+    const renamed = await changeContent(`rename ${itemLabel(item)}`, () =>
+      sendJson<ContentEntry>("POST", "/api/content/rename", { space_id: spaceId, path, name: clean }),
+    );
+    if (renamed) followMove(path, renamed.path);
+  }
+
+  async function duplicateItem(item: TreeItem) {
+    const copy = await changeContent(`duplicate ${itemLabel(item)}`, () =>
+      sendJson<ContentEntry>("POST", "/api/content/duplicate", { space_id: spaceId, path: itemPath(item) }),
+    );
+    if (copy?.kind === "note") navigate(notePath(spaceId, copy.path));
+  }
+
+  async function deleteItem(item: TreeItem) {
+    setMenu(null);
+    const what = item.kind === "note" ? `the note "${item.note.title}"` : `the folder "${item.folder.name}" and everything in it`;
+    if (!window.confirm(`Delete ${what}?`)) return;
+    const path = itemPath(item);
+    const deleted = await changeContent(`delete ${itemLabel(item)}`, () =>
+      sendJson("DELETE", `/api/content?space_id=${spaceId}&path=${encodeURIComponent(path)}`).then(() => true),
+    );
+    const open = openNote();
+    if (deleted && open && (open === path || open.startsWith(`${path}/`))) navigate("/");
+  }
+
+  const drag: DragActions = {
+    start: setDragging,
+    end: () => {
+      setDragging(null);
+      setDropTarget(null);
+    },
+    over: (event, folder) => {
+      if (!event.dataTransfer.types.includes(DRAG_TYPE)) return;
+      // The innermost row decides, so a folder's own rows never fall through to content/.
+      event.stopPropagation();
+      if (!canDrop(dragging, folder)) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "move";
+      setDropTarget(folder);
+    },
+    leave: (folder) => setDropTarget((prev) => (prev === folder ? null : prev)),
+    drop: (event, folder) => {
+      if (!event.dataTransfer.types.includes(DRAG_TYPE)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const source = event.dataTransfer.getData(DRAG_TYPE);
+      drag.end();
+      if (canDrop(source, folder)) moveItem(source, folder);
+    },
+  };
+
+  function openMenu(event: ReactMouseEvent<HTMLElement>, item: TreeItem, add: boolean) {
+    const rect = event.currentTarget.getBoundingClientRect();
+    setMenu({ x: rect.left, y: rect.bottom + 4, item, add });
+  }
+
+  function menuItems({ item, add }: Menu): MenuItem[] {
+    const parent = itemPath(item);
+    const create = (dialog: Dialog) => () => {
+      setMenu(null);
+      setDialog(dialog);
+    };
+    if (add) {
+      return [
+        { label: "New folder", onClick: create({ kind: "folder", parent }) },
+        { label: "New note", onClick: create({ kind: "note", parent }) },
+        ...(tree?.space_id === spaceId ? tree.templates : []).map((template, i) => ({
+          label: `From template: ${template.title}`,
+          separator: i === 0,
+          onClick: create({ kind: "note", parent, template: template.path }),
+        })),
+      ];
+    }
+    const items: MenuItem[] = [
+      {
+        label: "Rename",
+        onClick: () => {
+          setMenu(null);
+          setRenamingItem(itemPath(item));
+        },
+      },
+      { label: "Duplicate", onClick: () => duplicateItem(item) },
+      { label: "Delete", onClick: () => deleteItem(item) },
+    ];
+    if (item.kind === "folder") {
+      const { folder } = item;
+      items.push(
+        {
+          label: folder.is_project ? "Unmark as Project" : "Mark as Project",
+          separator: true,
+          onClick: () => setFlag(folder, "is_project"),
+        },
+        {
+          label: folder.is_reference ? "Unmark as Reference Data" : "Mark as Reference Data",
+          onClick: () => setFlag(folder, "is_reference"),
+        },
+      );
+    }
+    return items;
   }
 
   const spaceViews = views?.spaceId === spaceId ? views.views : null;
@@ -225,36 +396,51 @@ export default function Sidebar({ onCollapse }: { onCollapse: () => void }) {
           />
         ))}
 
-        <SectionHeader
-          actions={
-            <>
-              <SmallButton label="New note" onClick={() => setDialog({ kind: "note", parent: "" })}>
-                +
-              </SmallButton>
-              <SmallButton label="New folder" onClick={() => setDialog({ kind: "folder", parent: "" })}>
-                <FolderIcon className="h-3 w-3" />
-              </SmallButton>
-            </>
-          }
+        {/* Dropping on the header or between rows moves the item to the top of content/. */}
+        <div
+          onDragOver={(e) => drag.over(e, "")}
+          onDragLeave={() => drag.leave("")}
+          onDrop={(e) => drag.drop(e, "")}
+          className={`rounded-md ${dropTarget === "" ? "bg-surface-hover/60 ring-1 ring-accent/70" : ""}`}
         >
-          CONTENT
-        </SectionHeader>
-        {menuError && <p className="px-2 py-1 text-xs text-accent">{menuError}</p>}
-        {isEmpty && <p className="px-2 py-1 text-xs text-text-muted">No notes yet.</p>}
-        {content && (
-          <FolderContents
-            folder={content}
-            depth={0}
-            spaceId={spaceId}
-            expanded={expanded}
-            toggle={toggle}
-            current={current}
-            onMenu={(event, folder) => {
-              event.preventDefault();
-              setMenu({ x: event.clientX, y: event.clientY, folder });
-            }}
-          />
-        )}
+          <SectionHeader
+            actions={
+              <>
+                <SmallButton label="New note" onClick={() => setDialog({ kind: "note", parent: "" })}>
+                  +
+                </SmallButton>
+                <SmallButton label="New folder" onClick={() => setDialog({ kind: "folder", parent: "" })}>
+                  <FolderIcon className="h-3 w-3" />
+                </SmallButton>
+              </>
+            }
+          >
+            CONTENT
+          </SectionHeader>
+          {menuError && <p className="px-2 py-1 text-xs text-accent">{menuError}</p>}
+          {isEmpty && <p className="px-2 py-1 text-xs text-text-muted">No notes yet.</p>}
+          {content && (
+            <FolderContents
+              folder={content}
+              depth={0}
+              spaceId={spaceId}
+              expanded={expanded}
+              toggle={toggle}
+              current={current}
+              renaming={renamingItem}
+              dragging={dragging}
+              dropTarget={dropTarget}
+              drag={drag}
+              onMenu={openMenu}
+              onContextMenu={(event, item) => {
+                event.preventDefault();
+                setMenu({ x: event.clientX, y: event.clientY, item, add: false });
+              }}
+              onRename={renameItem}
+              onCancelRename={() => setRenamingItem(null)}
+            />
+          )}
+        </div>
 
         <SectionHeader>TEMPLATES</SectionHeader>
         {tree?.space_id === spaceId && tree.templates.length === 0 && (
@@ -303,27 +489,10 @@ export default function Sidebar({ onCollapse }: { onCollapse: () => void }) {
         <PopupMenu
           x={menu.x}
           y={menu.y}
-          label={`${menu.folder.name} options`}
-          heading={menu.folder.path}
+          label={menu.add ? `New in ${itemLabel(menu.item)}` : `${itemLabel(menu.item)} options`}
+          heading={itemPath(menu.item)}
           onClose={() => setMenu(null)}
-          items={[
-            {
-              label: menu.folder.is_project ? "Unmark as Project" : "Mark as Project",
-              onClick: () => setFlag(menu.folder, "is_project"),
-            },
-            {
-              label: menu.folder.is_reference ? "Unmark as Reference Data" : "Mark as Reference Data",
-              onClick: () => setFlag(menu.folder, "is_reference"),
-            },
-            ...(["note", "folder"] as const).map((kind, i) => ({
-              label: `New ${kind} here…`,
-              separator: i === 0,
-              onClick: () => {
-                setMenu(null);
-                setDialog({ kind, parent: menu.folder.path });
-              },
-            })),
-          ]}
+          items={menuItems(menu)}
         />
       )}
       {viewMenu && (
@@ -492,82 +661,68 @@ function SmallButton({
   );
 }
 
+type DragActions = {
+  start: (path: string) => void;
+  end: () => void;
+  over: (event: DragEvent, folder: string) => void;
+  leave: (folder: string) => void;
+  drop: (event: DragEvent, folder: string) => void;
+};
+
 type TreeProps = {
   depth: number;
   spaceId: number;
   expanded: Set<string>;
   toggle: (path: string) => void;
   current: string;
-  onMenu: (event: ReactMouseEvent, folder: FolderNode) => void;
+  renaming: string | null;
+  dragging: string | null;
+  dropTarget: string | null;
+  drag: DragActions;
+  onMenu: (event: ReactMouseEvent<HTMLElement>, item: TreeItem, add: boolean) => void;
+  onContextMenu: (event: ReactMouseEvent, item: TreeItem) => void;
+  onRename: (item: TreeItem, name: string) => void;
+  onCancelRename: () => void;
 };
 
-/** A folder's sub-folders, then its notes, then (for a project) a link to its tasks. */
+/** A folder's sub-folders, then its notes. */
 function FolderContents({ folder, ...props }: TreeProps & { folder: FolderNode }) {
-  const { depth, spaceId, current } = props;
+  const { spaceId, current } = props;
   return (
     <>
-      {folder.project_id !== null && (
-        <LeafLink
-          depth={depth}
-          to={`/tasks/kanban?project=${folder.project_id}`}
-          active={current === `/tasks/kanban?project=${folder.project_id}`}
-          label="Tasks"
-          className="text-project-c7801"
-        />
-      )}
       {folder.folders.map((child) => (
         <FolderRow key={child.path} folder={child} {...props} />
       ))}
       {folder.notes.map((note) => {
         const to = notePath(spaceId, note.path);
-        return <LeafLink key={note.path} depth={depth} to={to} active={current === to} label={note.title} />;
+        return (
+          <TreeRow key={note.path} item={{ kind: "note", note }} {...props}>
+            <span className="w-5 shrink-0" />
+            <NavLink
+              to={to}
+              title={note.title}
+              className={`flex min-h-7 min-w-0 flex-1 items-center rounded-md pl-1 pr-2 text-left text-[13px] ${
+                current === to ? "bg-surface-active font-medium text-text-primary" : "text-text-muted"
+              }`}
+            >
+              <span className="truncate">{note.title}</span>
+            </NavLink>
+          </TreeRow>
+        );
       })}
     </>
   );
 }
 
-function LeafLink({
-  depth,
-  to,
-  active,
-  label,
-  className = "",
-}: {
-  depth: number;
-  to: string;
-  active: boolean;
-  label: string;
-  className?: string;
-}) {
-  return (
-    <div className="flex min-h-7 items-center rounded-md hover:bg-surface-hover" style={{ paddingLeft: 6 + depth * 14 }}>
-      <span className="w-5 shrink-0" />
-      <NavLink
-        to={to}
-        title={label}
-        className={`flex min-h-7 min-w-0 flex-1 items-center rounded-md pl-1 pr-2 text-left text-[13px] ${
-          active ? "bg-surface-active font-medium text-text-primary" : className || "text-text-muted"
-        }`}
-      >
-        <span className="truncate">{label}</span>
-      </NavLink>
-    </div>
-  );
-}
-
 function FolderRow({ folder, ...props }: TreeProps & { folder: FolderNode }) {
-  const { depth, spaceId, expanded, toggle, onMenu } = props;
+  const { depth, spaceId, expanded, toggle } = props;
   const open = expanded.has(`${spaceId}:${folder.path}`);
-  const hasChildren = folder.folders.length > 0 || folder.notes.length > 0 || folder.project_id !== null;
+  const hasChildren = folder.folders.length > 0 || folder.notes.length > 0;
   const tags = [folder.is_project && "Project", folder.is_reference && "Reference data"].filter(Boolean).join(", ");
 
   return (
     <>
-      <div
-        className="flex min-h-7 items-center rounded-md hover:bg-surface-hover"
-        style={{ paddingLeft: 6 + depth * 14 }}
-        onContextMenu={(event) => onMenu(event, folder)}
-      >
+      <TreeRow item={{ kind: "folder", folder }} {...props}>
         <button
           type="button"
           onClick={() => toggle(folder.path)}
@@ -580,7 +735,7 @@ function FolderRow({ folder, ...props }: TreeProps & { folder: FolderNode }) {
         <button
           type="button"
           onClick={() => toggle(folder.path)}
-          title={tags ? `${folder.path} (${tags}) · right-click for options` : `${folder.path} · right-click for options`}
+          title={tags ? `${folder.path} (${tags})` : folder.path}
           className={`flex min-h-7 min-w-0 flex-1 items-center gap-1.5 rounded-md pl-1 pr-2 text-left text-[13px] ${
             folder.is_project ? "font-semibold text-project-c7801" : `text-text-secondary ${depth === 0 ? "font-semibold" : "font-medium"}`
           }`}
@@ -590,9 +745,133 @@ function FolderRow({ folder, ...props }: TreeProps & { folder: FolderNode }) {
           {folder.is_project && <Badge className="border-project-c7801/60 text-project-c7801">Project</Badge>}
           {folder.is_reference && <Badge className="border-project-r5301/60 text-project-r5301">Ref</Badge>}
         </button>
-      </div>
+      </TreeRow>
       {open && <FolderContents folder={folder} {...props} depth={depth + 1} />}
     </>
+  );
+}
+
+/** A note or folder row: draggable, a drop target (a note's row stands for its folder), with
+ *  "+" (folders) and "…" menus on hover, or an inline name field while renaming. */
+function TreeRow({
+  item,
+  depth,
+  renaming,
+  dragging,
+  dropTarget,
+  drag,
+  onMenu,
+  onContextMenu,
+  onRename,
+  onCancelRename,
+  children,
+}: TreeProps & { item: TreeItem; children: ReactNode }) {
+  const path = itemPath(item);
+  const label = itemLabel(item);
+  const folder = item.kind === "folder" ? path : parentOf(path);
+  const indent = { paddingLeft: 6 + depth * 14 };
+
+  if (renaming === path) {
+    return (
+      <div className="flex min-h-7 items-center pr-1" style={indent}>
+        <span className="w-5 shrink-0" />
+        <InlineRename defaultValue={label} label={`Rename ${label}`} onRename={(name) => onRename(item, name)} onCancel={onCancelRename} />
+      </div>
+    );
+  }
+
+  return (
+    <div
+      draggable
+      onDragStart={(e) => {
+        e.dataTransfer.setData(DRAG_TYPE, path);
+        e.dataTransfer.effectAllowed = "move";
+        drag.start(path);
+      }}
+      onDragEnd={drag.end}
+      onDragOver={(e) => drag.over(e, folder)}
+      onDragLeave={() => drag.leave(folder)}
+      onDrop={(e) => drag.drop(e, folder)}
+      onContextMenu={(e) => onContextMenu(e, item)}
+      className={`group relative flex min-h-7 items-center rounded-md hover:bg-surface-hover ${
+        item.kind === "folder" && dropTarget === path ? "bg-surface-hover ring-1 ring-accent/70" : ""
+      } ${dragging === path ? "opacity-50" : ""}`}
+      style={indent}
+    >
+      {children}
+      <span className="absolute right-1 top-1/2 flex -translate-y-1/2 items-center gap-0.5 rounded bg-surface-hover opacity-0 focus-within:opacity-100 group-hover:opacity-100">
+        {item.kind === "folder" && (
+          <RowAction label={`New in ${label}`} title="New folder, note or note from a template" onClick={(e) => onMenu(e, item, true)}>
+            +
+          </RowAction>
+        )}
+        <RowAction label={`${label} options`} title="Rename, duplicate or delete" onClick={(e) => onMenu(e, item, false)}>
+          …
+        </RowAction>
+      </span>
+    </div>
+  );
+}
+
+function RowAction({
+  label,
+  title,
+  onClick,
+  children,
+}: {
+  label: string;
+  title: string;
+  onClick: (event: ReactMouseEvent<HTMLButtonElement>) => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label={label}
+      title={title}
+      className="flex h-5 w-5 items-center justify-center rounded text-[13px] leading-none text-text-muted hover:bg-surface-active hover:text-text-primary"
+    >
+      {children}
+    </button>
+  );
+}
+
+/** A name field that saves on Enter or blur and cancels on Escape. */
+function InlineRename({
+  defaultValue,
+  label,
+  maxLength,
+  onRename,
+  onCancel,
+}: {
+  defaultValue: string;
+  label: string;
+  maxLength?: number;
+  onRename: (name: string) => void;
+  onCancel: () => void;
+}) {
+  const cancelled = useRef(false);
+  return (
+    <input
+      autoFocus
+      defaultValue={defaultValue}
+      maxLength={maxLength}
+      aria-label={label}
+      onFocus={(e) => {
+        cancelled.current = false;
+        e.target.select();
+      }}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") e.currentTarget.blur();
+        if (e.key === "Escape") {
+          cancelled.current = true;
+          onCancel();
+        }
+      }}
+      onBlur={(e) => !cancelled.current && onRename(e.target.value)}
+      className="field min-w-0 flex-1 px-1.5 py-0.5 text-[13px]"
+    />
   );
 }
 
@@ -679,30 +958,16 @@ function TaskViewRow({
   onCancelRename: () => void;
   onMenu: (event: ReactMouseEvent<HTMLButtonElement>) => void;
 }) {
-  const cancelled = useRef(false);
-
   if (renaming) {
     return (
       <div className="flex min-h-7 items-center gap-1.5 px-2">
         <ViewIcon viewType={view.view_type} />
-        <input
-          autoFocus
+        <InlineRename
           defaultValue={view.name}
           maxLength={64}
-          aria-label={`Rename ${view.name}`}
-          onFocus={(e) => {
-            cancelled.current = false;
-            e.target.select();
-          }}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") e.currentTarget.blur();
-            if (e.key === "Escape") {
-              cancelled.current = true;
-              onCancelRename();
-            }
-          }}
-          onBlur={(e) => !cancelled.current && onRename(e.target.value)}
-          className="field min-w-0 flex-1 px-1.5 py-0.5 text-[13px]"
+          label={`Rename ${view.name}`}
+          onRename={onRename}
+          onCancel={onCancelRename}
         />
       </div>
     );
@@ -767,7 +1032,7 @@ function NewItemDialog({
   onCreated: (parent: string) => void;
 }) {
   const [name, setName] = useState("");
-  const [template, setTemplate] = useState("");
+  const [template, setTemplate] = useState(dialog.template ?? "");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const navigate = useNavigate();

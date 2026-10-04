@@ -1,5 +1,6 @@
 """FastAPI entry point. Run with `uvicorn main:app --reload` from backend/."""
 
+import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
@@ -29,6 +30,11 @@ from schemas import (
     ChatResponse,
     CheckInRequest,
     CheckInResponse,
+    ContentEntry,
+    ContentKind,
+    ContentMove,
+    ContentRef,
+    ContentRename,
     GanttProject,
     GanttResponse,
     GanttTask,
@@ -660,6 +666,132 @@ def create_note(request: NoteCreate, db: Session = Depends(get_db)) -> NoteFile:
     frontmatter.setdefault("created", today.isoformat())
     file_layer.write_note(rel, content, frontmatter, AccessMode.WRITE_DIRECTLY, notes_dir=root, source=DESKTOP_SOURCE)
     return NoteFile(path=rel, frontmatter=to_jsonable(frontmatter), content=content)
+
+
+# --- Organizing content/: move, rename, duplicate, delete (Phase 9.2) ---------
+
+
+def _content_entry(root: Path, path: str) -> ContentEntry:
+    """An existing note or folder of content/ (400 for a path outside it or hidden, 404 if missing)."""
+    try:
+        resolved = file_layer.resolve_folder_path(path.strip().strip("/"), root)
+    except file_layer.NotePathError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    rel = resolved.relative_to(root.resolve()).as_posix()
+    if _hidden(rel):
+        raise HTTPException(status_code=400, detail=f"{rel} is hidden")
+    if resolved.is_dir():
+        return ContentEntry(kind=ContentKind.FOLDER, path=rel)
+    if resolved.is_file() and resolved.suffix.lower() == file_layer.NOTE_SUFFIX:
+        return ContentEntry(kind=ContentKind.NOTE, path=rel)
+    raise HTTPException(status_code=404, detail=f"No note or folder at {path}")
+
+
+def _sibling(path: str, name: str) -> str:
+    parent = path.rpartition("/")[0]
+    return f"{parent}/{name}" if parent else name
+
+
+def _retitle(root: Path, path: str, old_title: str, new_title: str) -> None:
+    """Keep a note's displayed title in step with its new name: its front-matter `title`, or a
+    first-line heading that shows `old_title`. Other notes are titled by their file name already."""
+    try:
+        note = file_layer.read_note(path, notes_dir=root)
+    except (file_layer.FileLayerError, UnicodeDecodeError):
+        return
+    frontmatter, content = note["frontmatter"], note["content"]
+    if str(frontmatter.get("title") or "").strip():
+        frontmatter = {**frontmatter, "title": new_title}
+    else:
+        heading = re.match(r"(\s*#+[ \t]*)([^\r\n]*)", content)
+        if heading is None or heading.group(2).strip() != old_title:
+            return
+        content = heading.group(1) + new_title + content[heading.end():]
+    file_layer.write_note(path, content, frontmatter, AccessMode.WRITE_DIRECTLY, notes_dir=root, source=DESKTOP_SOURCE)
+
+
+def _move_entry(db: Session, space_id: int, root: Path, entry: ContentEntry, new_path: str) -> ContentEntry:
+    """Move or rename a note or folder, taking its folder flags and task links along."""
+    if new_path == entry.path:
+        return entry
+    move = file_layer.rename_note if entry.kind is ContentKind.NOTE else file_layer.move_folder
+    try:
+        move(entry.path, new_path, AccessMode.WRITE_DIRECTLY, notes_dir=root, source=DESKTOP_SOURCE)
+    except file_layer.NotePathError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail=f"{new_path} already exists") from exc
+    spaces.relocate(db, space_id, entry.path, new_path)
+    return ContentEntry(kind=entry.kind, path=new_path)
+
+
+@app.post("/api/content/move")
+def move_content(request: ContentMove, db: Session = Depends(get_db)) -> ContentEntry:
+    """Move a note or folder into another folder of content/ (drag and drop in the tree)."""
+    root = spaces.content_dir(_space_id_or_404(db, request.space_id))
+    entry = _content_entry(root, request.path)
+    destination = request.destination.strip().strip("/")
+    if destination:
+        try:
+            destination = spaces.normalize_folder(request.space_id, destination)
+        except file_layer.NotePathError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if not (root / destination).is_dir():
+            raise HTTPException(status_code=404, detail=f"No folder at {destination}")
+    name = entry.path.rpartition("/")[2]
+    return _move_entry(db, request.space_id, root, entry, f"{destination}/{name}" if destination else name)
+
+
+@app.post("/api/content/rename")
+def rename_content(request: ContentRename, db: Session = Depends(get_db)) -> ContentEntry:
+    """Rename a note (keeping `.md`, and retitling it) or a folder in place."""
+    root = spaces.content_dir(_space_id_or_404(db, request.space_id))
+    entry = _content_entry(root, request.path)
+    name = request.name
+    if entry.kind is ContentKind.NOTE:
+        old_title = spaces.note_summary(entry.path, root).title
+        name = name if name.lower().endswith(file_layer.NOTE_SUFFIX) else name + file_layer.NOTE_SUFFIX
+    moved = _move_entry(db, request.space_id, root, entry, _sibling(entry.path, name))
+    if entry.kind is ContentKind.NOTE:
+        _retitle(root, moved.path, old_title, request.name.removesuffix(file_layer.NOTE_SUFFIX))
+    return moved
+
+
+@app.post("/api/content/duplicate", status_code=201)
+def duplicate_content(request: ContentRef, db: Session = Depends(get_db)) -> ContentEntry:
+    """Copy a note or folder next to itself as `<name> (copy)`, `<name> (copy 2)`, …
+
+    Folder flags are not copied: a copied project folder is not the same project.
+    """
+    root = spaces.content_dir(_space_id_or_404(db, request.space_id))
+    entry = _content_entry(root, request.path)
+    name = entry.path.rpartition("/")[2]
+    suffix = file_layer.NOTE_SUFFIX if entry.kind is ContentKind.NOTE else ""
+    stem = name[: len(name) - len(suffix)]
+    label, n = "copy", 1
+    while (root / _sibling(entry.path, f"{stem} ({label}){suffix}")).exists():
+        n += 1
+        label = f"copy {n}"
+    path = _sibling(entry.path, f"{stem} ({label}){suffix}")
+    if entry.kind is ContentKind.NOTE:
+        title = spaces.note_summary(entry.path, root).title
+        file_layer.copy_note(entry.path, path, AccessMode.WRITE_DIRECTLY, notes_dir=root, source=DESKTOP_SOURCE)
+        _retitle(root, path, title, f"{title} ({label})")
+    else:
+        file_layer.copy_folder(entry.path, path, AccessMode.WRITE_DIRECTLY, notes_dir=root, source=DESKTOP_SOURCE)
+    return ContentEntry(kind=entry.kind, path=path)
+
+
+@app.delete("/api/content", status_code=204)
+def delete_content(path: str, space_id: int = spaces.DEFAULT_SPACE_ID, db: Session = Depends(get_db)) -> None:
+    """Delete a note, or a folder with everything in it. Deleted notes stay in `history`."""
+    root = spaces.content_dir(_space_id_or_404(db, space_id))
+    entry = _content_entry(root, path)
+    if entry.kind is ContentKind.NOTE:
+        file_layer.delete_note(entry.path, AccessMode.WRITE_DIRECTLY, notes_dir=root, source=DESKTOP_SOURCE)
+    else:
+        file_layer.delete_folder(entry.path, AccessMode.WRITE_DIRECTLY, notes_dir=root, source=DESKTOP_SOURCE)
+    spaces.forget(db, space_id, entry.path)
 
 
 # --- Task engine (Phase 9) ----------------------------------------------------

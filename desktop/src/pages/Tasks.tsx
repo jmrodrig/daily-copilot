@@ -119,7 +119,7 @@ export default function SavedTaskView() {
   );
 }
 
-/** An unsaved view (`/tasks/:view?project=&assignee=`), e.g. a project folder's Tasks link. "Save as view" adds it to the sidebar. */
+/** An unsaved view (`/tasks/:view?project=&assignee=`), e.g. the note page's link to the backlog. "Save as view" adds it to the sidebar. */
 export function AdHocTasks() {
   const { view = "" } = useParams();
   const [params, setParams] = useSearchParams();

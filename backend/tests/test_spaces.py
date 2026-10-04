@@ -171,6 +171,142 @@ def test_notes_are_isolated_per_space(client):
     assert client.get("/api/notes/file", params={"space_id": other, "path": "work.md"}).status_code == 404
 
 
+# --- Organizing content (Phase 9.2) ------------------------------------------------
+
+
+def note_history(entity_id):
+    with database.SessionLocal() as db:
+        return [
+            (r.action, r.snapshot.get("previous_path"), r.snapshot.get("copied_from"))
+            for r in db.scalars(select(HistoryRecord).where(HistoryRecord.entity_id == entity_id))
+        ]
+
+
+def test_move_a_note_into_a_folder(client):
+    write(1, "Idea.md", "# Idea\n")
+    (spaces.content_dir(1) / "Inbox").mkdir()
+
+    moved = client.post("/api/content/move", json={"space_id": 1, "path": "Idea.md", "destination": "Inbox"})
+
+    assert moved.json() == {"kind": "note", "path": "Inbox/Idea.md"}
+    assert (spaces.content_dir(1) / "Inbox" / "Idea.md").read_text(encoding="utf-8") == "# Idea\n"
+    assert not (spaces.content_dir(1) / "Idea.md").exists()
+    assert note_history("Inbox/Idea.md") == [("rename", "Idea.md", None)]
+    back = client.post("/api/content/move", json={"space_id": 1, "path": "Inbox/Idea.md", "destination": ""})
+    assert back.json() == {"kind": "note", "path": "Idea.md"}
+
+
+def test_move_a_project_folder_keeps_its_flags_and_task_links(client):
+    write(1, "C7801/Keel/Drawings.md", "keel")
+    (spaces.content_dir(1) / "Yachts").mkdir()
+    project_id = client.put("/api/folders/meta", json={"space_id": 1, "path": "C7801", "is_project": True}).json()[
+        "project_id"
+    ]
+    client.put("/api/folders/meta", json={"space_id": 1, "path": "C7801/Keel", "is_reference": True})
+    task = client.post(
+        "/api/tasks", json={"space_id": 1, "title": "Check", "note_paths": ["C7801/Keel/Drawings.md"]}
+    ).json()
+
+    moved = client.post("/api/content/move", json={"space_id": 1, "path": "C7801", "destination": "Yachts"})
+
+    assert moved.json() == {"kind": "folder", "path": "Yachts/C7801"}
+    tree = client.get("/api/tree", params={"space_id": 1}).json()["content"]
+    folder = tree["folders"][0]["folders"][0]
+    assert (folder["path"], folder["is_project"], folder["project_id"]) == ("Yachts/C7801", True, project_id)
+    assert folder["folders"][0]["is_reference"]
+    assert client.get(f"/api/tasks/{task['id']}").json()["note_paths"] == ["Yachts/C7801/Keel/Drawings.md"]
+    assert note_history("Yachts/C7801/Keel/Drawings.md") == [("rename", "C7801/Keel/Drawings.md", None)]
+
+
+@pytest.mark.parametrize(
+    ("payload", "status"),
+    [
+        ({"path": "A", "destination": "A/B"}, 400),  # into itself
+        ({"path": "A", "destination": "Nope"}, 404),
+        ({"path": "Missing.md", "destination": ""}, 404),
+        ({"path": "../x.md", "destination": ""}, 400),
+        ({"path": "A/B", "destination": "C"}, 409),  # C/B exists
+    ],
+)
+def test_move_errors(client, payload, status):
+    (spaces.content_dir(1) / "A" / "B").mkdir(parents=True)
+    (spaces.content_dir(1) / "C" / "B").mkdir(parents=True)
+    assert client.post("/api/content/move", json={"space_id": 1, **payload}).status_code == status
+    assert (spaces.content_dir(1) / "A" / "B").is_dir()
+
+
+def test_rename_a_note_retitles_it(client):
+    root = spaces.content_dir(1)
+    (root / "Docs").mkdir(parents=True)
+    (root / "Docs" / "Plan.md").write_bytes(b"# Plan\r\n\r\nBody\r\n")
+    write(1, "Docs/Titled.md", "---\ntitle: Old\n---\nBody\n")
+    write(1, "Docs/Plain.md", "Just text\n")
+
+    renamed = client.post("/api/content/rename", json={"space_id": 1, "path": "Docs/Plan.md", "name": "Roadmap"})
+    client.post("/api/content/rename", json={"space_id": 1, "path": "Docs/Titled.md", "name": "New.md"})
+    client.post("/api/content/rename", json={"space_id": 1, "path": "Docs/Plain.md", "name": "Other"})
+
+    assert renamed.json() == {"kind": "note", "path": "Docs/Roadmap.md"}
+    assert (root / "Docs" / "Roadmap.md").read_bytes() == b"# Roadmap\r\n\r\nBody\r\n"
+    assert file_layer.read_note("Docs/New.md", notes_dir=root)["frontmatter"] == {"title": "New"}
+    assert (root / "Docs" / "Other.md").read_text(encoding="utf-8") == "Just text\n"
+
+
+def test_rename_a_folder_and_errors(client):
+    write(1, "Old/a.md", "a")
+    write(1, "Taken/b.md", "b")
+    client.put("/api/folders/meta", json={"space_id": 1, "path": "Old", "is_reference": True})
+
+    renamed = client.post("/api/content/rename", json={"space_id": 1, "path": "Old", "name": "New"})
+
+    assert renamed.json() == {"kind": "folder", "path": "New"}
+    folder = client.get("/api/tree", params={"space_id": 1}).json()["content"]["folders"][0]
+    assert (folder["path"], folder["is_reference"]) == ("New", True)
+    assert client.post("/api/content/rename", json={"space_id": 1, "path": "New", "name": "Taken"}).status_code == 409
+    for name in ["a/b", "a\\b", ".hidden", " "]:
+        assert client.post("/api/content/rename", json={"space_id": 1, "path": "New", "name": name}).status_code == 422
+
+
+def test_duplicate_a_note_and_a_folder(client):
+    write(1, "Docs/Plan.md", "# Plan\n")
+    client.put("/api/folders/meta", json={"space_id": 1, "path": "Docs", "is_project": True})
+
+    first = client.post("/api/content/duplicate", json={"space_id": 1, "path": "Docs/Plan.md"})
+    second = client.post("/api/content/duplicate", json={"space_id": 1, "path": "Docs/Plan.md"})
+    folder = client.post("/api/content/duplicate", json={"space_id": 1, "path": "Docs"})
+
+    assert first.status_code == 201
+    assert [first.json()["path"], second.json()["path"], folder.json()["path"]] == [
+        "Docs/Plan (copy).md",
+        "Docs/Plan (copy 2).md",
+        "Docs (copy)",
+    ]
+    root = spaces.content_dir(1)
+    assert (root / "Docs" / "Plan (copy 2).md").read_text(encoding="utf-8") == "# Plan (copy 2)\n"
+    assert sorted(p.name for p in (root / "Docs (copy)").iterdir()) == ["Plan (copy 2).md", "Plan (copy).md", "Plan.md"]
+    assert note_history("Docs (copy)/Plan.md") == [("create", None, "Docs/Plan.md")]
+    copy = client.get("/api/tree", params={"space_id": 1}).json()["content"]["folders"][1]
+    assert (copy["path"], copy["is_project"]) == ("Docs (copy)", False)
+
+
+def test_delete_a_note_and_a_folder(client):
+    write(1, "C7801/Keel.md", "keel")
+    write(1, "Loose.md", "loose")
+    client.put("/api/folders/meta", json={"space_id": 1, "path": "C7801", "is_project": True})
+    task = client.post("/api/tasks", json={"space_id": 1, "title": "Check", "note_paths": ["C7801/Keel.md"]}).json()
+
+    assert client.delete("/api/content", params={"space_id": 1, "path": "Loose.md"}).status_code == 204
+    assert client.delete("/api/content", params={"space_id": 1, "path": "C7801"}).status_code == 204
+    assert client.delete("/api/content", params={"space_id": 1, "path": "C7801"}).status_code == 404
+
+    assert list(spaces.content_dir(1).iterdir()) == []
+    assert note_history("C7801/Keel.md")[-1][0] == "delete"
+    assert client.get(f"/api/tasks/{task['id']}").json()["note_paths"] == []
+    # A new folder with the same name starts unflagged.
+    (spaces.content_dir(1) / "C7801").mkdir()
+    assert client.get("/api/tree", params={"space_id": 1}).json()["content"]["folders"][0]["is_project"] is False
+
+
 # --- Task engine ------------------------------------------------------------------
 
 
