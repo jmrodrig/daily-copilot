@@ -486,6 +486,49 @@ class NoteCreate(BaseModel):
     title: str | None = Field(default=None, max_length=200)
 
 
+class ContentKind(str, Enum):
+    NOTE = "note"
+    FOLDER = "folder"
+
+
+class ContentMove(BaseModel):
+    """`POST /api/content/move`: move a note or folder into another folder, keeping its name."""
+
+    space_id: int
+    path: str = Field(min_length=1, description="The note or folder, relative to content/")
+    destination: str = Field(default="", description="The folder to move it into; empty for content/ itself")
+
+
+class ContentRename(BaseModel):
+    """`POST /api/content/rename`: rename a note or folder in place."""
+
+    space_id: int
+    path: str = Field(min_length=1)
+    name: str = Field(min_length=1, max_length=200, description="The new name; a note keeps its `.md`")
+
+    @field_validator("name")
+    @classmethod
+    def _check_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value or value.startswith(".") or re.search(r"[\\/]", value):
+            raise ValueError("a name cannot be empty, start with a dot or contain / or \\")
+        return value
+
+
+class ContentRef(BaseModel):
+    """`POST /api/content/duplicate`: a note or folder of a space."""
+
+    space_id: int
+    path: str = Field(min_length=1)
+
+
+class ContentEntry(BaseModel):
+    """A note or folder after a move, rename or duplicate."""
+
+    kind: ContentKind
+    path: str = Field(description="Relative to content/")
+
+
 class ProjectOption(BaseModel):
     """A project available in a space, for task filters and pickers (`GET /api/projects`)."""
 

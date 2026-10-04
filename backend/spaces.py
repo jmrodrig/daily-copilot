@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 import file_layer
 from config import get_settings
 from history import set_source
-from models import FolderMeta, Project, Space, Task
+from models import FolderMeta, Project, Space, Task, TaskNoteLink
 from schemas import FolderNode, NoteRoot, NoteSummary
 
 log = logging.getLogger(__name__)
@@ -211,6 +211,63 @@ def project_folder_for(metas: dict[str, FolderMeta], note_path: str) -> FolderMe
         if meta is not None and meta.is_project:
             return meta
     return None
+
+
+def _under(path: str, prefix: str) -> bool:
+    return path == prefix or path.startswith(f"{prefix}/")
+
+
+def _folder_metas_under(db: Session, space_id: int, prefix: str) -> list[FolderMeta]:
+    """Folder metadata (soft-deleted rows included: they still hold their path) of `prefix` and below."""
+    metas = db.scalars(
+        select(FolderMeta).where(FolderMeta.space_id == space_id).execution_options(include_deleted=True)
+    )
+    return [meta for meta in metas if _under(meta.path, prefix)]
+
+
+def _note_links_under(db: Session, space_id: int, prefix: str) -> list[TaskNoteLink]:
+    """Task-note links of the space to the note `prefix` or to notes in the folder `prefix`."""
+    links = db.scalars(
+        select(TaskNoteLink)
+        .join(Task, Task.id == TaskNoteLink.task_id)
+        .where(Task.space_id == space_id)
+        .execution_options(include_deleted=True)
+    )
+    return [link for link in links if _under(link.note_path, prefix)]
+
+
+def relocate(db: Session, space_id: int, old: str, new: str) -> None:
+    """After a note or folder moved from `old` to `new` (relative to content/), move its folder
+    metadata (Project / Reference Data flags) and its notes' task links along with it."""
+    set_source(db, SPACES_SOURCE)
+    # Leftovers at the destination (from a folder deleted outside the app) would clash.
+    for meta in _folder_metas_under(db, space_id, new):
+        db.delete(meta)
+    db.flush()
+    for meta in _folder_metas_under(db, space_id, old):
+        meta.path = new + meta.path[len(old):]
+
+    links = _note_links_under(db, space_id, old)
+    taken = {(link.task_id, link.note_path) for link in _note_links_under(db, space_id, new)}
+    for link in links:
+        target = new + link.note_path[len(old):]
+        if (link.task_id, target) in taken:
+            db.delete(link)
+        else:
+            link.note_path = target
+    db.commit()
+
+
+def forget(db: Session, space_id: int, path: str) -> None:
+    """After a note or folder was deleted, drop its folder metadata and its notes' task links.
+
+    The tasks and a project folder's project are kept; marking a folder of the same name as a
+    Project again links it back to that project.
+    """
+    set_source(db, SPACES_SOURCE)
+    for row in [*_folder_metas_under(db, space_id, path), *_note_links_under(db, space_id, path)]:
+        db.delete(row)
+    db.commit()
 
 
 def reference_folders(db: Session, space_id: int) -> list[str]:
