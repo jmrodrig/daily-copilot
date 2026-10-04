@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import Markdown from "react-markdown";
 import { Link, useSearchParams } from "react-router-dom";
+import rehypeRaw from "rehype-raw";
+import rehypeSanitize from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 
 import { formatDay, NEUTRAL_TAG, PROJECT_TAG, Tag } from "../components/TriageBoard";
@@ -8,6 +10,7 @@ import { getJson, message, sendJson } from "../lib/api";
 import { useSpace } from "../lib/space";
 import { isOverdue, STATUS_LABELS, type TaskItem } from "../lib/tasks";
 import NoteEditor from "../components/NoteEditor";
+import { NOTE_HTML_SCHEMA } from "../components/noteFormatting";
 
 // GET /api/notes/file (see NoteFile in backend/schemas.py).
 type NoteFile = { path: string; frontmatter: Record<string, unknown>; content: string };
@@ -185,7 +188,10 @@ export default function NotePage() {
             <>
               {details}
               <article className="note-body markdown text-sm leading-relaxed text-text-secondary">
-                <Markdown remarkPlugins={[remarkGfm]}>{note.note.content}</Markdown>
+                {/* Inline HTML carries text color and alignment; anything else in it is stripped. */}
+                <Markdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw, [rehypeSanitize, NOTE_HTML_SCHEMA]]}>
+                  {note.note.content}
+                </Markdown>
               </article>
             </>
           )}

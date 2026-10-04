@@ -10,9 +10,14 @@
     "typecheck": "tsc -b"
   },
   "dependencies": {
+    "@tiptap/core": "^3.31.4",
+    "@tiptap/extension-heading": "^3.31.4",
     "@tiptap/extension-image": "^3.31.4",
     "@tiptap/extension-list": "^3.31.4",
+    "@tiptap/extension-paragraph": "^3.31.4",
     "@tiptap/extension-table": "^3.31.4",
+    "@tiptap/extension-text-align": "^3.31.4",
+    "@tiptap/extension-text-style": "^3.31.4",
     "@tiptap/markdown": "^3.31.4",
     "@tiptap/pm": "^3.31.4",
     "@tiptap/react": "^3.31.4",
@@ -21,6 +26,8 @@
     "react-dom": "^18.3.1",
     "react-markdown": "^9.1.0",
     "react-router-dom": "^6.28.0",
+    "rehype-raw": "^7.0.0",
+    "rehype-sanitize": "^6.0.0",
     "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
