@@ -6,15 +6,23 @@ import { message } from "../lib/api";
 /** The view: the image's scale (1 is its natural size) and its center's offset from the stage's, in screen pixels. */
 type View = { zoom: number; x: number; y: number };
 type Point = { x: number; y: number };
-type Tool = "draw" | "pan" | "erase" | "lasso-erase" | "line" | "arrow" | "rect" | "circle" | "text";
+type Tool = "draw" | "pan" | "select" | "erase" | "lasso-erase" | "line" | "arrow" | "rect" | "circle" | "text";
 type Eraser = "erase" | "lasso-erase";
 /** A markup stroke, in image pixels; each point carries its line width, which follows the pen's pressure. A freehand
  * one ("draw", "erase", which rubs out the ink under it, or "lasso-erase", which rubs out all the ink inside the loop
  * it traces) has a point for each the pointer passed; a shape has two, where its drag started and where it is (or
- * ended); a text has one, its top left, whose width is its font size. */
-type Stroke = { type: Exclude<Tool, "pan">; color: string; points: (Point & { width: number })[]; text?: string };
+ * ended); a text has one, its top left, whose width is its font size, and is turned by `angle` (in radians) about it. */
+type Stroke = { type: Exclude<Tool, "pan" | "select">; color: string; points: (Point & { width: number })[]; text?: string; angle?: number };
 /** A text being typed: where it goes, in image pixels, its font size, in them too, its ink and what's typed so far. */
 type TextEntry = Point & { size: number; color: string; value: string };
+/** A box, in image pixels. */
+type Box = { left: number; top: number; right: number; bottom: number };
+type Corner = "nw" | "ne" | "se" | "sw";
+/** What a drag on the selection does: move it, turn it, or scale it from one of its corners. */
+type Handle = "move" | "rotate" | Corner;
+/** A drag transforming the selection: the strokes as they were when it started, as they are now (in `strokes`), the
+ * box they were in, where it started, and the angle it's turned them by so far. */
+type Transform = { pointerId: number; handle: Handle; from: Point; box: Box; originals: Stroke[]; current: Stroke[]; angle: number };
 
 const isShape = (type: Tool) => type === "line" || type === "arrow" || type === "rect" || type === "circle";
 const isEraser = (type: Tool): type is Eraser => type === "erase" || type === "lasso-erase";
@@ -45,6 +53,20 @@ const MAX_CANVAS_AREA = 4096 * 4096;
 /** A saved markup's longest side, in pixels, beyond which it isn't scaled up: each save reloads the image it saved,
  * so scaling it up every time would grow it without end. */
 const MAX_SAVE_SIDE = 4096;
+/** The selection's handles' size, and how far above its box the rotate handle sits, in screen pixels. */
+const HANDLE_SIZE = 9;
+const ROTATE_OFFSET = 24;
+/** The least a corner's drag scales the selection to, so it can't collapse to nothing. */
+const MIN_SCALE = 0.05;
+/** The cursor over each of the selection's handles. */
+const HANDLE_CURSORS: Record<Handle, string> = {
+  move: "cursor-move",
+  rotate: "cursor-grab",
+  nw: "cursor-nwse-resize",
+  se: "cursor-nwse-resize",
+  ne: "cursor-nesw-resize",
+  sw: "cursor-nesw-resize",
+};
 
 /**
  * A note's image, fullscreen: dragged to pan and zoomed with the wheel, a pinch or the footer's controls. Given
@@ -98,6 +120,15 @@ export default function ImageLightbox({
   const textInputRef = useRef<HTMLInputElement>(null);
   // The tool Shift swapped for the eraser, while it's held.
   const shiftFrom = useRef<Tool | null>(null);
+  // The strokes the select tool picked (those of them still in `strokes`), the lasso picking them as it's drawn, the
+  // drag transforming them, and the handle the pointer is over.
+  const [selected, setSelected] = useState<Set<Stroke>>(() => new Set());
+  const selection = strokes.filter((s) => selected.has(s));
+  const selectionRef = useRef(selection);
+  selectionRef.current = selection;
+  const selecting = useRef<{ pointerId: number; points: Point[] } | null>(null);
+  const transforming = useRef<Transform | null>(null);
+  const [hover, setHover] = useState<Handle | null>(null);
 
   // The markup canvas's device pixels per image pixel: enough for the screen at the current zoom, so strokes stay
   // sharp when zoomed in, within the canvas's limits.
@@ -201,11 +232,18 @@ export default function ImageLightbox({
     setMarkup(false);
   }
 
-  /** Escape: drop the text being typed, or close the eraser's menu, or else the lightbox. */
+  /** Escape: drop the text being typed, or close the eraser's menu, or drop the selection, or else the lightbox. */
   function escape() {
     if (textEntryRef.current) cancelText();
     else if (eraserMenu) setEraserMenu(false);
+    else if (selection.length && !transforming.current) setSelected(new Set());
     else void close();
+  }
+
+  /** Swap strokes for others (a transformed or recoloured one for each), keeping them selected. */
+  function replaceStrokes(next: Map<Stroke, Stroke>) {
+    setStrokes((all) => all.map((s) => next.get(s) ?? s));
+    setSelected((picked) => new Set([...picked].map((s) => next.get(s) ?? s)));
   }
 
   // The latest `escape`, for the key handler.
@@ -229,15 +267,13 @@ export default function ImageLightbox({
   // meanwhile). Not while typing, where Shift is for capitals.
   useEffect(() => {
     if (!editing) return;
-    const typing = (target: EventTarget | null) =>
-      target instanceof HTMLElement && (target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName));
     const release = () => {
       const from = shiftFrom.current;
       shiftFrom.current = null;
       if (from && isEraser(toolRef.current)) setTool(from);
     };
     const keydown = (e: KeyboardEvent) => {
-      if (e.key !== "Shift" || e.repeat || shiftFrom.current || typing(e.target) || isEraser(toolRef.current)) return;
+      if (e.key !== "Shift" || e.repeat || shiftFrom.current || isTyping(e.target) || isEraser(toolRef.current)) return;
       shiftFrom.current = toolRef.current;
       setTool(eraserRef.current);
     };
@@ -253,6 +289,28 @@ export default function ImageLightbox({
       release();
     };
   }, [editing]);
+
+  // Delete or Backspace deletes the selection (once it's done being dragged). Not while typing.
+  useEffect(() => {
+    if (!editing) return;
+    const keydown = (e: KeyboardEvent) => {
+      if ((e.key !== "Delete" && e.key !== "Backspace") || isTyping(e.target) || transforming.current) return;
+      const gone = new Set(selectionRef.current);
+      if (!gone.size) return;
+      e.preventDefault();
+      setStrokes((s) => s.filter((stroke) => !gone.has(stroke)));
+      setSelected(new Set());
+    };
+    window.addEventListener("keydown", keydown);
+    return () => window.removeEventListener("keydown", keydown);
+  }, [editing]);
+
+  // The selection is the select tool's: another tool drops it.
+  useEffect(() => {
+    if (tool === "select") return;
+    setSelected(new Set());
+    setHover(null);
+  }, [tool]);
 
   // The eraser's menu closes on a click outside it.
   useEffect(() => {
@@ -302,10 +360,11 @@ export default function ImageLightbox({
 
   // The canvas shows the strokes: redrawn whole when they change (an undo, a clear, a save) or it's resized (a zoom,
   // which clears it), and added to as one's drawn. Before paint, so a zoom doesn't flash it blank.
-  useLayoutEffect(redraw, [strokes, size, markup, canvasWidth, canvasHeight]);
+  useLayoutEffect(redraw, [strokes, selected, size, markup, canvasWidth, canvasHeight, view.zoom]);
 
   /** Redraw the canvas whole, with the stroke being drawn too: a pinch can zoom mid-stroke, and a shape's drag moves
-   * its end. A lasso being drawn shows as its outline, and erases once it's done. */
+   * its end. A lasso being drawn shows as its outline, and erases (or selects) once it's done. The selection shows
+   * as its box, with its handles: turned with it while it's being turned. */
   function redraw() {
     const canvas = canvasRef.current;
     const context = canvas?.getContext("2d");
@@ -316,7 +375,11 @@ export default function ImageLightbox({
     const current = drawing.current?.stroke;
     const lasso = current?.type === "lasso-erase";
     drawStrokes(context, current && !lasso ? [...strokes, current] : strokes);
-    if (current && lasso) drawLassoOutline(context, current, view.zoom);
+    if (current && lasso) drawLassoOutline(context, current.points, view.zoom);
+    if (selecting.current) drawLassoOutline(context, selecting.current.points, view.zoom);
+    const transform = transforming.current;
+    if (transform?.handle === "rotate") drawSelection(context, transform.box, view.zoom, transform.angle);
+    else if (selection.length) drawSelection(context, selectionBox(selection), view.zoom, 0);
   }
 
   /** Draw on the canvas straight away, in image pixels. */
@@ -353,7 +416,20 @@ export default function ImageLightbox({
     e.currentTarget.setPointerCapture(e.pointerId);
     if (draws(e)) {
       const point = imagePoint(e);
-      if (!point || drawing.current || tool === "pan") return;
+      if (!point || drawing.current || selecting.current || transforming.current || tool === "pan") return;
+      if (tool === "select") {
+        // On the selection, or a handle of it, transforms it; anywhere else drops it, and starts a lasso for another.
+        const box = selection.length ? selectionBox(selection) : null;
+        const handle = box && selectionHandle(box, point, view.zoom);
+        if (box && handle) {
+          transforming.current = { pointerId: e.pointerId, handle, from: point, box, originals: selection, current: selection, angle: 0 };
+          return;
+        }
+        setSelected(new Set());
+        setHover(null);
+        selecting.current = { pointerId: e.pointerId, points: [point] };
+        return;
+      }
       if (tool === "text") {
         // A click places a text, or, while one's being typed, just finishes it.
         if (textEntryRef.current) commitText();
@@ -395,6 +471,33 @@ export default function ImageLightbox({
       if (lasso) redraw();
       return;
     }
+    const transform = transforming.current;
+    if (transform?.pointerId === e.pointerId) {
+      // Transformed from the strokes as they were when the drag started, so its steps' rounding doesn't add up.
+      const point = imagePoint(e);
+      if (!point) return;
+      const { strokes: next, angle } = transformStrokes(transform.originals, transform.box, transform.handle, transform.from, point);
+      transform.angle = angle;
+      replaceStrokes(new Map(transform.current.map((s, i) => [s, next[i]])));
+      transform.current = next;
+      return;
+    }
+    const lassoing = selecting.current;
+    if (lassoing?.pointerId === e.pointerId) {
+      const events = e.nativeEvent.getCoalescedEvents?.() ?? [];
+      for (const event of events.length ? events : [e.nativeEvent]) {
+        const point = imagePoint(event);
+        if (point) lassoing.points.push(point);
+      }
+      redraw();
+      return;
+    }
+    if (tool === "select" && draws(e) && !pointers.current.has(e.pointerId)) {
+      // Hovering: the cursor shows what a drag from here would do.
+      const point = imagePoint(e);
+      setHover(point && selection.length ? selectionHandle(selectionBox(selection), point, view.zoom) : null);
+      return;
+    }
     const last = pointers.current.get(e.pointerId);
     if (!last) return;
     const others = [...pointers.current].filter(([id]) => id !== e.pointerId).map(([, p]) => p);
@@ -421,6 +524,20 @@ export default function ImageLightbox({
 
   function pointerUp(e: ReactPointerEvent) {
     pointers.current.delete(e.pointerId);
+    if (transforming.current?.pointerId === e.pointerId) {
+      transforming.current = null;
+      // A turned selection's box was drawn turned; it's redrawn upright, around where the strokes are now.
+      setSelected((picked) => new Set(picked));
+      return;
+    }
+    const lassoing = selecting.current;
+    if (lassoing?.pointerId === e.pointerId) {
+      selecting.current = null;
+      // A lasso picks the strokes it mostly encloses; one that encloses nothing (a click) just clears its outline.
+      if (lassoing.points.length < 3) return redraw();
+      setSelected(new Set(strokes.filter((s) => lassoed(s, lassoing.points))));
+      return;
+    }
     const current = drawing.current;
     if (current?.pointerId !== e.pointerId) return;
     drawing.current = null;
@@ -461,7 +578,7 @@ export default function ImageLightbox({
           {TOOLS.map((t) =>
             !isEraser(t.tool) ? (
               <Segment key={t.tool} on={tool === t.tool} label={t.label} onClick={() => setTool(t.tool)}>
-                <ToolIcon path={t.icon} />
+                <ToolIcon path={t.icon} dashed={t.dashed} />
               </Segment>
             ) : (
               // The erasers share a split button: the eraser last picked, and a menu to pick the other.
@@ -520,8 +637,11 @@ export default function ImageLightbox({
               aria-pressed={ink === c.value}
               onClick={() => {
                 setInk(c.value);
-                // Ink is for drawing: picking one swaps Move or an eraser for the pen, but keeps a shape or text.
-                if (tool === "pan" || isEraser(tool)) setTool("draw");
+                // Ink is for drawing: picking one recolours the selection (but not its erasers), or else swaps Move,
+                // Select or an eraser for the pen, but keeps a shape or text.
+                if (tool === "select" && selection.length) {
+                  replaceStrokes(new Map(selection.filter((s) => !isEraser(s.type)).map((s) => [s, { ...s, color: c.value }])));
+                } else if (tool === "pan" || tool === "select" || isEraser(tool)) setTool("draw");
               }}
               className={`h-6 w-6 rounded-full border-2 ${ink === c.value ? "border-text-primary" : "border-transparent"}`}
               style={{ background: c.value }}
@@ -567,7 +687,11 @@ export default function ImageLightbox({
       <div
         ref={stageRef}
         className={`relative flex-1 touch-none select-none overflow-hidden ${
-          editing && tool === "text" ? "cursor-text" : editing && tool !== "pan" ? "cursor-crosshair" : "cursor-grab active:cursor-grabbing"
+          editing && tool === "text"
+            ? "cursor-text"
+            : editing && tool === "select" && hover
+              ? HANDLE_CURSORS[hover]
+              : editing && tool !== "pan" ? "cursor-crosshair" : "cursor-grab active:cursor-grabbing"
         }`}
         onPointerDown={pointerDown}
         onPointerMove={pointerMove}
@@ -663,7 +787,8 @@ const ERASERS: { tool: Eraser; name: string; label: string; icon: string }[] = [
     tool: "lasso-erase",
     name: "Lasso eraser",
     label: "Lasso eraser: loop around ink to rub it out",
-    icon: "M8 2.5c3.3 0 5.5 1.6 5.5 3.6S11.3 9.7 8 9.7 2.5 8.1 2.5 6.1 4.7 2.5 8 2.5z M5.2 9.2c-.9.9-.8 2.4.3 3 .9.5 1.4 1 1.2 2.3",
+    // A lasso's loop, its rope running down to an eraser's block.
+    icon: "M7 2c2.8 0 5 1.3 5 3s-2.2 3-5 3-5-1.3-5-3 2.2-3 5-3z M5.4 7.8c-.6 1.2-.2 2.6 1.2 3.2.9.4 1.9.7 2.7 1.5 M8.6 13.2l3.6-3.6a.7.7 0 0 1 1 0l1.2 1.2a.7.7 0 0 1 0 1L12 14.2H9.6z M10.4 11.4l2.2 2.2",
   },
   {
     tool: "erase",
@@ -673,10 +798,16 @@ const ERASERS: { tool: Eraser; name: string; label: string; icon: string }[] = [
   },
 ];
 
-/** The markup tools, with their icons (paths in a 16 × 16 box). */
-const TOOLS: { tool: Tool; label: string; icon: string }[] = [
+/** The markup tools, with their icons (paths in a 16 × 16 box, dashed for some). */
+const TOOLS: { tool: Tool; label: string; icon: string; dashed?: boolean }[] = [
   { tool: "draw", label: "Pen: a stylus or the mouse draws", icon: "M10.5 2.5l3 3-8 8H2.5v-3z M8.5 4.5l3 3" },
   ...ERASERS,
+  {
+    tool: "select",
+    label: "Select: loop around ink, then drag it to move it, its corners to scale it or its top handle to turn it (Delete removes it)",
+    icon: "M8 2.5c3.3 0 5.5 1.6 5.5 3.6S11.3 9.7 8 9.7 2.5 8.1 2.5 6.1 4.7 2.5 8 2.5z M5.2 9.2c-.9.9-.8 2.4.3 3 .9.5 1.4 1 1.2 2.3",
+    dashed: true,
+  },
   { tool: "line", label: "Line: drag to draw one", icon: "M3 13L13 3" },
   { tool: "arrow", label: "Arrow: drag from its tail to its head", icon: "M3 13L13 3 M7 3h6v6" },
   { tool: "rect", label: "Rectangle: drag across its corners", icon: "M2.5 4h11v8h-11z" },
@@ -701,7 +832,7 @@ function drawStrokes(context: CanvasRenderingContext2D, strokes: Stroke[]) {
 /** Set the context up to draw a stroke: in its ink, or, for the eraser's, rubbing ink out. Reset after with
  * `globalCompositeOperation = "source-over"`. */
 function inkFor(context: CanvasRenderingContext2D, stroke: Stroke) {
-  context.globalCompositeOperation = stroke.type === "erase" ? "destination-out" : "source-over";
+  context.globalCompositeOperation = isEraser(stroke.type) ? "destination-out" : "source-over";
   context.strokeStyle = stroke.color;
   context.fillStyle = stroke.color;
   context.lineCap = "round";
@@ -732,9 +863,9 @@ function drawDot(context: CanvasRenderingContext2D, stroke: Stroke) {
 }
 
 /** Trace a lasso's loop, closed. */
-function traceLasso(context: CanvasRenderingContext2D, stroke: Stroke) {
+function traceLasso(context: CanvasRenderingContext2D, points: Point[]) {
   context.beginPath();
-  stroke.points.forEach(({ x, y }, i) => (i ? context.lineTo(x, y) : context.moveTo(x, y)));
+  points.forEach(({ x, y }, i) => (i ? context.lineTo(x, y) : context.moveTo(x, y)));
   context.closePath();
 }
 
@@ -743,18 +874,17 @@ function drawLasso(context: CanvasRenderingContext2D, stroke: Stroke) {
   if (stroke.points.length < 3) return;
   inkFor(context, stroke);
   context.lineWidth = stroke.points[0].width;
-  traceLasso(context, stroke);
+  traceLasso(context, stroke.points);
   context.fill();
   context.stroke();
   context.globalCompositeOperation = "source-over";
 }
 
-/** Outline a lasso being drawn: dashed black on white, so it shows on any ink or image, and thin at any `zoom`. */
-function drawLassoOutline(context: CanvasRenderingContext2D, stroke: Stroke, zoom: number) {
+/** Stroke the path traced dashed black on white, so it shows on any ink or image, and thin at any `zoom`. */
+function strokeDashed(context: CanvasRenderingContext2D, zoom: number) {
   context.save();
   context.lineWidth = 1.5 / zoom;
   context.lineJoin = "round";
-  traceLasso(context, stroke);
   context.strokeStyle = "#ffffff";
   context.stroke();
   context.setLineDash([4 / zoom, 4 / zoom]);
@@ -763,13 +893,51 @@ function drawLassoOutline(context: CanvasRenderingContext2D, stroke: Stroke, zoo
   context.restore();
 }
 
-/** Draw a text, from its top left, at its font size. */
+/** Outline a lasso being drawn, at `zoom`. */
+function drawLassoOutline(context: CanvasRenderingContext2D, points: Point[], zoom: number) {
+  traceLasso(context, points);
+  strokeDashed(context, zoom);
+}
+
+/** Draw the selection's box, its corners' handles to scale it and the handle above it to turn it, turned by `angle`
+ * about its center, at `zoom`. */
+function drawSelection(context: CanvasRenderingContext2D, box: Box, zoom: number, angle: number) {
+  const center = boxCenter(box);
+  const rotateAt = rotateHandle(box, zoom);
+  const size = HANDLE_SIZE / zoom;
+  context.save();
+  context.translate(center.x, center.y);
+  context.rotate(angle);
+  context.translate(-center.x, -center.y);
+  context.beginPath();
+  context.rect(box.left, box.top, box.right - box.left, box.bottom - box.top);
+  context.moveTo(center.x, box.top);
+  context.lineTo(rotateAt.x, rotateAt.y);
+  strokeDashed(context, zoom);
+  context.lineWidth = 1.5 / zoom;
+  context.fillStyle = "#ffffff";
+  context.strokeStyle = "#111111";
+  context.beginPath();
+  for (const { x, y } of Object.values(boxCorners(box))) context.rect(x - size / 2, y - size / 2, size, size);
+  context.moveTo(rotateAt.x + size / 2, rotateAt.y);
+  context.arc(rotateAt.x, rotateAt.y, size / 2, 0, Math.PI * 2);
+  context.fill();
+  context.stroke();
+  context.restore();
+}
+
+/** Draw a text, from its top left, at its font size, turned by its angle about it. */
 function drawText(context: CanvasRenderingContext2D, stroke: Stroke) {
   const { x, y, width: size } = stroke.points[0];
   inkFor(context, stroke);
+  context.save();
+  context.translate(x, y);
+  context.rotate(stroke.angle ?? 0);
   context.font = textFont(size);
   context.textBaseline = "top";
-  context.fillText(stroke.text ?? "", x, y);
+  context.fillText(stroke.text ?? "", 0, 0);
+  context.restore();
+  context.globalCompositeOperation = "source-over";
 }
 
 /** A text's width, in the pixels its size is in. */
@@ -810,11 +978,142 @@ function drawShape(context: CanvasRenderingContext2D, stroke: Stroke) {
   context.stroke();
 }
 
-/** A tool's icon: a path in a 16 × 16 box. */
-function ToolIcon({ path }: { path: string }) {
+/** The points that outline a stroke, in image pixels: a freehand one's own, a shape's corners (or, for an ellipse,
+ * `segments` points around it), a line's ends and middle, and a text's box's corners. */
+function outline(stroke: Stroke, segments = 8): Point[] {
+  const [start, end] = stroke.points;
+  if (stroke.type === "text") {
+    const size = start.width;
+    const width = textWidth(stroke.text ?? "", size);
+    const cos = Math.cos(stroke.angle ?? 0);
+    const sin = Math.sin(stroke.angle ?? 0);
+    return [[0, 0], [width, 0], [width, size], [0, size]].map(([u, v]) => ({ x: start.x + u * cos - v * sin, y: start.y + u * sin + v * cos }));
+  }
+  if (!isShape(stroke.type) || !end) return stroke.points;
+  if (stroke.type === "rect") return [start, { x: end.x, y: start.y }, end, { x: start.x, y: end.y }];
+  if (stroke.type === "circle") {
+    const center = midpoint(start, end);
+    const rx = Math.abs(end.x - start.x) / 2;
+    const ry = Math.abs(end.y - start.y) / 2;
+    return Array.from({ length: segments }, (_, i) => {
+      const a = (i / segments) * Math.PI * 2;
+      return { x: center.x + rx * Math.cos(a), y: center.y + ry * Math.sin(a) };
+    });
+  }
+  return [start, midpoint(start, end), end];
+}
+
+/** Whether a point is inside a loop (ray casting: a ray from it crosses the loop's edges an odd number of times). */
+function insideLoop({ x, y }: Point, loop: Point[]): boolean {
+  let inside = false;
+  for (let i = 0, j = loop.length - 1; i < loop.length; j = i++) {
+    const a = loop[i];
+    const b = loop[j];
+    if (a.y > y !== b.y > y && x < ((b.x - a.x) * (y - a.y)) / (b.y - a.y) + a.x) inside = !inside;
+  }
+  return inside;
+}
+
+/** Whether a lasso's loop picks a stroke: whether it encloses at least half of its outline. */
+function lassoed(stroke: Stroke, loop: Point[]): boolean {
+  const points = outline(stroke);
+  return points.filter((p) => insideLoop(p, loop)).length * 2 >= points.length;
+}
+
+/** The box around strokes' ink. */
+function selectionBox(strokes: Stroke[]): Box {
+  const box = { left: Infinity, top: Infinity, right: -Infinity, bottom: -Infinity };
+  for (const stroke of strokes) {
+    // A text's box is its ink's; a line's is half its width wider all round.
+    const pad = stroke.type === "text" ? 0 : Math.max(...stroke.points.map((p) => p.width)) / 2;
+    for (const { x, y } of outline(stroke)) {
+      box.left = Math.min(box.left, x - pad);
+      box.top = Math.min(box.top, y - pad);
+      box.right = Math.max(box.right, x + pad);
+      box.bottom = Math.max(box.bottom, y + pad);
+    }
+  }
+  return box;
+}
+
+const boxCenter = (box: Box): Point => ({ x: (box.left + box.right) / 2, y: (box.top + box.bottom) / 2 });
+const boxCorners = (box: Box): Record<Corner, Point> => ({
+  nw: { x: box.left, y: box.top },
+  ne: { x: box.right, y: box.top },
+  se: { x: box.right, y: box.bottom },
+  sw: { x: box.left, y: box.bottom },
+});
+const OPPOSITE: Record<Corner, Corner> = { nw: "se", ne: "sw", se: "nw", sw: "ne" };
+/** Where the handle that turns the selection is: above its box's middle, at `zoom`. */
+const rotateHandle = (box: Box, zoom: number): Point => ({ x: (box.left + box.right) / 2, y: box.top - ROTATE_OFFSET / zoom });
+
+/** The selection's handle at a point, at `zoom`: the rotate handle, a corner, or its box, to move it; or none. */
+function selectionHandle(box: Box, point: Point, zoom: number): Handle | null {
+  const reach = HANDLE_SIZE / zoom;
+  if (distance(point, rotateHandle(box, zoom)) <= reach) return "rotate";
+  for (const [corner, at] of Object.entries(boxCorners(box)) as [Corner, Point][]) {
+    if (distance(point, at) <= reach) return corner;
+  }
+  const inside = point.x >= box.left && point.x <= box.right && point.y >= box.top && point.y <= box.bottom;
+  return inside ? "move" : null;
+}
+
+/** A stroke with each point mapped by `map` and its width scaled by `scale`, and, if it's a text, turned by `angle`. */
+function mapStroke(stroke: Stroke, map: (p: Point) => Point, scale = 1, angle = 0): Stroke {
+  const points = stroke.points.map((p) => ({ ...map(p), width: p.width * scale }));
+  return stroke.type === "text" ? { ...stroke, points, angle: (stroke.angle ?? 0) + angle } : { ...stroke, points };
+}
+
+/** A rectangle or ellipse as the freehand line around it, which, unlike the shape, can be turned; any other stroke
+ * as it is. */
+function asPath(stroke: Stroke): Stroke {
+  if (stroke.type !== "rect" && stroke.type !== "circle") return stroke;
+  const points = outline(stroke, 48);
+  const width = stroke.points[0].width;
+  return { type: "draw", color: stroke.color, points: [...points, points[0]].map((p) => ({ ...p, width })) };
+}
+
+/** The strokes as a drag of the selection's `handle`, from `from` to `to`, leaves them, given the box they were in
+ * when it started: moved by it, turned about the box's center (by the angle returned), or scaled, evenly, from the
+ * corner opposite the one dragged. */
+function transformStrokes(strokes: Stroke[], box: Box, handle: Handle, from: Point, to: Point): { strokes: Stroke[]; angle: number } {
+  if (handle === "move") {
+    const dx = to.x - from.x;
+    const dy = to.y - from.y;
+    return { strokes: strokes.map((s) => mapStroke(s, (p) => ({ x: p.x + dx, y: p.y + dy }))), angle: 0 };
+  }
+  if (handle === "rotate") {
+    const center = boxCenter(box);
+    const angle = Math.atan2(to.y - center.y, to.x - center.x) - Math.atan2(from.y - center.y, from.x - center.x);
+    const cos = Math.cos(angle);
+    const sin = Math.sin(angle);
+    const turn = (p: Point) => ({
+      x: center.x + (p.x - center.x) * cos - (p.y - center.y) * sin,
+      y: center.y + (p.x - center.x) * sin + (p.y - center.y) * cos,
+    });
+    return { strokes: strokes.map((s) => mapStroke(asPath(s), turn, 1, angle)), angle };
+  }
+  const corners = boxCorners(box);
+  const anchor = corners[OPPOSITE[handle]];
+  // The dragged corner follows the pointer; the scale is how far along the box's diagonal it's gone.
+  const diagonal = { x: corners[handle].x - anchor.x, y: corners[handle].y - anchor.y };
+  const length = diagonal.x ** 2 + diagonal.y ** 2;
+  if (!length) return { strokes, angle: 0 };
+  const dragged = { x: corners[handle].x + to.x - from.x - anchor.x, y: corners[handle].y + to.y - from.y - anchor.y };
+  const scale = Math.max(MIN_SCALE, (dragged.x * diagonal.x + dragged.y * diagonal.y) / length);
+  const grow = (p: Point) => ({ x: anchor.x + (p.x - anchor.x) * scale, y: anchor.y + (p.y - anchor.y) * scale });
+  return { strokes: strokes.map((s) => mapStroke(s, grow, scale)), angle: 0 };
+}
+
+/** Whether a key's going to a field being typed in. */
+const isTyping = (target: EventTarget | null) =>
+  target instanceof HTMLElement && (target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName));
+
+/** A tool's icon: a path in a 16 × 16 box, maybe dashed. */
+function ToolIcon({ path, dashed }: { path: string; dashed?: boolean }) {
   return (
     <svg aria-hidden width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-      <path d={path} />
+      <path d={path} strokeDasharray={dashed ? "2 2.5" : undefined} />
     </svg>
   );
 }
