@@ -196,6 +196,14 @@ body {
 .media-width-label {
   @apply absolute left-1/2 top-2 z-[2] -translate-x-1/2 rounded bg-background/90 px-1.5 py-0.5 font-mono text-[11px] text-text-primary;
 }
+/* In the read-only view an image sits in a box with its expand button (NotePage's NoteImage), laid out as the image
+   would be: the box takes its width, and the image fills it. */
+.note-body .note-figure {
+  @apply relative my-3 block;
+}
+.note-body .note-figure img {
+  @apply my-0 w-full;
+}
 /* In the editor the image sits in its resizable view (NoteEditor's ImageView), which sets the width and margins. */
 .ProseMirror .note-image {
   @apply block;

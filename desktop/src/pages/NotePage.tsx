@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import Markdown from "react-markdown";
+import { useEffect, useRef, useState, type ComponentProps } from "react";
+import Markdown, { type Components } from "react-markdown";
 import { Link, useSearchParams } from "react-router-dom";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize from "rehype-sanitize";
@@ -9,6 +9,7 @@ import { formatDay, NEUTRAL_TAG, PROJECT_TAG, Tag } from "../components/TriageBo
 import { getJson, message, sendJson } from "../lib/api";
 import { useSpace } from "../lib/space";
 import { isOverdue, STATUS_LABELS, type TaskItem } from "../lib/tasks";
+import ImageLightbox, { ExpandButton } from "../components/ImageLightbox";
 import NoteEditor from "../components/NoteEditor";
 import { NOTE_COLUMN, NOTE_HTML_SCHEMA, layoutMedia, liftCellColors } from "../components/noteFormatting";
 
@@ -231,6 +232,7 @@ export default function NotePage() {
                 <Markdown
                   remarkPlugins={[remarkGfm]}
                   rehypePlugins={[rehypeRaw, [rehypeSanitize, NOTE_HTML_SCHEMA], liftCellColors, layoutMedia]}
+                  components={NOTE_COMPONENTS}
                 >
                   {note.note.content}
                 </Markdown>
@@ -244,6 +246,24 @@ export default function NotePage() {
 }
 
 const DRAFT_TAG = "border-accent/60 text-accent";
+
+/**
+ * A published note's image, in a box laid out as the image would be (taking its `note-media` class and width) with
+ * an expand button on hover. Clicking it opens it fullscreen, read-only.
+ */
+function NoteImage({ node: _node, className, style, src, alt, title, ...props }: ComponentProps<"img"> & { node?: unknown }) {
+  const [expanded, setExpanded] = useState(false);
+  if (!src) return <img alt={alt} title={title} {...props} />;
+  return (
+    <span className={`note-figure group ${className ?? ""}`} style={style}>
+      <img src={src} alt={alt ?? ""} title={title} {...props} onClick={() => setExpanded(true)} className="cursor-zoom-in" />
+      <ExpandButton onClick={() => setExpanded(true)} />
+      {expanded && <ImageLightbox src={src} alt={alt} title={title} onClose={() => setExpanded(false)} />}
+    </span>
+  );
+}
+
+const NOTE_COMPONENTS: Components = { img: NoteImage };
 
 function LinkedTasks({ tasks }: { tasks: TaskItem[] }) {
   return (
