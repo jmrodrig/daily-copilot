@@ -179,7 +179,11 @@ export default function NoteEditor({
 
   return (
     <div className="flex flex-col">
-      <Toolbar editor={editor} status={uploads > 0 ? `Uploading ${uploads > 1 ? `${uploads} files` : "file"}…` : null} />
+      <Toolbar 
+        editor={editor} 
+        status={uploads > 0 ? `Uploading ${uploads > 1 ? `${uploads} files` : "file"}…` : null} 
+        onAttach={(files) => editor && void insertFilesRef.current(editor.view, files)}
+      />
       {uploadError && <p className={`${NOTE_COLUMN} pt-3 text-[13px] text-accent`}>{uploadError}</p>}
       <TitleInput
         value={title}
@@ -485,7 +489,16 @@ async function uploadFile(spaceId: number, file: File): Promise<{ url: string; n
   return { url: ((await res.json()) as { url: string }).url, name: file.name };
 }
 
-function Toolbar({ editor, status }: { editor: Editor | null; status: string | null }) {
+function AttachIcon() {
+  return (
+    <svg aria-hidden width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
+    </svg>
+  );
+}
+
+function Toolbar({ editor, status, onAttach }: { editor: Editor | null; status: string | null; onAttach: (files: File[]) => void }) {
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const active = useEditorState({
     editor,
     selector: ({ editor: e }) =>
@@ -557,6 +570,26 @@ function Toolbar({ editor, status }: { editor: Editor | null; status: string | n
         ☑
       </ToolButton>
       <Divider />
+      <ToolButton
+        label="Attach file"
+        on={false}
+        disabled={off}
+        onClick={() => fileInputRef.current?.click()}
+      >
+        <AttachIcon />
+      </ToolButton>
+      <input
+        type="file"
+        multiple
+        className="hidden"
+        ref={fileInputRef}
+        onChange={(e) => {
+          if (e.target.files?.length) {
+            onAttach(Array.from(e.target.files));
+            e.target.value = "";
+          }
+        }}
+      />
       <ToolButton
         label="Insert table"
         on={false}
