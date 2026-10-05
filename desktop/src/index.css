@@ -149,9 +149,17 @@ body {
 .ProseMirror.resize-cursor {
   @apply cursor-col-resize;
 }
+/* Images fill the page width, centered, unless resized to a narrower column (a `width` percentage). */
 .note-body img {
-  @apply my-3 h-auto max-w-full rounded border border-border-default;
+  @apply mx-auto my-3 block h-auto max-w-full rounded border border-border-default;
 }
-.ProseMirror img.ProseMirror-selectednode {
-  @apply outline outline-2 outline-accent;
+.note-body img:not([width]) {
+  @apply w-full;
+}
+/* In the editor the image sits in its resizable view (NoteEditor's ImageView), which sets the width and margins. */
+.ProseMirror .note-image {
+  @apply block;
+}
+.ProseMirror .note-image img {
+  @apply my-0 w-full;
 }
