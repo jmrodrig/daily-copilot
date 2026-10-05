@@ -65,7 +65,7 @@ export default function NotePage() {
   const fm = note.state === "ok" ? note.note.frontmatter : {};
   const title = noteTitle(fm, path);
   // The edited title, saved to the `title` front-matter; a blank one is ignored.
-  const newTitle = titleDraft.trim() && titleDraft.trim() !== title ? titleDraft.trim() : null;
+  const newTitle = titleDraft.trim() !== (fm.title || '') ? titleDraft.trim() : null;
   const props = Object.entries(fm).filter(
     ([key, value]) => !HIDDEN_PROPS.has(key) && !(key === "state" && !isTemplate) && value !== null && value !== "",
   );
@@ -76,7 +76,7 @@ export default function NotePage() {
   // Declared before the loading effect, which clears it for the next note.
   useEffect(() => {
     unsavedRef.current =
-      state === "draft" && dirty ? { space_id: spaceId, path, content: body, ...(newTitle && { title: newTitle }) } : null;
+      state === "draft" && dirty ? { space_id: spaceId, path, content: body, ...(newTitle !== null && { title: newTitle }) } : null;
   });
 
   useEffect(() => {
@@ -135,7 +135,7 @@ export default function NotePage() {
         space_id: spaceId,
         path,
         ...(state === "draft" && { content }),
-        ...(state === "draft" && newTitle && { title: newTitle }),
+        ...(state === "draft" && newTitle !== null && { title: newTitle }),
         ...(next && { state: next }),
       });
       setNote({ state: "ok", note: saved });
