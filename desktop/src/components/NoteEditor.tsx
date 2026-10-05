@@ -10,7 +10,17 @@ import StarterKit from "@tiptap/starter-kit";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 
 import { errorDetail, message } from "../lib/api";
-import { ALIGNMENTS, AlignedBlocks, AlignedHeading, AlignedParagraph, ColoredTextStyle, type Alignment } from "./noteFormatting";
+import {
+  ALIGNMENTS,
+  AlignedBlocks,
+  AlignedHeading,
+  AlignedParagraph,
+  ColoredTable,
+  ColoredTableCell,
+  ColoredTableHeader,
+  ColoredTextStyle,
+  type Alignment,
+} from "./noteFormatting";
 
 /**
  * A rich-text editor over a note's title and markdown body (front-matter is kept by the backend), laid out like a
@@ -78,7 +88,11 @@ export default function NoteEditor({
       Color,
       TaskList,
       TaskItem.configure({ nested: true }),
-      TableKit.configure({ table: { resizable: true, cellMinWidth: 60 } }),
+      // The table and its cells are swapped for ones that save cell colors (see noteFormatting).
+      TableKit.configure({ table: false, tableCell: false, tableHeader: false }),
+      ColoredTable.configure({ resizable: true, cellMinWidth: 60 }),
+      ColoredTableCell,
+      ColoredTableHeader,
       // Inline, as markdown images are: `![](url)` sits in a paragraph, so saved notes parse back the same.
       Image.configure({ inline: true, allowBase64: false }),
       Markdown,
@@ -213,6 +227,8 @@ function Toolbar({ editor, status }: { editor: Editor | null; status: string | n
         // Only top-level blocks keep their alignment in markdown (see noteFormatting).
         alignable: e.state.selection.$from.depth === 1 && e.state.selection.$to.depth === 1,
         color: (e.getAttributes("textStyle").color as string | undefined) ?? null,
+        cellColor:
+          ((e.getAttributes("tableCell").backgroundColor ?? e.getAttributes("tableHeader").backgroundColor) as string | null) ?? null,
         editable: e.isEditable,
       },
   });
@@ -236,10 +252,14 @@ function Toolbar({ editor, status }: { editor: Editor | null; status: string | n
         <span className="line-through">S</span>
       </ToolButton>
       <ColorPicker
+        label="Text color"
+        colors={TEXT_COLORS}
         color={active.color}
         disabled={off}
         onPick={(color) => (color ? chain().setColor(color).run() : chain().unsetColor().run())}
-      />
+      >
+        <span className="font-semibold">A</span>
+      </ColorPicker>
       <Divider />
       {ALIGNMENTS.map((align) => (
         <ToolButton
@@ -275,6 +295,20 @@ function Toolbar({ editor, status }: { editor: Editor | null; status: string | n
         // Shown only with the cursor in a table, and marked as such so the controls are easy to find.
         <div className="ml-1 flex items-center gap-0.5 rounded-md border border-accent/40 bg-accent/[0.06] pl-2">
           <span className="mr-1 font-mono text-[11px] uppercase tracking-[0.06em] text-accent-soft">Table</span>
+          <ColorPicker
+            label="Cell color"
+            colors={CELL_COLORS}
+            color={active.cellColor}
+            disabled={off}
+            // A custom color is tinted like the swatches, so the cell's text stays readable.
+            onPick={(color) =>
+              chain()
+                .setCellAttribute("backgroundColor", color?.length === 7 ? `${color}${CELL_TINT}` : color)
+                .run()
+            }
+          >
+            <CellIcon />
+          </ColorPicker>
           <ToolText label="Add row below" disabled={off} onClick={() => chain().addRowAfter().run()}>
             + Row
           </ToolText>
@@ -344,8 +378,31 @@ const TEXT_COLORS = [
   { name: "Grey", value: "#97a5ae" },
 ];
 
-/** The text color control: an "A" underlined in the current color, opening a row of swatches and a custom picker. */
-function ColorPicker({ color, disabled, onPick }: { color: string | null; disabled: boolean; onPick: (color: string | null) => void }) {
+/** Alpha appended to a cell color: a tint of it, which the text reads on. */
+const CELL_TINT = "40";
+
+/** Cell colors: tints of the text colors, plus the default (none). */
+const CELL_COLORS = TEXT_COLORS.map((c) => ({ ...c, value: `${c.value}${CELL_TINT}` }));
+
+/**
+ * A color control: its icon (`children`) underlined in the current color, opening a grid of swatches, a reset to
+ * the default, and a custom picker.
+ */
+function ColorPicker({
+  label,
+  colors,
+  color,
+  disabled,
+  onPick,
+  children,
+}: {
+  label: string;
+  colors: { name: string; value: string }[];
+  color: string | null;
+  disabled: boolean;
+  onPick: (color: string | null) => void;
+  children: ReactNode;
+}) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -368,16 +425,16 @@ function ColorPicker({ color, disabled, onPick }: { color: string | null; disabl
 
   return (
     <div ref={ref} className="relative">
-      <ToolButton label="Text color" on={open} disabled={disabled} onClick={() => setOpen((o) => !o)}>
+      <ToolButton label={label} on={open} disabled={disabled} onClick={() => setOpen((o) => !o)}>
         <span className="flex flex-col items-center leading-none">
-          <span className="font-semibold">A</span>
+          {children}
           <span className="mt-0.5 h-[3px] w-3.5 rounded-sm" style={{ background: color ?? "currentColor" }} />
         </span>
       </ToolButton>
       {open && (
         <div className="absolute left-0 top-full z-20 mt-1 w-[184px] rounded-md border border-border-default bg-surface-raised p-2 shadow-lg">
           <div className="grid grid-cols-4 gap-1.5">
-            {TEXT_COLORS.map((c) => (
+            {colors.map((c) => (
               <button
                 key={c.value}
                 type="button"
@@ -391,15 +448,15 @@ function ColorPicker({ color, disabled, onPick }: { color: string | null; disabl
             ))}
           </div>
           <div className="mt-2 flex items-center justify-between gap-2 border-t border-border-default pt-2">
-            <ToolText label="Remove text color" disabled={false} onClick={() => pick(null)}>
+            <ToolText label={`Remove ${label.toLowerCase()}`} disabled={false} onClick={() => pick(null)}>
               Default
             </ToolText>
             <label className="flex cursor-pointer items-center gap-1.5 rounded px-2 py-1 text-xs text-text-secondary hover:bg-surface-hover hover:text-text-primary">
               Custom
               <input
                 type="color"
-                aria-label="Custom text color"
-                value={color?.startsWith("#") && color.length === 7 ? color : "#ffffff"}
+                aria-label={`Custom ${label.toLowerCase()}`}
+                value={color && /^#[0-9a-f]{6}/i.test(color) ? color.slice(0, 7) : "#ffffff"}
                 // Applied as it's dragged; the editor's selection is kept, so the change lands on the same text.
                 onChange={(e) => onPick(e.target.value)}
                 className="h-5 w-6 cursor-pointer border-0 bg-transparent p-0"
@@ -409,6 +466,18 @@ function ColorPicker({ color, disabled, onPick }: { color: string | null; disabl
         </div>
       )}
     </div>
+  );
+}
+
+/** A small grid with its top-left cell filled. */
+function CellIcon() {
+  return (
+    <svg aria-hidden width="14" height="12" viewBox="0 0 14 12" stroke="currentColor" strokeWidth="1.2">
+      <rect x="1" y="1" width="6" height="5" fill="currentColor" fillOpacity="0.45" stroke="none" />
+      <rect x="0.6" y="0.6" width="12.8" height="10.8" rx="1" fill="none" />
+      <line x1="7" x2="7" y1="0.6" y2="11.4" />
+      <line x1="0.6" x2="13.4" y1="6" y2="6" />
+    </svg>
   );
 }
 

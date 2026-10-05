@@ -128,6 +128,10 @@ body {
 .ProseMirror .selectedCell {
   @apply bg-accent/[0.12];
 }
+/* A colored cell keeps its color when selected, so the selection shows as an outline instead. */
+.ProseMirror .selectedCell[style*="background-color"] {
+  @apply outline outline-2 -outline-offset-2 outline-accent/60;
+}
 .ProseMirror .tableWrapper {
   @apply overflow-x-auto;
 }

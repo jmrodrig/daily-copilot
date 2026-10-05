@@ -10,7 +10,7 @@ import { getJson, message, sendJson } from "../lib/api";
 import { useSpace } from "../lib/space";
 import { isOverdue, STATUS_LABELS, type TaskItem } from "../lib/tasks";
 import NoteEditor from "../components/NoteEditor";
-import { NOTE_HTML_SCHEMA } from "../components/noteFormatting";
+import { NOTE_HTML_SCHEMA, liftCellColors } from "../components/noteFormatting";
 
 // GET /api/notes/file (see NoteFile in backend/schemas.py).
 type NoteFile = { path: string; frontmatter: Record<string, unknown>; content: string };
@@ -188,8 +188,11 @@ export default function NotePage() {
             <>
               {details}
               <article className="note-body markdown text-sm leading-relaxed text-text-secondary">
-                {/* Inline HTML carries text color and alignment; anything else in it is stripped. */}
-                <Markdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw, [rehypeSanitize, NOTE_HTML_SCHEMA]]}>
+                {/* Inline HTML carries text and cell colors and alignment; anything else in it is stripped. */}
+                <Markdown
+                  remarkPlugins={[remarkGfm]}
+                  rehypePlugins={[rehypeRaw, [rehypeSanitize, NOTE_HTML_SCHEMA], liftCellColors]}
+                >
                   {note.note.content}
                 </Markdown>
               </article>
