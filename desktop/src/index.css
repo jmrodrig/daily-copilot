@@ -86,7 +86,14 @@ body {
   @apply border-l-2 border-border-light pl-3 text-text-secondary;
 }
 
-/* Note bodies, read-only and in the rich-text editor: sized like a document rather than a chat reply. */
+/* Note bodies, read-only and in the rich-text editor: sized like a document rather than a chat reply. The body fills
+   the page, and its blocks sit in a centered text column; resized images and tables can break out of it. */
+.note-body {
+  container-type: inline-size;
+}
+.note-body > * {
+  @apply mx-auto max-w-4xl;
+}
 .note-body h1 {
   @apply mt-6 text-2xl;
 }
@@ -149,12 +156,45 @@ body {
 .ProseMirror.resize-cursor {
   @apply cursor-col-resize;
 }
-/* Images fill the page width, centered, unless resized to a narrower column (a `width` percentage). */
+/* Images fill the text column, centered, unless resized (a `width` percentage of it). */
 .note-body img {
   @apply mx-auto my-3 block h-auto max-w-full rounded border border-border-default;
 }
-.note-body img:not([width]) {
+.note-body img:not([width], .note-media) {
   @apply w-full;
+}
+/*
+ * A resized image or table (see noteFormatting): its width is `--media-scale` times its column's, up to the page's
+ * (100cqw), centered on the column even when wider than it. Tables sit in a column-wide `note-table` for it.
+ */
+.note-body .note-media {
+  --media-width: min(calc(100% * var(--media-scale, 1)), 100cqw);
+  width: var(--media-width);
+  max-width: none;
+  margin-left: calc((100% - var(--media-width)) / 2);
+}
+/* An image alone on its line is the body's own child in the read-only view, so its column is the text column's width. */
+.note-body > .note-media {
+  --media-width: min(calc(min(theme("maxWidth.4xl"), 100%) * var(--media-scale, 1)), 100cqw);
+}
+.note-body .note-table {
+  @apply relative my-3;
+}
+/* The snap lines shown over the page while an image or table is resized. */
+.media-guides {
+  @apply pointer-events-none absolute -inset-y-2 inset-x-0 opacity-0 transition-opacity duration-150;
+}
+.media-guides.dragging {
+  @apply opacity-100;
+}
+.media-guide {
+  @apply absolute inset-y-0 w-px bg-text-muted/40;
+}
+.media-guide.on {
+  @apply bg-accent;
+}
+.media-width-label {
+  @apply absolute left-1/2 top-2 z-[2] -translate-x-1/2 rounded bg-background/90 px-1.5 py-0.5 font-mono text-[11px] text-text-primary;
 }
 /* In the editor the image sits in its resizable view (NoteEditor's ImageView), which sets the width and margins. */
 .ProseMirror .note-image {
@@ -162,4 +202,18 @@ body {
 }
 .ProseMirror .note-image img {
   @apply my-0 w-full;
+}
+/* A table's width handle (NoteEditor's TableView) shows on hover, and the table fills its resized box. */
+.ProseMirror .note-table table {
+  width: 100% !important;
+}
+.ProseMirror .table-width-handle {
+  @apply opacity-0 transition-opacity duration-150;
+}
+.ProseMirror .note-table:hover .table-width-handle,
+.ProseMirror .note-table.resizing .table-width-handle {
+  @apply opacity-100;
+}
+.ProseMirror[contenteditable="false"] .table-width-handle {
+  @apply hidden;
 }
