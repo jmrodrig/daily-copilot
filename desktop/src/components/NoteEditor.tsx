@@ -198,7 +198,7 @@ export default function NoteEditor({
       {editor && (
         <BubbleMenu
           editor={editor}
-          tippyOptions={{ duration: 100, maxWidth: "none", placement: "bottom", offset: [0, 8] }}
+          options={{ placement: "bottom", offset: 8 }}
           shouldShow={({ editor }) => editor.isActive("link")}
           className="flex items-center overflow-hidden rounded-lg border border-border-default bg-surface-raised shadow-xl"
         >
