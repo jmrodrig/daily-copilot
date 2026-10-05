@@ -468,10 +468,11 @@ def delete_folder(
         shutil.rmtree(path)
 
 
-# --- Assets (pasted images) -------------------------------------------------------
+# --- Assets (pasted images and attached files) ------------------------------------
 
 ASSETS_DIR = ".assets"
-# The image types the editor may paste, by MIME type, with the suffix they're stored under.
+# The image types the editor may paste, by MIME type, with the suffix they're stored under. Other files keep the
+# suffix of their own name.
 IMAGE_SUFFIXES = {
     "image/png": ".png",
     "image/jpeg": ".jpg",
@@ -479,17 +480,23 @@ IMAGE_SUFFIXES = {
     "image/webp": ".webp",
 }
 # Stored names are `<uuid hex><suffix>`, so a name from a URL can't point anywhere else.
-_ASSET_NAME_RE = re.compile(r"\A[0-9a-f]{32}\.(?:png|jpg|gif|webp)\Z")
+_ASSET_NAME_RE = re.compile(r"\A[0-9a-f]{32}\.[a-zA-Z0-9]{1,10}\Z")
+_ASSET_SUFFIX_RE = re.compile(r"\A\.[a-zA-Z0-9]{1,10}\Z")
 
 
-def save_asset(data: bytes, content_type: str, *, notes_dir: str | Path | None = None) -> str:
-    """Store an image under NOTES_DIR/.assets/ with a fresh name, returning that name.
+def save_asset(
+    data: bytes, content_type: str, filename: str | None = None, *, notes_dir: str | Path | None = None
+) -> str:
+    """Store a file under NOTES_DIR/.assets/ with a fresh name, returning that name.
 
-    Raises `FileLayerError` for a type that isn't in `IMAGE_SUFFIXES`. Assets aren't notes: no history is kept.
+    An image in `IMAGE_SUFFIXES` is stored under its type's suffix; any other file under the suffix of `filename`, or
+    `.bin` if it has none (or an odd one). Assets aren't notes: no history is kept.
     """
     suffix = IMAGE_SUFFIXES.get(content_type)
     if suffix is None:
-        raise FileLayerError(f"{content_type or 'This file'} is not a supported image type")
+        suffix = Path(filename or "").suffix.lower()
+        if not _ASSET_SUFFIX_RE.match(suffix):
+            suffix = ".bin"
     folder = notes_root(notes_dir) / ASSETS_DIR
     folder.mkdir(parents=True, exist_ok=True)
     name = uuid.uuid4().hex + suffix

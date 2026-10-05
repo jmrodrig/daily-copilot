@@ -257,11 +257,31 @@ def test_pasted_images_are_stored_and_served(client):
     assert client.get("/api/notes/image/..%2F..%2Fcopilot.db", params={"space_id": 1}).status_code in (400, 404)
 
 
+def test_attached_files_keep_their_suffix(client):
+    def upload(filename, content_type):
+        files = {"file": (filename, b"%PDF-1.4", content_type)}
+        url = client.post("/api/notes/image", data={"space_id": 1}, files=files).json()["url"]
+        return url, url.removeprefix("/api/notes/image/").removesuffix("?space_id=1")
+
+    url, name = upload("Spec Sheet.PDF", "application/pdf")
+    assert name.endswith(".pdf")
+    served = client.get(url)
+    assert (served.status_code, served.content) == (200, b"%PDF-1.4")
+    assert served.headers["content-disposition"] == "inline"
+
+    # Files that could run script in the app are downloaded rather than opened.
+    url, name = upload("page.html", "text/html")
+    assert name.endswith(".html")
+    assert client.get(url).headers["content-disposition"] == "attachment"
+
+    assert upload("README", "application/octet-stream")[1].endswith(".bin")
+    assert upload("odd.tar.g z", "application/octet-stream")[1].endswith(".bin")
+
+
 @pytest.mark.parametrize(
     ("space_id", "file", "status"),
     [
-        (1, ("notes.txt", b"text", "text/plain"), 415),
-        (1, ("big.png", b"\0" * (main.MAX_IMAGE_BYTES + 1), "image/png"), 413),
+        (1, ("big.png", b"\0" * (main.MAX_ASSET_BYTES + 1), "image/png"), 413),
         (9, ("image.png", PNG, "image/png"), 404),
     ],
 )

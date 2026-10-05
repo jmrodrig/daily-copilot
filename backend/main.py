@@ -556,35 +556,41 @@ def update_note(request: NoteUpdate, db: Session = Depends(get_db)) -> NoteFile:
     return NoteFile(path=note["path"], frontmatter=to_jsonable(frontmatter), content=content)
 
 
-MAX_IMAGE_BYTES = 20 * 1024 * 1024
+MAX_ASSET_BYTES = 50 * 1024 * 1024
+# Assets shown in the app rather than downloaded. Anything else (an HTML or SVG file, say) could run script on the
+# app's origin if opened in place.
+_INLINE_ASSET_SUFFIXES = {*file_layer.IMAGE_SUFFIXES.values(), ".pdf"}
 
 
+# Named for images, which came first; it stores any file attached to a note, so links in saved notes keep working.
 @app.post("/api/notes/image")
 async def upload_image(
     file: UploadFile = File(...), space_id: int = Form(...), db: Session = Depends(get_db)
 ) -> ImageUpload:
-    """Store an image pasted into the note editor under the space's `content/.assets/`."""
+    """Store an image or file pasted into the note editor under the space's `content/.assets/`."""
     root = spaces.content_dir(_space_id_or_404(db, space_id))
-    data = await file.read(MAX_IMAGE_BYTES + 1)
-    if len(data) > MAX_IMAGE_BYTES:
-        raise HTTPException(status_code=413, detail=f"Images are limited to {MAX_IMAGE_BYTES // (1024 * 1024)} MB")
-    try:
-        name = file_layer.save_asset(data, file.content_type or "", notes_dir=root)
-    except file_layer.FileLayerError as exc:
-        raise HTTPException(status_code=415, detail=str(exc)) from exc
+    data = await file.read(MAX_ASSET_BYTES + 1)
+    if len(data) > MAX_ASSET_BYTES:
+        raise HTTPException(status_code=413, detail=f"Files are limited to {MAX_ASSET_BYTES // (1024 * 1024)} MB")
+    name = file_layer.save_asset(data, file.content_type or "", file.filename, notes_dir=root)
     return ImageUpload(url=f"/api/notes/image/{name}?space_id={space_id}")
 
 
 @app.get("/api/notes/image/{name}")
 def get_image(name: str, root: Path = Depends(space_content)) -> FileResponse:
-    """A stored image; its name is random and never reused, so it can be cached for good."""
+    """A stored image or file; its name is random and never reused, so it can be cached for good."""
     try:
         path = file_layer.asset_path(name, notes_dir=root)
     except file_layer.NotePathError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=f"No image {name}") from exc
-    return FileResponse(path, headers={"Cache-Control": "public, max-age=31536000, immutable"})
+        raise HTTPException(status_code=404, detail=f"No file {name}") from exc
+    headers = {
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "Content-Disposition": "inline" if path.suffix in _INLINE_ASSET_SUFFIXES else "attachment",
+        "X-Content-Type-Options": "nosniff",
+    }
+    return FileResponse(path, headers=headers)
 
 
 @app.post("/api/notes/apply-edit")

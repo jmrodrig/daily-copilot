@@ -43,8 +43,9 @@ import {
 /**
  * A rich-text editor over a note's title and markdown body (front-matter is kept by the backend), laid out like a
  * Confluence page: a sticky formatting toolbar across the page, then the title, `children` (the note's properties
- * and tasks), and the body in a centered text column, edited rendered and handed back as markdown. Pasted or dropped images are uploaded to the space,
- * and an image opens fullscreen to be marked up. Ctrl/Cmd+S saves.
+ * and tasks), and the body in a centered text column, edited rendered and handed back as markdown. Pasted or dropped
+ * images and files are uploaded to the space (a file is linked by name), and an image opens fullscreen to be marked
+ * up. Ctrl/Cmd+S saves.
  */
 export default function NoteEditor({
   spaceId,
@@ -73,14 +74,20 @@ export default function NoteEditor({
   const [uploads, setUploads] = useState(0);
   const [uploadError, setUploadError] = useState<string | null>(null);
 
-  /** Upload image files one by one, inserting each at `pos` (or the selection) once it's stored. */
-  async function insertImages(view: EditorView, files: File[], pos?: number) {
+  /**
+   * Upload files one by one, inserting each at `pos` (or the selection) once it's stored: an image as itself, any
+   * other file as a link named after it.
+   */
+  async function insertFiles(view: EditorView, files: File[], pos?: number) {
     setUploadError(null);
     setUploads((n) => n + files.length);
     for (const file of files) {
       try {
-        const src = await uploadImage(spaceId, file);
-        const node = view.state.schema.nodes.image.create({ src });
+        const { url, name } = await uploadFile(spaceId, file);
+        const { schema } = view.state;
+        const node = file.type.startsWith("image/")
+          ? schema.nodes.image.create({ src: url })
+          : schema.text(name, [schema.marks.link.create({ href: url })]);
         const tr = pos === undefined ? view.state.tr.replaceSelectionWith(node) : view.state.tr.insert(pos, node);
         if (pos !== undefined) pos += node.nodeSize;
         view.dispatch(tr.scrollIntoView());
@@ -91,10 +98,10 @@ export default function NoteEditor({
       }
     }
   }
-  const insertImagesRef = useRef(insertImages);
-  insertImagesRef.current = insertImages;
-  const uploadRef = useRef((file: File) => uploadImage(spaceId, file));
-  uploadRef.current = (file: File) => uploadImage(spaceId, file);
+  const insertFilesRef = useRef(insertFiles);
+  insertFilesRef.current = insertFiles;
+  const uploadRef = useRef(async (file: File) => (await uploadFile(spaceId, file)).url);
+  uploadRef.current = async (file: File) => (await uploadFile(spaceId, file)).url;
 
   const editor = useEditor({
     extensions: [
@@ -133,19 +140,19 @@ export default function NoteEditor({
         }
         return false;
       },
-      // A pasted screenshot or a dropped image file is uploaded rather than inlined as base64.
+      // A pasted screenshot or a dropped file is uploaded to the space rather than inlined as base64.
       handlePaste: (view, event) => {
-        const files = imageFiles(event.clipboardData);
+        const files = extractFiles(event.clipboardData);
         if (!files.length || !view.editable) return false;
         event.preventDefault();
-        void insertImagesRef.current(view, files);
+        void insertFilesRef.current(view, files);
         return true;
       },
       handleDrop: (view, event, _slice, moved) => {
-        const files = moved ? [] : imageFiles(event.dataTransfer);
+        const files = moved ? [] : extractFiles(event.dataTransfer);
         if (!files.length || !view.editable) return false;
         event.preventDefault();
-        void insertImagesRef.current(view, files, view.posAtCoords({ left: event.clientX, top: event.clientY })?.pos);
+        void insertFilesRef.current(view, files, view.posAtCoords({ left: event.clientX, top: event.clientY })?.pos);
         return true;
       },
     },
@@ -158,7 +165,7 @@ export default function NoteEditor({
 
   return (
     <div className="flex flex-col">
-      <Toolbar editor={editor} status={uploads > 0 ? `Uploading ${uploads > 1 ? `${uploads} images` : "image"}…` : null} />
+      <Toolbar editor={editor} status={uploads > 0 ? `Uploading ${uploads > 1 ? `${uploads} files` : "file"}…` : null} />
       {uploadError && <p className={`${NOTE_COLUMN} pt-3 text-[13px] text-accent`}>{uploadError}</p>}
       <TitleInput
         value={title}
@@ -449,19 +456,19 @@ function TitleInput({
   );
 }
 
-/** The image files of a paste or drop, if any. */
-function imageFiles(data: DataTransfer | null): File[] {
-  return Array.from(data?.files ?? []).filter((file) => file.type.startsWith("image/"));
+/** The files of a paste or drop, if any. */
+function extractFiles(data: DataTransfer | null): File[] {
+  return Array.from(data?.files ?? []);
 }
 
-/** POST /api/notes/image: store an image in the space, returning the URL it's served from. */
-async function uploadImage(spaceId: number, file: File): Promise<string> {
+/** POST /api/notes/image: store an image or other file in the space, returning the URL it's served from and its name. */
+async function uploadFile(spaceId: number, file: File): Promise<{ url: string; name: string }> {
   const form = new FormData();
   form.append("space_id", String(spaceId));
   form.append("file", file);
   const res = await fetch("/api/notes/image", { method: "POST", body: form });
   if (!res.ok) throw new Error(await errorDetail(res));
-  return ((await res.json()) as { url: string }).url;
+  return { url: ((await res.json()) as { url: string }).url, name: file.name };
 }
 
 function Toolbar({ editor, status }: { editor: Editor | null; status: string | null }) {
