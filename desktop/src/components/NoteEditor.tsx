@@ -17,7 +17,7 @@ import {
 } from "@tiptap/react";
 import { BubbleMenu } from "@tiptap/react/menus";
 import StarterKit from "@tiptap/starter-kit";
-import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, useMemo, useCallback, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 
 import { errorDetail, message } from "../lib/api";
 import ImageLightbox, { ExpandButton } from "./ImageLightbox";
@@ -196,23 +196,32 @@ export default function NoteEditor({
       {children && <div className={`${NOTE_COLUMN} flex flex-col gap-5 pt-5`}>{children}</div>}
       <EditorContent editor={editor} className="pt-4" />
       {editor && (
-        <BubbleMenu
-          editor={editor}
-          options={{ placement: "bottom", offset: 8 }}
-          shouldShow={({ editor }) => editor.isActive("link")}
-          className="flex items-center overflow-hidden rounded-lg border border-border-default bg-surface-raised shadow-xl"
-        >
-          <a
-            href={editor.getAttributes("link").href}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="px-4 py-2 text-xs font-bold uppercase tracking-wider text-accent hover:bg-surface-hover focus:outline-none"
-          >
-            Open
-          </a>
-        </BubbleMenu>
+        <BubbleMenuWrapper editor={editor} />
       )}
     </div>
+  );
+}
+
+// Extract BubbleMenu wrapper to safely memoize its props without cluttering NoteEditor's top level hooks
+function BubbleMenuWrapper({ editor }: { editor: Editor }) {
+  const options = useMemo(() => ({ placement: "bottom" as const, offset: 8 }), []);
+  const shouldShow = useCallback(({ editor: e }: { editor: Editor }) => e.isActive("link"), []);
+  return (
+    <BubbleMenu
+      editor={editor}
+      options={options}
+      shouldShow={shouldShow}
+      className="flex items-center overflow-hidden rounded-lg border border-border-default bg-surface-raised shadow-xl"
+    >
+      <a
+        href={editor.getAttributes("link").href}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="px-4 py-2 text-xs font-bold uppercase tracking-wider text-accent hover:bg-surface-hover focus:outline-none"
+      >
+        Open
+      </a>
+    </BubbleMenu>
   );
 }
 
