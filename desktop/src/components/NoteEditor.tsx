@@ -145,20 +145,38 @@ export default function NoteEditor({
     for (const file of files) {
       try {
         const { url, name } = await uploadFile(spaceId, file);
+        
+        let inTextblock = false;
+        if (pos !== undefined) {
+          try {
+            inTextblock = editor.state.doc.resolve(pos).parent.isTextblock;
+          } catch (e) {
+            // fallback
+          }
+        } else {
+          inTextblock = editor.state.selection.$head.parent.isTextblock;
+        }
+
         if (file.type.startsWith("image/")) {
-          const content = { type: "image", attrs: { src: url } };
+          // Images are inline, so they must be wrapped in a paragraph if inserted outside a text block
+          const imgNode = `<img src="${url}" />`;
+          const content = inTextblock ? imgNode : `<p>${imgNode}</p>`;
           if (pos === undefined) {
             editor.chain().focus().insertContent(content).run();
           } else {
             editor.chain().insertContentAt(pos, content).run();
+            // Advance pos slightly for multiple drops so they don't reverse order
+            pos += 1;
           }
         } else {
           // Add a non-breaking space after the link so the cursor can move past it cleanly
-          const content = `<a href="${url}">${name}</a>&nbsp;`;
+          const linkNode = `<a href="${url}">${name}</a>&nbsp;`;
+          const content = inTextblock ? linkNode : `<p>${linkNode}</p>`;
           if (pos === undefined) {
             editor.chain().focus().insertContent(content).run();
           } else {
             editor.chain().insertContentAt(pos, content).run();
+            pos += 1; // Advance pos slightly
           }
         }
       } catch (err) {
