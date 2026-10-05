@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 
 import { message } from "../lib/api";
@@ -26,6 +26,9 @@ const INKS = [
 ];
 /** Line widths, in screen pixels at the zoom a stroke is drawn at. */
 const SIZES = [2, 4, 8];
+/** The markup canvas's limits, in device pixels: a larger one fails to allocate (and draws nothing) or eats memory. */
+const MAX_CANVAS_SIDE = 16384;
+const MAX_CANVAS_AREA = 4096 * 4096;
 
 /**
  * A note's image, fullscreen: dragged to pan and zoomed with the wheel, a pinch or the footer's controls. Given
@@ -64,6 +67,18 @@ export default function ImageLightbox({
   const pointers = useRef(new Map<number, Point>());
   // The stroke being drawn, and the pointer drawing it.
   const drawing = useRef<{ pointerId: number; stroke: Stroke } | null>(null);
+
+  // The markup canvas's device pixels per image pixel: enough for the screen at the current zoom, so strokes stay
+  // sharp when zoomed in, within the canvas's limits.
+  const renderScale = size
+    ? Math.min(
+        window.devicePixelRatio * Math.max(1, view.zoom),
+        MAX_CANVAS_SIDE / Math.max(size.width, size.height),
+        Math.sqrt(MAX_CANVAS_AREA / (size.width * size.height)),
+      )
+    : 1;
+  const canvasWidth = size ? Math.max(1, Math.round(size.width * renderScale)) : 0;
+  const canvasHeight = size ? Math.max(1, Math.round(size.height * renderScale)) : 0;
 
   const name = decodeURIComponent(new URL(src, window.location.href).pathname.split("/").pop() ?? "");
 
@@ -104,7 +119,8 @@ export default function ImageLightbox({
       const context = merged.getContext("2d");
       if (!context) throw new Error("no canvas");
       context.drawImage(image, 0, 0, size.width, size.height);
-      context.drawImage(canvas, 0, 0);
+      // The canvas is at the screen's resolution: scaled down onto the image's.
+      context.drawImage(canvas, 0, 0, size.width, size.height);
       // An image from another site taints the canvas, which then can't be read back.
       const blob = await new Promise<Blob>((resolve, reject) =>
         merged.toBlob((b) => (b ? resolve(b) : reject(new Error("the image could not be encoded"))), "image/png"),
@@ -161,16 +177,33 @@ export default function ImageLightbox({
     return () => stage.removeEventListener("wheel", wheel);
   }, []);
 
-  // The canvas shows the strokes: redrawn whole when they change (an undo, a clear, a save), and added to as one's drawn.
-  useEffect(() => {
-    const context = canvasRef.current?.getContext("2d");
-    if (!context || !size) return;
-    context.clearRect(0, 0, size.width, size.height);
-    for (const stroke of strokes) {
+  // The canvas shows the strokes: redrawn whole when they change (an undo, a clear, a save) or it's resized (a zoom,
+  // which clears it), and added to as one's drawn. Before paint, so a zoom doesn't flash it blank.
+  useLayoutEffect(() => {
+    const canvas = canvasRef.current;
+    const context = canvas?.getContext("2d");
+    if (!canvas || !context || !size) return;
+    context.resetTransform();
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    context.scale(canvas.width / size.width, canvas.height / size.height);
+    // The stroke being drawn too: a pinch can zoom mid-stroke.
+    for (const stroke of drawing.current ? [...strokes, drawing.current.stroke] : strokes) {
       for (let i = 1; i < stroke.points.length; i++) drawSegment(context, stroke, i);
       if (stroke.points.length === 1) drawDot(context, stroke);
     }
-  }, [strokes, size, markup]);
+  }, [strokes, size, markup, canvasWidth, canvasHeight]);
+
+  /** Draw on the canvas straight away, in image pixels. */
+  function drawOnCanvas(draw: (context: CanvasRenderingContext2D) => void) {
+    const canvas = canvasRef.current;
+    const context = canvas?.getContext("2d");
+    if (!canvas || !context || !size) return;
+    context.save();
+    context.resetTransform();
+    context.scale(canvas.width / size.width, canvas.height / size.height);
+    draw(context);
+    context.restore();
+  }
 
   /** Whether a pointer draws: in markup, a pen or the mouse with the pen tool. Touch always pans. */
   const draws = (e: ReactPointerEvent) => markup && tool === "draw" && (e.pointerType === "pen" || e.pointerType === "mouse");
@@ -197,8 +230,7 @@ export default function ImageLightbox({
       const width = lineWidth(e.pointerType, e.pressure);
       const stroke: Stroke = { color: ink, points: [{ ...point, width }] };
       drawing.current = { pointerId: e.pointerId, stroke };
-      const context = canvasRef.current?.getContext("2d");
-      if (context) drawDot(context, stroke);
+      drawOnCanvas((context) => drawDot(context, stroke));
       return;
     }
     pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
@@ -213,8 +245,7 @@ export default function ImageLightbox({
         const point = imagePoint(event);
         if (!point) continue;
         current.stroke.points.push({ ...point, width: lineWidth(e.pointerType, event.pressure) });
-        const context = canvasRef.current?.getContext("2d");
-        if (context) drawSegment(context, current.stroke, current.stroke.points.length - 1);
+        drawOnCanvas((context) => drawSegment(context, current.stroke, current.stroke.points.length - 1));
       }
       return;
     }
@@ -369,7 +400,7 @@ export default function ImageLightbox({
             className="block h-full w-full max-w-none shadow-lg"
           />
           {editing && size && (
-            <canvas ref={canvasRef} width={size.width} height={size.height} className="absolute inset-0 h-full w-full" />
+            <canvas ref={canvasRef} width={canvasWidth} height={canvasHeight} className="absolute inset-0 h-full w-full" />
           )}
         </div>
       </div>
