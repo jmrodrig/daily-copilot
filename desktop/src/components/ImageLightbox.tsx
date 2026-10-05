@@ -6,9 +6,13 @@ import { message } from "../lib/api";
 /** The view: the image's scale (1 is its natural size) and its center's offset from the stage's, in screen pixels. */
 type View = { zoom: number; x: number; y: number };
 type Point = { x: number; y: number };
-/** A markup stroke, in image pixels; each point carries its line width, which follows the pen's pressure. */
-type Stroke = { color: string; points: (Point & { width: number })[] };
-type Tool = "draw" | "pan";
+type Tool = "draw" | "pan" | "erase" | "line" | "arrow" | "rect" | "circle";
+/** A markup stroke, in image pixels; each point carries its line width, which follows the pen's pressure. A freehand
+ * one ("draw", or "erase", which rubs out the ink under it) has a point for each the pointer passed; a shape has two,
+ * where its drag started and where it is (or ended). */
+type Stroke = { type: Exclude<Tool, "pan">; color: string; points: (Point & { width: number })[] };
+
+const isShape = (type: Tool) => type === "line" || type === "arrow" || type === "rect" || type === "circle";
 
 const MIN_ZOOM = 0.05;
 const MAX_ZOOM = 8;
@@ -134,9 +138,15 @@ export default function ImageLightbox({
       context.imageSmoothingQuality = "high";
       context.drawImage(image, 0, 0, merged.width, merged.height);
       // The strokes are redrawn at the merged canvas's resolution, not copied from the screen's canvas, whose
-      // resolution follows the zoom.
-      context.scale(merged.width / size.width, merged.height / size.height);
-      drawStrokes(context, strokes);
+      // resolution follows the zoom; on a layer of their own, so the eraser rubs out ink but not the image.
+      const layer = document.createElement("canvas");
+      layer.width = merged.width;
+      layer.height = merged.height;
+      const layerContext = layer.getContext("2d");
+      if (!layerContext) throw new Error("no canvas");
+      layerContext.scale(merged.width / size.width, merged.height / size.height);
+      drawStrokes(layerContext, strokes);
+      context.drawImage(layer, 0, 0);
       // An image from another site taints the canvas, which then can't be read back.
       const blob = await new Promise<Blob>((resolve, reject) =>
         merged.toBlob((b) => (b ? resolve(b) : reject(new Error("the image could not be encoded"))), "image/png"),
@@ -195,16 +205,19 @@ export default function ImageLightbox({
 
   // The canvas shows the strokes: redrawn whole when they change (an undo, a clear, a save) or it's resized (a zoom,
   // which clears it), and added to as one's drawn. Before paint, so a zoom doesn't flash it blank.
-  useLayoutEffect(() => {
+  useLayoutEffect(redraw, [strokes, size, markup, canvasWidth, canvasHeight]);
+
+  /** Redraw the canvas whole, with the stroke being drawn too: a pinch can zoom mid-stroke, and a shape's drag moves
+   * its end. */
+  function redraw() {
     const canvas = canvasRef.current;
     const context = canvas?.getContext("2d");
     if (!canvas || !context || !size) return;
     context.resetTransform();
     context.clearRect(0, 0, canvas.width, canvas.height);
     context.scale(canvas.width / size.width, canvas.height / size.height);
-    // The stroke being drawn too: a pinch can zoom mid-stroke.
     drawStrokes(context, drawing.current ? [...strokes, drawing.current.stroke] : strokes);
-  }, [strokes, size, markup, canvasWidth, canvasHeight]);
+  }
 
   /** Draw on the canvas straight away, in image pixels. */
   function drawOnCanvas(draw: (context: CanvasRenderingContext2D) => void) {
@@ -218,8 +231,8 @@ export default function ImageLightbox({
     context.restore();
   }
 
-  /** Whether a pointer draws: in markup, a pen or the mouse with the pen tool. Touch always pans. */
-  const draws = (e: ReactPointerEvent) => markup && tool === "draw" && (e.pointerType === "pen" || e.pointerType === "mouse");
+  /** Whether a pointer draws: in markup, a pen or the mouse with any tool but Move. Touch always pans. */
+  const draws = (e: ReactPointerEvent) => markup && tool !== "pan" && (e.pointerType === "pen" || e.pointerType === "mouse");
 
   /** A pointer's position on the image, in its pixels. */
   function imagePoint(e: { clientX: number; clientY: number }): Point | null {
@@ -229,9 +242,10 @@ export default function ImageLightbox({
     return { x: ((e.clientX - rect.left) / rect.width) * size.width, y: ((e.clientY - rect.top) / rect.height) * size.height };
   }
 
-  /** A stroke's width in image pixels: the line size on screen at the current zoom, thickened by a pen's pressure. */
+  /** A stroke's width in image pixels: the line size on screen at the current zoom, thickened by a pen's pressure
+   * (but for a shape, whose line is even). */
   const lineWidth = (pointerType: string, pressure: number) =>
-    (lineSize / view.zoom) * (pointerType === "pen" ? 0.5 + (pressure || 0.5) : 1);
+    (lineSize / view.zoom) * (pointerType === "pen" && !isShape(tool) ? 0.5 + (pressure || 0.5) : 1);
 
   function pointerDown(e: ReactPointerEvent) {
     if (e.button !== 0 && e.pointerType === "mouse") return;
@@ -239,11 +253,12 @@ export default function ImageLightbox({
     e.currentTarget.setPointerCapture(e.pointerId);
     if (draws(e)) {
       const point = imagePoint(e);
-      if (!point || drawing.current) return;
+      if (!point || drawing.current || tool === "pan") return;
       const width = lineWidth(e.pointerType, e.pressure);
-      const stroke: Stroke = { color: ink, points: [{ ...point, width }] };
+      const stroke: Stroke = { type: tool, color: ink, points: [{ ...point, width }] };
       drawing.current = { pointerId: e.pointerId, stroke };
-      drawOnCanvas((context) => drawDot(context, stroke));
+      // A shape shows once it's dragged.
+      if (!isShape(tool)) drawOnCanvas((context) => drawDot(context, stroke));
       return;
     }
     pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
@@ -252,13 +267,22 @@ export default function ImageLightbox({
   function pointerMove(e: ReactPointerEvent) {
     const current = drawing.current;
     if (current?.pointerId === e.pointerId) {
+      const { stroke } = current;
+      if (isShape(stroke.type)) {
+        // A shape spans from where its drag started to where the pointer is.
+        const point = imagePoint(e);
+        if (!point) return;
+        stroke.points[1] = { ...point, width: stroke.points[0].width };
+        redraw();
+        return;
+      }
       // A pen reports more points than it fires events for; they're all drawn, for a smooth line.
       const events = e.nativeEvent.getCoalescedEvents?.() ?? [];
       for (const event of events.length ? events : [e.nativeEvent]) {
         const point = imagePoint(event);
         if (!point) continue;
-        current.stroke.points.push({ ...point, width: lineWidth(e.pointerType, event.pressure) });
-        drawOnCanvas((context) => drawSegment(context, current.stroke, current.stroke.points.length - 1));
+        stroke.points.push({ ...point, width: lineWidth(e.pointerType, event.pressure) });
+        drawOnCanvas((context) => drawSegment(context, stroke, stroke.points.length - 1));
       }
       return;
     }
@@ -291,6 +315,8 @@ export default function ImageLightbox({
     const current = drawing.current;
     if (current?.pointerId !== e.pointerId) return;
     drawing.current = null;
+    // A shape that was never dragged isn't one.
+    if (isShape(current.stroke.type) && current.stroke.points.length < 2) return;
     setStrokes((s) => [...s, current.stroke]);
   }
 
@@ -322,12 +348,13 @@ export default function ImageLightbox({
       </header>
       {editing && (
         <div role="toolbar" aria-label="Markup" className="flex flex-wrap items-center gap-2 border-b border-border-default px-5 py-1.5">
-          <Segment on={tool === "draw"} label="Pen: a stylus or the mouse draws" onClick={() => setTool("draw")}>
-            ✎ Pen
-          </Segment>
-          <Segment on={tool === "pan"} label="Move: a stylus or the mouse pans" onClick={() => setTool("pan")}>
-            ✥ Move
-          </Segment>
+          {TOOLS.map((t) => (
+            <Segment key={t.tool} on={tool === t.tool} label={t.label} onClick={() => setTool(t.tool)}>
+              <svg aria-hidden width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d={t.icon} />
+              </svg>
+            </Segment>
+          ))}
           <span aria-hidden className="mx-1 h-5 w-px bg-border-default" />
           {INKS.map((c) => (
             <button
@@ -338,7 +365,8 @@ export default function ImageLightbox({
               aria-pressed={ink === c.value}
               onClick={() => {
                 setInk(c.value);
-                setTool("draw");
+                // Ink is for drawing: picking one swaps Move or the eraser for the pen, but keeps a shape.
+                if (tool === "pan" || tool === "erase") setTool("draw");
               }}
               className={`h-6 w-6 rounded-full border-2 ${ink === c.value ? "border-text-primary" : "border-transparent"}`}
               style={{ background: c.value }}
@@ -383,7 +411,7 @@ export default function ImageLightbox({
       {error && <p className="px-5 pt-2 text-[13px] text-accent">{error}</p>}
       <div
         ref={stageRef}
-        className={`relative flex-1 touch-none select-none overflow-hidden ${editing && tool === "draw" ? "cursor-crosshair" : "cursor-grab active:cursor-grabbing"}`}
+        className={`relative flex-1 touch-none select-none overflow-hidden ${editing && tool !== "pan" ? "cursor-crosshair" : "cursor-grab active:cursor-grabbing"}`}
         onPointerDown={pointerDown}
         onPointerMove={pointerMove}
         onPointerUp={pointerUp}
@@ -443,35 +471,88 @@ export default function ImageLightbox({
 const midpoint = (a: Point, b: Point): Point => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
 const distance = (a: Point, b: Point) => Math.hypot(a.x - b.x, a.y - b.y);
 
-/** Draw a stroke's segment ending at its `i`th point, at that point's width. */
+/** The markup tools, with their icons (paths in a 16 × 16 box). */
+const TOOLS: { tool: Tool; label: string; icon: string }[] = [
+  { tool: "draw", label: "Pen: a stylus or the mouse draws", icon: "M10.5 2.5l3 3-8 8H2.5v-3z M8.5 4.5l3 3" },
+  { tool: "erase", label: "Eraser: a stylus or the mouse rubs out ink", icon: "M6 13.5h7.5 M2.8 9.7l6.5-6.5a1 1 0 0 1 1.4 0l2.6 2.6a1 1 0 0 1 0 1.4L7.6 13H5.1z M6 6.5l4 4" },
+  { tool: "line", label: "Line: drag to draw one", icon: "M3 13L13 3" },
+  { tool: "arrow", label: "Arrow: drag from its tail to its head", icon: "M3 13L13 3 M7 3h6v6" },
+  { tool: "rect", label: "Rectangle: drag across its corners", icon: "M2.5 4h11v8h-11z" },
+  { tool: "circle", label: "Ellipse: drag across its bounds", icon: "M14 8a6 4.5 0 1 1-12 0a6 4.5 0 1 1 12 0z" },
+  { tool: "pan", label: "Move: a stylus or the mouse pans", icon: "M8 1.5v13 M1.5 8h13 M6 3.5l2-2 2 2 M6 12.5l2 2 2-2 M3.5 6l-2 2 2 2 M12.5 6l2 2-2 2" },
+];
+
 /** Draw whole strokes, in image pixels. */
 function drawStrokes(context: CanvasRenderingContext2D, strokes: Stroke[]) {
   for (const stroke of strokes) {
-    for (let i = 1; i < stroke.points.length; i++) drawSegment(context, stroke, i);
-    if (stroke.points.length === 1) drawDot(context, stroke);
+    if (isShape(stroke.type)) drawShape(context, stroke);
+    else {
+      for (let i = 1; i < stroke.points.length; i++) drawSegment(context, stroke, i);
+      if (stroke.points.length === 1) drawDot(context, stroke);
+    }
   }
 }
 
+/** Set the context up to draw a stroke: in its ink, or, for the eraser's, rubbing ink out. Reset after with
+ * `globalCompositeOperation = "source-over"`. */
+function inkFor(context: CanvasRenderingContext2D, stroke: Stroke) {
+  context.globalCompositeOperation = stroke.type === "erase" ? "destination-out" : "source-over";
+  context.strokeStyle = stroke.color;
+  context.fillStyle = stroke.color;
+  context.lineCap = "round";
+  context.lineJoin = "round";
+}
+
+/** Draw a stroke's segment ending at its `i`th point, at that point's width. */
 function drawSegment(context: CanvasRenderingContext2D, stroke: Stroke, i: number) {
   const from = stroke.points[i - 1];
   const to = stroke.points[i];
-  context.strokeStyle = stroke.color;
+  inkFor(context, stroke);
   context.lineWidth = to.width;
-  context.lineCap = "round";
-  context.lineJoin = "round";
   context.beginPath();
   context.moveTo(from.x, from.y);
   context.lineTo(to.x, to.y);
   context.stroke();
+  context.globalCompositeOperation = "source-over";
 }
 
 /** Draw a stroke's first point: a tap leaves a dot. */
 function drawDot(context: CanvasRenderingContext2D, stroke: Stroke) {
   const { x, y, width } = stroke.points[0];
-  context.fillStyle = stroke.color;
+  inkFor(context, stroke);
   context.beginPath();
   context.arc(x, y, width / 2, 0, Math.PI * 2);
   context.fill();
+  context.globalCompositeOperation = "source-over";
+}
+
+/** Draw a shape, from its start point to its end. */
+function drawShape(context: CanvasRenderingContext2D, stroke: Stroke) {
+  const [start, end] = stroke.points;
+  if (!end) return;
+  inkFor(context, stroke);
+  context.lineWidth = start.width;
+  context.beginPath();
+  if (stroke.type === "rect") {
+    context.rect(start.x, start.y, end.x - start.x, end.y - start.y);
+  } else if (stroke.type === "circle") {
+    // The ellipse that fills the box the drag spans.
+    const center = midpoint(start, end);
+    context.ellipse(center.x, center.y, Math.abs(end.x - start.x) / 2, Math.abs(end.y - start.y) / 2, 0, 0, Math.PI * 2);
+  } else {
+    context.moveTo(start.x, start.y);
+    context.lineTo(end.x, end.y);
+    if (stroke.type === "arrow") {
+      // The head: a barb either side of the line, back from its end, sized to its width but at most half its length.
+      const angle = Math.atan2(end.y - start.y, end.x - start.x);
+      const head = Math.min(distance(start, end) / 2, start.width * 5);
+      for (const side of [-1, 1]) {
+        context.moveTo(end.x, end.y);
+        context.lineTo(end.x - head * Math.cos(angle + (side * Math.PI) / 6), end.y - head * Math.sin(angle + (side * Math.PI) / 6));
+      }
+    }
+  }
+  context.stroke();
 }
 
 function Segment({
