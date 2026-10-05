@@ -1,3 +1,4 @@
+import type { ImageOptions } from "@tiptap/extension-image";
 import { TaskItem, TaskList } from "@tiptap/extension-list";
 import { TableKit, TableView } from "@tiptap/extension-table";
 import TextAlign from "@tiptap/extension-text-align";
@@ -18,6 +19,7 @@ import StarterKit from "@tiptap/starter-kit";
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 
 import { errorDetail, message } from "../lib/api";
+import ImageLightbox, { ExpandButton } from "./ImageLightbox";
 import {
   ALIGNMENTS,
   AlignedBlocks,
@@ -41,8 +43,8 @@ import {
 /**
  * A rich-text editor over a note's title and markdown body (front-matter is kept by the backend), laid out like a
  * Confluence page: a sticky formatting toolbar across the page, then the title, `children` (the note's properties
- * and tasks), and the body in a centered text column, edited rendered and handed back as markdown. Pasted or dropped images are uploaded to the space.
- * Ctrl/Cmd+S saves.
+ * and tasks), and the body in a centered text column, edited rendered and handed back as markdown. Pasted or dropped images are uploaded to the space,
+ * and an image opens fullscreen to be marked up. Ctrl/Cmd+S saves.
  */
 export default function NoteEditor({
   spaceId,
@@ -91,6 +93,8 @@ export default function NoteEditor({
   }
   const insertImagesRef = useRef(insertImages);
   insertImagesRef.current = insertImages;
+  const uploadRef = useRef((file: File) => uploadImage(spaceId, file));
+  uploadRef.current = (file: File) => uploadImage(spaceId, file);
 
   const editor = useEditor({
     extensions: [
@@ -111,8 +115,9 @@ export default function NoteEditor({
       ColoredTableCell,
       ColoredTableHeader,
       // Inline, as markdown images are: `![](url)` sits in a paragraph, so saved notes parse back the same. Shown
-      // column-wide and centered, with handles to resize it to a layout column or the page (see noteFormatting).
-      ResizableImage.configure({ inline: true, allowBase64: false }),
+      // column-wide and centered, with handles to resize it to a layout column or the page (see noteFormatting). A
+      // marked-up image is uploaded as a new one.
+      ResizableImage.configure({ inline: true, allowBase64: false, upload: (file: File) => uploadRef.current(file) }),
       Markdown,
     ],
     // Parsed once: the editor owns the text from here, and NotePage remounts it for another note.
@@ -168,12 +173,15 @@ export default function NoteEditor({
   );
 }
 
-const ResizableImage = SizedImage.extend({
+const ResizableImage = SizedImage.extend<ImageOptions & { upload: ((file: File) => Promise<string>) | null }>({
+  addOptions() {
+    return { ...(this.parent?.() as ImageOptions), upload: null };
+  },
   addNodeView() {
     return ReactNodeViewRenderer(ImageView, {
       className: "note-image",
-      // The handles' drags are the view's own, not a node drag or a click for the editor.
-      stopEvent: ({ event }) => event.target instanceof Element && !!event.target.closest("[data-resize-handle]"),
+      // The handles' drags and the expand button's clicks are the view's own, not a node drag or a click for the editor.
+      stopEvent: ({ event }) => event.target instanceof Element && !!event.target.closest("[data-resize-handle], [data-image-expand]"),
     });
   },
 });
@@ -181,9 +189,10 @@ const ResizableImage = SizedImage.extend({
 /**
  * An image laid out like a Confluence one: centered at its width (a percentage of the text column, full by default)
  * and, when selected, with a handle on each side. Dragging one resizes it symmetrically, snapping to the layout
- * columns that fit the page and to its full width, which show as guide lines over it while it's dragged.
+ * columns that fit the page and to its full width, which show as guide lines over it while it's dragged. Double-click
+ * it, or its expand button on hover, to open it fullscreen, where it can be marked up while the note is editable.
  */
-function ImageView({ node, selected, editor, updateAttributes }: NodeViewProps) {
+function ImageView({ node, selected, editor, extension, updateAttributes }: NodeViewProps) {
   const { src, alt, title } = node.attrs as { src: string; alt: string | null; title: string | null };
   const width = (node.attrs.width as number | null) ?? 100;
   const [dragWidth, setDragWidth] = useState<number | null>(null);
@@ -191,7 +200,16 @@ function ImageView({ node, selected, editor, updateAttributes }: NodeViewProps) 
   const [snaps, setSnaps] = useState<number[]>([]);
   const columnRef = useRef<HTMLSpanElement>(null);
   const imageRef = useRef<HTMLSpanElement>(null);
+  const [expanded, setExpanded] = useState(false);
   const shown = dragWidth ?? width;
+  const upload = (extension.options as { upload: ((file: File) => Promise<string>) | null }).upload;
+
+  /** Store a marked-up copy of the image and show it in the note instead. */
+  async function saveMarkup(image: Blob) {
+    if (!upload) return;
+    const stored = await upload(new File([image], "markup.png", { type: "image/png" }));
+    updateAttributes({ src: stored });
+  }
 
   function startResize(event: ReactPointerEvent, side: -1 | 1) {
     const column = columnRef.current?.getBoundingClientRect().width;
@@ -230,14 +248,16 @@ function ImageView({ node, selected, editor, updateAttributes }: NodeViewProps) 
           )),
         )}
       </span>
-      <span ref={imageRef} className="note-media relative block" style={{ "--media-scale": shown / 100 } as CSSProperties}>
+      <span ref={imageRef} className="note-media group relative block" style={{ "--media-scale": shown / 100 } as CSSProperties}>
         <img
           src={src}
           alt={alt ?? ""}
           title={title ?? undefined}
           draggable={false}
+          onDoubleClick={() => setExpanded(true)}
           className={selected ? "outline outline-2 outline-accent" : undefined}
         />
+        {dragWidth === null && <ExpandButton onClick={() => setExpanded(true)} />}
         {selected && editor.isEditable && (
           <>
             <ResizeHandle side={-1} onPointerDown={(e) => startResize(e, -1)} />
@@ -246,6 +266,15 @@ function ImageView({ node, selected, editor, updateAttributes }: NodeViewProps) 
         )}
         {dragWidth !== null && <span className="media-width-label">{widthLabel(dragWidth)}</span>}
       </span>
+      {expanded && (
+        <ImageLightbox
+          src={src}
+          alt={alt}
+          title={title}
+          onClose={() => setExpanded(false)}
+          onSave={editor.isEditable && upload ? saveMarkup : undefined}
+        />
+      )}
     </NodeViewWrapper>
   );
 }
