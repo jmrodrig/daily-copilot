@@ -7,7 +7,6 @@ import { Markdown } from "@tiptap/markdown";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import type { EditorView } from "@tiptap/pm/view";
 import {
-  BubbleMenu,
   EditorContent,
   NodeViewWrapper,
   ReactNodeViewRenderer,
@@ -16,6 +15,7 @@ import {
   type Editor,
   type NodeViewProps,
 } from "@tiptap/react";
+import { BubbleMenu } from "@tiptap/react/menus";
 import StarterKit from "@tiptap/starter-kit";
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 
