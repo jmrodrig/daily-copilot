@@ -1,8 +1,9 @@
 import { TaskItem, TaskList } from "@tiptap/extension-list";
-import { TableKit } from "@tiptap/extension-table";
+import { TableKit, TableView } from "@tiptap/extension-table";
 import TextAlign from "@tiptap/extension-text-align";
 import { Color } from "@tiptap/extension-text-style";
 import { Markdown } from "@tiptap/markdown";
+import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import type { EditorView } from "@tiptap/pm/view";
 import {
   EditorContent,
@@ -14,7 +15,7 @@ import {
   type NodeViewProps,
 } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
-import { useEffect, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 
 import { errorDetail, message } from "../lib/api";
 import {
@@ -26,15 +27,21 @@ import {
   ColoredTableCell,
   ColoredTableHeader,
   ColoredTextStyle,
-  IMAGE_WIDTHS,
+  NOTE_COLUMN,
   SizedImage,
+  guideOffsets,
+  mediaStyle,
+  mediaWidth,
+  nearestWidth,
+  snapWidths,
+  widthLabel,
   type Alignment,
 } from "./noteFormatting";
 
 /**
  * A rich-text editor over a note's title and markdown body (front-matter is kept by the backend), laid out like a
- * Confluence page: a sticky formatting toolbar, then the title, `children` (the note's properties and tasks), and
- * the body, edited rendered and handed back as markdown. Pasted or dropped images are uploaded to the space.
+ * Confluence page: a sticky formatting toolbar across the page, then the title, `children` (the note's properties
+ * and tasks), and the body in a centered text column, edited rendered and handed back as markdown. Pasted or dropped images are uploaded to the space.
  * Ctrl/Cmd+S saves.
  */
 export default function NoteEditor({
@@ -97,13 +104,14 @@ export default function NoteEditor({
       Color,
       TaskList,
       TaskItem.configure({ nested: true }),
-      // The table and its cells are swapped for ones that save cell colors (see noteFormatting).
+      // The table and its cells are swapped for ones that save cell colors and the table's width (see
+      // noteFormatting), shown with a handle to resize it (`WideTableView`).
       TableKit.configure({ table: false, tableCell: false, tableHeader: false }),
-      ColoredTable.configure({ resizable: true, cellMinWidth: 60 }),
+      ColoredTable.configure({ resizable: true, cellMinWidth: 60, View: WideTableView }),
       ColoredTableCell,
       ColoredTableHeader,
       // Inline, as markdown images are: `![](url)` sits in a paragraph, so saved notes parse back the same. Shown
-      // full width and centered, with handles to resize it to a layout column (see noteFormatting).
+      // column-wide and centered, with handles to resize it to a layout column or the page (see noteFormatting).
       ResizableImage.configure({ inline: true, allowBase64: false }),
       Markdown,
     ],
@@ -146,7 +154,7 @@ export default function NoteEditor({
   return (
     <div className="flex flex-col">
       <Toolbar editor={editor} status={uploads > 0 ? `Uploading ${uploads > 1 ? `${uploads} images` : "image"}…` : null} />
-      {uploadError && <p className="pt-3 text-[13px] text-accent">{uploadError}</p>}
+      {uploadError && <p className={`${NOTE_COLUMN} pt-3 text-[13px] text-accent`}>{uploadError}</p>}
       <TitleInput
         value={title}
         onChange={onTitleChange}
@@ -154,7 +162,7 @@ export default function NoteEditor({
         onSave={() => onSaveRef.current()}
         onDone={() => editor?.commands.focus("start")}
       />
-      {children && <div className="flex flex-col gap-5 pt-5">{children}</div>}
+      {children && <div className={`${NOTE_COLUMN} flex flex-col gap-5 pt-5`}>{children}</div>}
       <EditorContent editor={editor} className="pt-4" />
     </div>
   );
@@ -171,28 +179,34 @@ const ResizableImage = SizedImage.extend({
 });
 
 /**
- * An image laid out like a Confluence one: centered at its width (a percentage of the page, full by default) and,
- * when selected, with a handle on each side. Dragging one resizes it symmetrically, snapping to the layout columns
- * of `IMAGE_WIDTHS`, which show as guide lines over the page while it's dragged.
+ * An image laid out like a Confluence one: centered at its width (a percentage of the text column, full by default)
+ * and, when selected, with a handle on each side. Dragging one resizes it symmetrically, snapping to the layout
+ * columns that fit the page and to its full width, which show as guide lines over it while it's dragged.
  */
 function ImageView({ node, selected, editor, updateAttributes }: NodeViewProps) {
   const { src, alt, title } = node.attrs as { src: string; alt: string | null; title: string | null };
   const width = (node.attrs.width as number | null) ?? 100;
   const [dragWidth, setDragWidth] = useState<number | null>(null);
-  const pageRef = useRef<HTMLSpanElement>(null);
+  // Kept after a drag, so the guides fade out where they were.
+  const [snaps, setSnaps] = useState<number[]>([]);
+  const columnRef = useRef<HTMLSpanElement>(null);
   const imageRef = useRef<HTMLSpanElement>(null);
   const shown = dragWidth ?? width;
 
   function startResize(event: ReactPointerEvent, side: -1 | 1) {
-    const page = pageRef.current?.getBoundingClientRect().width;
+    const column = columnRef.current?.getBoundingClientRect().width;
+    const canvas = columnRef.current?.closest(".note-body")?.clientWidth;
     const start = imageRef.current?.getBoundingClientRect().width;
-    if (!page || !start) return;
+    if (!column || !canvas || !start) return;
     event.preventDefault();
+    const widths = snapWidths(column, canvas);
+    setSnaps(widths);
+    setDragWidth(width);
     const startX = event.clientX;
     let snapped = width;
     // Centered, so each side moves by the drag: the width changes by twice it.
     const move = (e: PointerEvent) => {
-      snapped = nearestWidth(((start + side * 2 * (e.clientX - startX)) / page) * 100);
+      snapped = nearestWidth(((start + side * 2 * (e.clientX - startX)) / column) * 100, widths, (canvas / column) * 100);
       setDragWidth(snapped);
     };
     const end = () => {
@@ -200,7 +214,7 @@ function ImageView({ node, selected, editor, updateAttributes }: NodeViewProps) 
       window.removeEventListener("pointerup", end);
       window.removeEventListener("pointercancel", end);
       setDragWidth(null);
-      if (snapped !== width) updateAttributes({ width: snapped === 100 ? null : snapped });
+      if (snapped !== width) updateAttributes({ width: mediaWidth(snapped) });
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", end);
@@ -208,22 +222,15 @@ function ImageView({ node, selected, editor, updateAttributes }: NodeViewProps) 
   }
 
   return (
-    <NodeViewWrapper as="span" ref={pageRef} className="relative my-3 block">
-      <span
-        aria-hidden
-        className={`pointer-events-none absolute -inset-y-2 inset-x-0 transition-opacity duration-150 ${dragWidth === null ? "opacity-0" : "opacity-100"}`}
-      >
-        {IMAGE_WIDTHS.flatMap((w) =>
-          [(100 - w) / 2, (100 + w) / 2].map((x) => (
-            <span
-              key={`${w}-${x}`}
-              className={`absolute inset-y-0 w-px ${w === shown ? "bg-accent" : "bg-text-muted/40"}`}
-              style={{ left: `${x}%` }}
-            />
+    <NodeViewWrapper as="span" ref={columnRef} className="relative my-3 block">
+      <span aria-hidden className={`media-guides ${dragWidth === null ? "" : "dragging"}`}>
+        {snaps.flatMap((w) =>
+          guideOffsets(w).map((left) => (
+            <span key={`${w}-${left}`} className={`media-guide ${w === shown ? "on" : ""}`} style={{ left }} />
           )),
         )}
       </span>
-      <span ref={imageRef} className="relative mx-auto block" style={{ width: `${shown}%` }}>
+      <span ref={imageRef} className="note-media relative block" style={{ "--media-scale": shown / 100 } as CSSProperties}>
         <img
           src={src}
           alt={alt ?? ""}
@@ -237,20 +244,123 @@ function ImageView({ node, selected, editor, updateAttributes }: NodeViewProps) 
             <ResizeHandle side={1} onPointerDown={(e) => startResize(e, 1)} />
           </>
         )}
-        {dragWidth !== null && (
-          <span className="absolute left-1/2 top-2 -translate-x-1/2 rounded bg-background/90 px-1.5 py-0.5 font-mono text-[11px] text-text-primary">
-            {dragWidth}%
-          </span>
-        )}
+        {dragWidth !== null && <span className="media-width-label">{widthLabel(dragWidth)}</span>}
       </span>
     </NodeViewWrapper>
   );
 }
 
-/** The snap width nearest a dragged one. */
-function nearestWidth(percent: number): number {
-  return IMAGE_WIDTHS.reduce<number>((best, w) => (Math.abs(w - percent) < Math.abs(best - percent) ? w : best), 100);
+/**
+ * The table's view in the editor, around prosemirror-tables' (which resizes its columns): the table sits in a
+ * `note-media` box at its width, centered on the text column, with a handle on its right edge on hover. Dragging it
+ * resizes the table symmetrically, snapping to the layout columns that fit the page and to its full width, shown as
+ * guide lines while it's dragged, as an image's are.
+ */
+class WideTableView extends TableView {
+  view: EditorView;
+  media: HTMLDivElement;
+  guides: HTMLDivElement;
+  label: HTMLSpanElement;
+
+  constructor(node: ProseMirrorNode, cellMinWidth: number, view: EditorView) {
+    super(node, cellMinWidth, view);
+    this.view = view;
+    const wrapper = this.dom;
+    this.dom = document.createElement("div");
+    this.dom.className = "note-table";
+    this.guides = this.dom.appendChild(document.createElement("div"));
+    this.guides.className = "media-guides";
+    this.guides.setAttribute("aria-hidden", "true");
+    this.media = this.dom.appendChild(document.createElement("div"));
+    this.media.className = "note-media relative";
+    this.media.append(wrapper);
+    const handle = this.media.appendChild(document.createElement("span"));
+    handle.dataset.resizeHandle = "";
+    handle.setAttribute("role", "separator");
+    handle.setAttribute("aria-label", "Resize the table");
+    handle.className = `table-width-handle ${HANDLE_CLASS} -right-3`;
+    handle.addEventListener("pointerdown", (e) => this.startResize(e));
+    this.label = document.createElement("span");
+    this.label.className = "media-width-label";
+    this.showWidth(this.width());
+  }
+
+  update(node: ProseMirrorNode) {
+    if (!super.update(node)) return false;
+    this.showWidth(this.width());
+    return true;
+  }
+
+  // The handle's drags are the view's own, not a selection for the editor.
+  stopEvent(event: Event) {
+    return event.target instanceof Element && !!event.target.closest("[data-resize-handle]");
+  }
+
+  width(): number {
+    return (this.node.attrs.width as number | null) ?? 100;
+  }
+
+  showWidth(width: number) {
+    this.media.setAttribute("style", mediaStyle(width));
+  }
+
+  startResize(event: PointerEvent) {
+    const column = this.dom.getBoundingClientRect().width;
+    const canvas = this.view.dom.clientWidth;
+    const start = this.media.getBoundingClientRect().width;
+    if (!this.view.editable || !column || !start) return;
+    event.preventDefault();
+    const width = this.width();
+    const widths = snapWidths(column, canvas);
+    const lines = widths.flatMap((w) =>
+      guideOffsets(w).map((left) => {
+        const line = document.createElement("span");
+        line.className = "media-guide";
+        line.style.left = left;
+        return { w, line };
+      }),
+    );
+    const show = (w: number) => {
+      this.showWidth(w);
+      for (const line of lines) line.line.classList.toggle("on", line.w === w);
+      this.label.textContent = widthLabel(w);
+    };
+    this.guides.replaceChildren(...lines.map(({ line }) => line));
+    this.guides.classList.add("dragging");
+    this.dom.classList.add("resizing");
+    this.media.append(this.label);
+    show(width);
+    const startX = event.clientX;
+    let snapped = width;
+    // Centered, so the right edge moves by the drag and the width by twice it.
+    const move = (e: PointerEvent) => {
+      snapped = nearestWidth(((start + 2 * (e.clientX - startX)) / column) * 100, widths, (canvas / column) * 100);
+      show(snapped);
+    };
+    const end = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", end);
+      window.removeEventListener("pointercancel", end);
+      this.guides.classList.remove("dragging");
+      this.dom.classList.remove("resizing");
+      this.label.remove();
+      this.showWidth(width);
+      if (snapped === width) return;
+      // The view isn't given its position (prosemirror-tables makes it), so find the table it shows.
+      let pos = -1;
+      this.view.state.doc.descendants((n, p) => {
+        if (n === this.node) pos = p;
+        return pos < 0;
+      });
+      if (pos >= 0) this.view.dispatch(this.view.state.tr.setNodeMarkup(pos, undefined, { ...this.node.attrs, width: mediaWidth(snapped) }));
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", end);
+    window.addEventListener("pointercancel", end);
+  }
 }
+
+const HANDLE_CLASS = "absolute top-1/2 h-10 w-2 -translate-y-1/2 cursor-ew-resize rounded-full border border-background bg-accent";
 
 function ResizeHandle({ side, onPointerDown }: { side: -1 | 1; onPointerDown: (event: ReactPointerEvent) => void }) {
   return (
@@ -259,9 +369,7 @@ function ResizeHandle({ side, onPointerDown }: { side: -1 | 1; onPointerDown: (e
       role="separator"
       aria-label={side < 0 ? "Resize from the left" : "Resize from the right"}
       onPointerDown={onPointerDown}
-      className={`absolute top-1/2 h-10 w-2 -translate-y-1/2 cursor-ew-resize rounded-full border border-background bg-accent ${
-        side < 0 ? "-left-1" : "-right-1"
-      }`}
+      className={`${HANDLE_CLASS} ${side < 0 ? "-left-1" : "-right-1"}`}
     />
   );
 }
@@ -307,7 +415,7 @@ function TitleInput({
           onSave();
         }
       }}
-      className="mt-5 block w-full resize-none overflow-hidden bg-transparent text-[32px] font-semibold leading-tight text-text-primary placeholder:text-text-muted focus:outline-none"
+      className={`${NOTE_COLUMN} mt-5 block resize-none overflow-hidden bg-transparent text-[32px] font-semibold leading-tight text-text-primary placeholder:text-text-muted focus:outline-none`}
     />
   );
 }

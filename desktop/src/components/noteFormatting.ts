@@ -36,11 +36,26 @@ import { defaultSchema, type Options as SanitizeSchema } from "rehype-sanitize";
  * which the editor reads back onto the cell (`ColoredTable`) and the read-only view lifts onto the `<td>`
  * (`liftCellColors`), so the whole cell is tinted. Other markdown renderers just highlight the text.
  *
- * Images fill the page width, centered, as plain `![alt](url)`. One resized to a narrower layout column is saved as
- * an `<img>` with its width as a percentage, centered the same way:
+ * Images fill the text column, centered, as plain `![alt](url)`. One resized is saved as an `<img>` with its width
+ * as a percentage of the column, centered the same way:
  *
  *   <img src="/api/notes/image/1/shot.png" alt="" width="50%" style="display: block; margin: 0 auto" />
+ *
+ * A resized table keeps the GFM table, wrapped in a div with its width (the blank lines keep the table markdown):
+ *
+ *   <div style="width: 150%">
+ *
+ *   | a | b |
+ *   | - | - |
+ *
+ *   </div>
+ *
+ * Widths over 100% break out of the text column, up to the page's full width: `FULL_WIDTH` is wider than any page,
+ * so it always fills it. Both views lay them out with the `note-media` class (see index.css and `layoutMedia`).
  */
+
+/** The text column a note's title, properties and body sit in, centered on the page (see `.note-body` in index.css). */
+export const NOTE_COLUMN = "mx-auto w-full max-w-4xl";
 
 export const ALIGNMENTS = ["left", "center", "right"] as const;
 export type Alignment = (typeof ALIGNMENTS)[number];
@@ -140,11 +155,91 @@ export const ColoredTableHeader = TableHeader.extend({
   },
 });
 
+/** The layout columns, in percent of the text column, an image or table snaps to when resized; 100 is the default. */
+export const MEDIA_WIDTHS = [25, 50, 75, 100, 125, 150, 200] as const;
+/** The page's full width: wider than any page, and clamped to it when laid out. */
+export const FULL_WIDTH = 400;
+
+/** A width in percent other than the column's (a whole 1–`FULL_WIDTH`), or `null`: the column's width. */
+export function mediaWidth(value: unknown): number | null {
+  const width = Number(value);
+  return Number.isInteger(width) && width >= 1 && width <= FULL_WIDTH && width !== 100 ? width : null;
+}
+
+/**
+ * The widths a resize snaps to on a page `canvas` pixels wide, with a text column `column` pixels wide: the columns
+ * of `MEDIA_WIDTHS` that fit, then the full width if the page is any wider than the column.
+ */
+export function snapWidths(column: number, canvas: number): number[] {
+  const max = (canvas / column) * 100;
+  const widths: number[] = MEDIA_WIDTHS.filter((w) => w <= 100 || w < max - 5);
+  return max > 105 ? [...widths, FULL_WIDTH] : widths;
+}
+
+/** The snap width nearest a dragged one, both in percent of a column of which the page is `max` percent. */
+export function nearestWidth(percent: number, widths: number[], max: number): number {
+  const distance = (w: number) => Math.abs(Math.min(w, max) - percent);
+  return widths.reduce((best, w) => (distance(w) < distance(best) ? w : best), 100);
+}
+
+/** Where a snap width's guide lines sit, from the left of the column; the full width's are at the page's edges. */
+export function guideOffsets(width: number): [string, string] {
+  return width === FULL_WIDTH ? ["calc(50% - 50cqw)", "calc(50% + 50cqw)"] : [`${(100 - width) / 2}%`, `${(100 + width) / 2}%`];
+}
+
+export const widthLabel = (width: number) => (width === FULL_WIDTH ? "Full width" : `${width}%`);
+
+/** The `note-media` box's width, as a scale of its column (see index.css). */
+export const mediaStyle = (width: number) => `--media-scale: ${width / 100}`;
+
+const SIZED_TABLE = /^<div style="width: ?(\d{1,3})%;?">\n+([\s\S]*?)\n+<\/div>(?:\n+|$)/;
+
+/** Reads a resized table's width div back (see the top) onto the table inside. */
+const SizedTableBlocks = Extension.create({
+  name: "sizedTableBlocks",
+  markdownTokenName: "sizedTable",
+  markdownTokenizer: {
+    name: "sizedTable",
+    level: "block",
+    start: (src: string) => src.indexOf("<div style="),
+    tokenize(src, _tokens, lexer) {
+      const match = SIZED_TABLE.exec(src);
+      const width = match && mediaWidth(match[1]);
+      if (!match || !width) return undefined;
+      return { type: "sizedTable", raw: match[0], width, tokens: lexer.blockTokens(match[2]) };
+    },
+  },
+  parseMarkdown: (token, h) =>
+    h
+      .parseChildren(token.tokens ?? [])
+      .map((node) => (node.type === "table" ? { ...node, attrs: { ...node.attrs, width: token.width } } : node)),
+});
+
 type CellToken = { tokens?: MarkdownToken[]; align?: unknown; color?: string };
 type TableToken = MarkdownToken & { header?: CellToken[]; rows?: CellToken[][] };
 
-/** A table whose cells keep their color in markdown, wrapped in a background-colored span (see the top). */
+/**
+ * A table whose cells keep their color in markdown, wrapped in a background-colored span, and with a `width` (a
+ * percentage of the text column, `null` for the column's), saved as a width div (see the top). Its resize handle is
+ * a node view, added by the editor.
+ */
 export const ColoredTable = Table.extend({
+  addExtensions() {
+    return [SizedTableBlocks];
+  },
+  addAttributes() {
+    return {
+      ...this.parent?.(),
+      width: {
+        default: null,
+        parseHTML: (element: HTMLElement) => mediaWidth(element.getAttribute("data-width")),
+        renderHTML: (attrs: Record<string, unknown>) => {
+          const width = mediaWidth(attrs.width);
+          return width ? { "data-width": String(width) } : {};
+        },
+      },
+    };
+  },
   renderMarkdown(node, h, ctx) {
     // The GFM renderer renders each cell's content through `renderChildren`: all of it at once or, for several
     // paragraphs (joined with <br>), one at a time. The span goes around what it renders for a colored cell.
@@ -171,7 +266,9 @@ export const ColoredTable = Table.extend({
         return wrap ? `${wrap.open}${markdown}${wrap.close}` : markdown;
       },
     };
-    return this.parent?.(node, helpers, ctx) ?? "";
+    const markdown = this.parent?.(node, helpers, ctx) ?? "";
+    const width = mediaWidth(node.attrs?.width);
+    return width ? `<div style="width: ${width}%">\n\n${markdown.trim()}\n\n</div>` : markdown;
   },
   parseMarkdown(token, h) {
     // A colored cell lexes as an opening and a closing html tag around its content: unwrap it, then color the cells
@@ -230,22 +327,13 @@ function liftCellColor(cell: Element) {
   cell.children = span.children;
 }
 
-/** The layout columns, in percent of the page, an image snaps to when resized; full width is the default. */
-export const IMAGE_WIDTHS = [25, 50, 75, 100] as const;
-
 const IMAGE_STYLE = "display: block; margin: 0 auto";
-const IMAGE_WIDTH = /^(\d{1,2})%$/;
-const SIZED_IMAGE = /^<img src="([^"<>]*)" alt="([^"<>]*)"(?: title="([^"<>]*)")? width="(\d{1,2})%" style="display: block; margin: 0 auto" ?\/?>/;
+const IMAGE_WIDTH = /^(\d{1,3})%$/;
+const SIZED_IMAGE = /^<img src="([^"<>]*)" alt="([^"<>]*)"(?: title="([^"<>]*)")? width="(\d{1,3})%" style="display: block; margin: 0 auto" ?\/?>/;
 /** One or more resized images alone on a line, which markdown would take for a block of raw HTML. */
 const IMAGES_LINE = String.raw`(?:${SIZED_IMAGE.source.slice(1)}[ \t]*)+`;
 const SIZED_IMAGE_LINE = new RegExp(String.raw`^${IMAGES_LINE}(?:\n+|$)`);
 const ANY_SIZED_IMAGE_LINE = new RegExp(String.raw`^${IMAGES_LINE}$`, "m");
-
-/** A width in percent narrower than the page (a whole 1–99), or `null`: full width. */
-function imageWidth(value: unknown): number | null {
-  const width = Number(value);
-  return Number.isInteger(width) && width >= 1 && width < 100 ? width : null;
-}
 
 const attribute = (value: unknown) => encodeHtmlEntities(String(value ?? "")).replace(/"/g, "&quot;");
 
@@ -259,7 +347,7 @@ const SizedImageTags = Extension.create({
     start: (src: string) => src.indexOf("<img src="),
     tokenize(src) {
       const match = SIZED_IMAGE.exec(src);
-      const width = match && imageWidth(match[4]);
+      const width = match && mediaWidth(match[4]);
       if (!match || !width) return undefined;
       const [href, text, title] = match.slice(1, 4).map((value) => (value === undefined ? undefined : decodeHtmlEntities(value)));
       return { type: "sizedImage", raw: match[0], href, text, title, width };
@@ -288,8 +376,8 @@ const SizedImageLines = Extension.create({
 });
 
 /**
- * The image node with a `width` (a percentage of the page, `null` for the full width), saved as an `<img>` tag when
- * it's narrower (see the top). Its resize handles are a node view, added by the editor.
+ * The image node with a `width` (a percentage of the text column, `null` for the column's), saved as an `<img>` tag
+ * when it's resized (see the top). Its resize handles are a node view, added by the editor.
  */
 export const SizedImage = Image.extend({
   addExtensions() {
@@ -300,9 +388,9 @@ export const SizedImage = Image.extend({
       ...this.parent?.(),
       width: {
         default: null,
-        parseHTML: (element: HTMLElement) => imageWidth(IMAGE_WIDTH.exec(element.getAttribute("width") ?? "")?.[1]),
+        parseHTML: (element: HTMLElement) => mediaWidth(IMAGE_WIDTH.exec(element.getAttribute("width") ?? "")?.[1]),
         renderHTML: (attrs: Record<string, unknown>) => {
-          const width = imageWidth(attrs.width);
+          const width = mediaWidth(attrs.width);
           return width ? { width: `${width}%`, style: IMAGE_STYLE } : {};
         },
       },
@@ -310,7 +398,7 @@ export const SizedImage = Image.extend({
     };
   },
   renderMarkdown(node, h, ctx) {
-    const width = imageWidth(node.attrs?.width);
+    const width = mediaWidth(node.attrs?.width);
     if (!width) return this.parent?.(node, h, ctx) ?? "";
     const { src, alt, title } = node.attrs ?? {};
     return `<img src="${attribute(src)}" alt="${attribute(alt)}"${title ? ` title="${attribute(title)}"` : ""} width="${width}%" style="${IMAGE_STYLE}" />`;
@@ -319,16 +407,47 @@ export const SizedImage = Image.extend({
 
 const CSS_COLOR = String.raw`(#[0-9a-f]{3,8}|rgba?\([\d\s.,%]+\))`;
 const CELL_STYLE = new RegExp(`^background-color: ?${CSS_COLOR};?$`, "i");
+const WIDTH_STYLE = /^width: ?(\d{1,3})%;?$/;
 
-/** The sanitizer schema for rendering notes: GitHub's defaults, plus the colors, alignment divs and image sizes above. */
+/** The sanitizer schema for rendering notes: GitHub's defaults, plus the colors, alignment and width divs and image sizes above. */
 export const NOTE_HTML_SCHEMA: SanitizeSchema = {
   ...defaultSchema,
   attributes: {
     ...defaultSchema.attributes,
     span: [...(defaultSchema.attributes?.span ?? []), ["style", new RegExp(`^(background-)?color: ?${CSS_COLOR};?$`, "i")]],
-    div: [...(defaultSchema.attributes?.div ?? []), ["style", /^text-align: ?(left|center|right);?$/]],
+    div: [...(defaultSchema.attributes?.div ?? []), ["style", /^(text-align: ?(left|center|right)|width: ?\d{1,3}%);?$/]],
     td: [...(defaultSchema.attributes?.td ?? []), ["style", CELL_STYLE]],
     th: [...(defaultSchema.attributes?.th ?? []), ["style", CELL_STYLE]],
     img: [...(defaultSchema.attributes?.img ?? []), ["width", IMAGE_WIDTH], ["style", IMAGE_STYLE]],
   },
 };
+
+/**
+ * A rehype plugin for the read-only view, laying resized images and tables out as the editor does (see index.css): a
+ * resized image takes the `note-media` class at its width, and a table's width div becomes a column-wide
+ * `note-table` holding a `note-media` box at its width. It runs after the sanitizer, so the widths are ones it let
+ * through.
+ */
+export function layoutMedia() {
+  return (tree: Root) => {
+    const visit = (node: Root | Element) => {
+      node.children.forEach((child, i) => {
+        if (child.type !== "element") return;
+        if (child.tagName === "img") {
+          const width = mediaWidth(IMAGE_WIDTH.exec(String(child.properties.width ?? ""))?.[1]);
+          if (width) child.properties = { ...child.properties, width: undefined, className: ["note-media"], style: mediaStyle(width) };
+        } else if (child.tagName === "div") {
+          const width = mediaWidth(WIDTH_STYLE.exec(String(child.properties.style ?? ""))?.[1]);
+          if (width) {
+            const media: Element = { type: "element", tagName: "div", properties: { className: ["note-media"], style: mediaStyle(width) }, children: child.children };
+            node.children[i] = { type: "element", tagName: "div", properties: { className: ["note-table"] }, children: [media] };
+            visit(media);
+            return;
+          }
+        }
+        visit(child);
+      });
+    };
+    visit(tree);
+  };
+}
