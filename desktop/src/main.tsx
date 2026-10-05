@@ -4,14 +4,17 @@ import { BrowserRouter } from "react-router-dom";
 
 import App from "./App";
 import { SpaceProvider } from "./lib/space";
+import { ErrorBoundary } from "./ErrorBoundary";
 import "./index.css";
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <BrowserRouter>
-      <SpaceProvider>
-        <App />
-      </SpaceProvider>
-    </BrowserRouter>
+    <ErrorBoundary>
+      <BrowserRouter>
+        <SpaceProvider>
+          <App />
+        </SpaceProvider>
+      </BrowserRouter>
+    </ErrorBoundary>
   </StrictMode>,
 );
