@@ -188,7 +188,7 @@ export default function NotePage() {
             <>
               {details}
               <article className="note-body markdown text-sm leading-relaxed text-text-secondary">
-                {/* Inline HTML carries text and cell colors and alignment; anything else in it is stripped. */}
+                {/* Inline HTML carries text and cell colors, alignment and image sizes; anything else in it is stripped. */}
                 <Markdown
                   remarkPlugins={[remarkGfm]}
                   rehypePlugins={[rehypeRaw, [rehypeSanitize, NOTE_HTML_SCHEMA], liftCellColors]}

@@ -1,5 +1,13 @@
-import { Extension, type JSONContent, type MarkdownRendererHelpers, type MarkdownToken } from "@tiptap/core";
+import {
+  Extension,
+  decodeHtmlEntities,
+  encodeHtmlEntities,
+  type JSONContent,
+  type MarkdownRendererHelpers,
+  type MarkdownToken,
+} from "@tiptap/core";
 import Heading from "@tiptap/extension-heading";
+import Image from "@tiptap/extension-image";
 import Paragraph from "@tiptap/extension-paragraph";
 import { Table, TableCell, TableHeader } from "@tiptap/extension-table";
 import { TextStyle } from "@tiptap/extension-text-style";
@@ -27,6 +35,11 @@ import { defaultSchema, type Options as SanitizeSchema } from "rehype-sanitize";
  *
  * which the editor reads back onto the cell (`ColoredTable`) and the read-only view lifts onto the `<td>`
  * (`liftCellColors`), so the whole cell is tinted. Other markdown renderers just highlight the text.
+ *
+ * Images fill the page width, centered, as plain `![alt](url)`. One resized to a narrower layout column is saved as
+ * an `<img>` with its width as a percentage, centered the same way:
+ *
+ *   <img src="/api/notes/image/1/shot.png" alt="" width="50%" style="display: block; margin: 0 auto" />
  */
 
 export const ALIGNMENTS = ["left", "center", "right"] as const;
@@ -217,10 +230,97 @@ function liftCellColor(cell: Element) {
   cell.children = span.children;
 }
 
+/** The layout columns, in percent of the page, an image snaps to when resized; full width is the default. */
+export const IMAGE_WIDTHS = [25, 50, 75, 100] as const;
+
+const IMAGE_STYLE = "display: block; margin: 0 auto";
+const IMAGE_WIDTH = /^(\d{1,2})%$/;
+const SIZED_IMAGE = /^<img src="([^"<>]*)" alt="([^"<>]*)"(?: title="([^"<>]*)")? width="(\d{1,2})%" style="display: block; margin: 0 auto" ?\/?>/;
+/** One or more resized images alone on a line, which markdown would take for a block of raw HTML. */
+const IMAGES_LINE = String.raw`(?:${SIZED_IMAGE.source.slice(1)}[ \t]*)+`;
+const SIZED_IMAGE_LINE = new RegExp(String.raw`^${IMAGES_LINE}(?:\n+|$)`);
+const ANY_SIZED_IMAGE_LINE = new RegExp(String.raw`^${IMAGES_LINE}$`, "m");
+
+/** A width in percent narrower than the page (a whole 1–99), or `null`: full width. */
+function imageWidth(value: unknown): number | null {
+  const width = Number(value);
+  return Number.isInteger(width) && width >= 1 && width < 100 ? width : null;
+}
+
+const attribute = (value: unknown) => encodeHtmlEntities(String(value ?? "")).replace(/"/g, "&quot;");
+
+/** Reads a resized image's `<img>` tag back (see the top) within a line of text. */
+const SizedImageTags = Extension.create({
+  name: "sizedImageTags",
+  markdownTokenName: "sizedImage",
+  markdownTokenizer: {
+    name: "sizedImage",
+    level: "inline",
+    start: (src: string) => src.indexOf("<img src="),
+    tokenize(src) {
+      const match = SIZED_IMAGE.exec(src);
+      const width = match && imageWidth(match[4]);
+      if (!match || !width) return undefined;
+      const [href, text, title] = match.slice(1, 4).map((value) => (value === undefined ? undefined : decodeHtmlEntities(value)));
+      return { type: "sizedImage", raw: match[0], href, text, title, width };
+    },
+  },
+  parseMarkdown: (token, h) =>
+    h.createNode("image", { src: token.href, alt: token.text || null, title: token.title || null, width: token.width }),
+});
+
+/** Reads back a line of nothing but resized images as the paragraph holding them (they're inline, as `![]()` is). */
+const SizedImageLines = Extension.create({
+  name: "sizedImageLines",
+  markdownTokenName: "sizedImageLine",
+  markdownTokenizer: {
+    name: "sizedImageLine",
+    level: "block",
+    // Only such a line ends the paragraph before it: an image within a line of text is the inline tokenizer's.
+    start: (src: string) => src.search(ANY_SIZED_IMAGE_LINE),
+    tokenize(src, _tokens, lexer) {
+      const match = SIZED_IMAGE_LINE.exec(src);
+      if (!match) return undefined;
+      return { type: "sizedImageLine", raw: match[0], tokens: lexer.inlineTokens(match[0].trim()) };
+    },
+  },
+  parseMarkdown: (token, h) => h.createNode("paragraph", null, h.parseInline(token.tokens ?? [])),
+});
+
+/**
+ * The image node with a `width` (a percentage of the page, `null` for the full width), saved as an `<img>` tag when
+ * it's narrower (see the top). Its resize handles are a node view, added by the editor.
+ */
+export const SizedImage = Image.extend({
+  addExtensions() {
+    return [SizedImageTags, SizedImageLines];
+  },
+  addAttributes() {
+    return {
+      ...this.parent?.(),
+      width: {
+        default: null,
+        parseHTML: (element: HTMLElement) => imageWidth(IMAGE_WIDTH.exec(element.getAttribute("width") ?? "")?.[1]),
+        renderHTML: (attrs: Record<string, unknown>) => {
+          const width = imageWidth(attrs.width);
+          return width ? { width: `${width}%`, style: IMAGE_STYLE } : {};
+        },
+      },
+      height: { default: null, rendered: false },
+    };
+  },
+  renderMarkdown(node, h, ctx) {
+    const width = imageWidth(node.attrs?.width);
+    if (!width) return this.parent?.(node, h, ctx) ?? "";
+    const { src, alt, title } = node.attrs ?? {};
+    return `<img src="${attribute(src)}" alt="${attribute(alt)}"${title ? ` title="${attribute(title)}"` : ""} width="${width}%" style="${IMAGE_STYLE}" />`;
+  },
+});
+
 const CSS_COLOR = String.raw`(#[0-9a-f]{3,8}|rgba?\([\d\s.,%]+\))`;
 const CELL_STYLE = new RegExp(`^background-color: ?${CSS_COLOR};?$`, "i");
 
-/** The sanitizer schema for rendering notes: GitHub's defaults, plus the colors and alignment divs above. */
+/** The sanitizer schema for rendering notes: GitHub's defaults, plus the colors, alignment divs and image sizes above. */
 export const NOTE_HTML_SCHEMA: SanitizeSchema = {
   ...defaultSchema,
   attributes: {
@@ -229,5 +329,6 @@ export const NOTE_HTML_SCHEMA: SanitizeSchema = {
     div: [...(defaultSchema.attributes?.div ?? []), ["style", /^text-align: ?(left|center|right);?$/]],
     td: [...(defaultSchema.attributes?.td ?? []), ["style", CELL_STYLE]],
     th: [...(defaultSchema.attributes?.th ?? []), ["style", CELL_STYLE]],
+    img: [...(defaultSchema.attributes?.img ?? []), ["width", IMAGE_WIDTH], ["style", IMAGE_STYLE]],
   },
 };

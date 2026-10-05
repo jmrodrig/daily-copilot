@@ -1,13 +1,20 @@
-import Image from "@tiptap/extension-image";
 import { TaskItem, TaskList } from "@tiptap/extension-list";
 import { TableKit } from "@tiptap/extension-table";
 import TextAlign from "@tiptap/extension-text-align";
 import { Color } from "@tiptap/extension-text-style";
 import { Markdown } from "@tiptap/markdown";
 import type { EditorView } from "@tiptap/pm/view";
-import { EditorContent, useEditor, useEditorState, type Editor } from "@tiptap/react";
+import {
+  EditorContent,
+  NodeViewWrapper,
+  ReactNodeViewRenderer,
+  useEditor,
+  useEditorState,
+  type Editor,
+  type NodeViewProps,
+} from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 
 import { errorDetail, message } from "../lib/api";
 import {
@@ -19,6 +26,8 @@ import {
   ColoredTableCell,
   ColoredTableHeader,
   ColoredTextStyle,
+  IMAGE_WIDTHS,
+  SizedImage,
   type Alignment,
 } from "./noteFormatting";
 
@@ -93,8 +102,9 @@ export default function NoteEditor({
       ColoredTable.configure({ resizable: true, cellMinWidth: 60 }),
       ColoredTableCell,
       ColoredTableHeader,
-      // Inline, as markdown images are: `![](url)` sits in a paragraph, so saved notes parse back the same.
-      Image.configure({ inline: true, allowBase64: false }),
+      // Inline, as markdown images are: `![](url)` sits in a paragraph, so saved notes parse back the same. Shown
+      // full width and centered, with handles to resize it to a layout column (see noteFormatting).
+      ResizableImage.configure({ inline: true, allowBase64: false }),
       Markdown,
     ],
     // Parsed once: the editor owns the text from here, and NotePage remounts it for another note.
@@ -147,6 +157,112 @@ export default function NoteEditor({
       {children && <div className="flex flex-col gap-5 pt-5">{children}</div>}
       <EditorContent editor={editor} className="pt-4" />
     </div>
+  );
+}
+
+const ResizableImage = SizedImage.extend({
+  addNodeView() {
+    return ReactNodeViewRenderer(ImageView, {
+      className: "note-image",
+      // The handles' drags are the view's own, not a node drag or a click for the editor.
+      stopEvent: ({ event }) => event.target instanceof Element && !!event.target.closest("[data-resize-handle]"),
+    });
+  },
+});
+
+/**
+ * An image laid out like a Confluence one: centered at its width (a percentage of the page, full by default) and,
+ * when selected, with a handle on each side. Dragging one resizes it symmetrically, snapping to the layout columns
+ * of `IMAGE_WIDTHS`, which show as guide lines over the page while it's dragged.
+ */
+function ImageView({ node, selected, editor, updateAttributes }: NodeViewProps) {
+  const { src, alt, title } = node.attrs as { src: string; alt: string | null; title: string | null };
+  const width = (node.attrs.width as number | null) ?? 100;
+  const [dragWidth, setDragWidth] = useState<number | null>(null);
+  const pageRef = useRef<HTMLSpanElement>(null);
+  const imageRef = useRef<HTMLSpanElement>(null);
+  const shown = dragWidth ?? width;
+
+  function startResize(event: ReactPointerEvent, side: -1 | 1) {
+    const page = pageRef.current?.getBoundingClientRect().width;
+    const start = imageRef.current?.getBoundingClientRect().width;
+    if (!page || !start) return;
+    event.preventDefault();
+    const startX = event.clientX;
+    let snapped = width;
+    // Centered, so each side moves by the drag: the width changes by twice it.
+    const move = (e: PointerEvent) => {
+      snapped = nearestWidth(((start + side * 2 * (e.clientX - startX)) / page) * 100);
+      setDragWidth(snapped);
+    };
+    const end = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", end);
+      window.removeEventListener("pointercancel", end);
+      setDragWidth(null);
+      if (snapped !== width) updateAttributes({ width: snapped === 100 ? null : snapped });
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", end);
+    window.addEventListener("pointercancel", end);
+  }
+
+  return (
+    <NodeViewWrapper as="span" ref={pageRef} className="relative my-3 block">
+      <span
+        aria-hidden
+        className={`pointer-events-none absolute -inset-y-2 inset-x-0 transition-opacity duration-150 ${dragWidth === null ? "opacity-0" : "opacity-100"}`}
+      >
+        {IMAGE_WIDTHS.flatMap((w) =>
+          [(100 - w) / 2, (100 + w) / 2].map((x) => (
+            <span
+              key={`${w}-${x}`}
+              className={`absolute inset-y-0 w-px ${w === shown ? "bg-accent" : "bg-text-muted/40"}`}
+              style={{ left: `${x}%` }}
+            />
+          )),
+        )}
+      </span>
+      <span ref={imageRef} className="relative mx-auto block" style={{ width: `${shown}%` }}>
+        <img
+          src={src}
+          alt={alt ?? ""}
+          title={title ?? undefined}
+          draggable={false}
+          className={selected ? "outline outline-2 outline-accent" : undefined}
+        />
+        {selected && editor.isEditable && (
+          <>
+            <ResizeHandle side={-1} onPointerDown={(e) => startResize(e, -1)} />
+            <ResizeHandle side={1} onPointerDown={(e) => startResize(e, 1)} />
+          </>
+        )}
+        {dragWidth !== null && (
+          <span className="absolute left-1/2 top-2 -translate-x-1/2 rounded bg-background/90 px-1.5 py-0.5 font-mono text-[11px] text-text-primary">
+            {dragWidth}%
+          </span>
+        )}
+      </span>
+    </NodeViewWrapper>
+  );
+}
+
+/** The snap width nearest a dragged one. */
+function nearestWidth(percent: number): number {
+  return IMAGE_WIDTHS.reduce<number>((best, w) => (Math.abs(w - percent) < Math.abs(best - percent) ? w : best), 100);
+}
+
+function ResizeHandle({ side, onPointerDown }: { side: -1 | 1; onPointerDown: (event: ReactPointerEvent) => void }) {
+  return (
+    <span
+      data-resize-handle
+      role="separator"
+      aria-label={side < 0 ? "Resize from the left" : "Resize from the right"}
+      onPointerDown={onPointerDown}
+      className={`absolute top-1/2 h-10 w-2 -translate-y-1/2 cursor-ew-resize rounded-full border border-background bg-accent ${
+        side < 0 ? "-left-1" : "-right-1"
+      }`}
+    />
   );
 }
 
