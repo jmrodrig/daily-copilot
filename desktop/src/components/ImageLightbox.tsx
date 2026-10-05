@@ -29,6 +29,9 @@ const SIZES = [2, 4, 8];
 /** The markup canvas's limits, in device pixels: a larger one fails to allocate (and draws nothing) or eats memory. */
 const MAX_CANVAS_SIDE = 16384;
 const MAX_CANVAS_AREA = 4096 * 4096;
+/** A saved markup's longest side, in pixels, beyond which it isn't scaled up: each save reloads the image it saved,
+ * so scaling it up every time would grow it without end. */
+const MAX_SAVE_SIDE = 4096;
 
 /**
  * A note's image, fullscreen: dragged to pan and zoomed with the wheel, a pinch or the footer's controls. Given
@@ -108,19 +111,32 @@ export default function ImageLightbox({
   /** Save the strokes onto the image (if there are any), handing it to `onSave`; whether it went (or there were none). */
   async function save(): Promise<boolean> {
     const image = imageRef.current;
-    const canvas = canvasRef.current;
-    if (!strokes.length || !onSave || !image || !canvas || !size) return true;
+    if (!strokes.length || !onSave || !image || !size) return true;
     setSaving(true);
     setError(null);
     try {
+      // At the screen's density, so the ink stays sharp on it however small the image is, but not past
+      // MAX_SAVE_SIDE (unless the image already is) or the canvas's limits.
+      const saveScale = Math.max(
+        1,
+        Math.min(
+          window.devicePixelRatio || 1,
+          MAX_SAVE_SIDE / Math.max(size.width, size.height),
+          MAX_CANVAS_SIDE / Math.max(size.width, size.height),
+          Math.sqrt(MAX_CANVAS_AREA / (size.width * size.height)),
+        ),
+      );
       const merged = document.createElement("canvas");
-      merged.width = size.width;
-      merged.height = size.height;
+      merged.width = Math.max(1, Math.round(size.width * saveScale));
+      merged.height = Math.max(1, Math.round(size.height * saveScale));
       const context = merged.getContext("2d");
       if (!context) throw new Error("no canvas");
-      context.drawImage(image, 0, 0, size.width, size.height);
-      // The canvas is at the screen's resolution: scaled down onto the image's.
-      context.drawImage(canvas, 0, 0, size.width, size.height);
+      context.imageSmoothingQuality = "high";
+      context.drawImage(image, 0, 0, merged.width, merged.height);
+      // The strokes are redrawn at the merged canvas's resolution, not copied from the screen's canvas, whose
+      // resolution follows the zoom.
+      context.scale(merged.width / size.width, merged.height / size.height);
+      drawStrokes(context, strokes);
       // An image from another site taints the canvas, which then can't be read back.
       const blob = await new Promise<Blob>((resolve, reject) =>
         merged.toBlob((b) => (b ? resolve(b) : reject(new Error("the image could not be encoded"))), "image/png"),
@@ -187,10 +203,7 @@ export default function ImageLightbox({
     context.clearRect(0, 0, canvas.width, canvas.height);
     context.scale(canvas.width / size.width, canvas.height / size.height);
     // The stroke being drawn too: a pinch can zoom mid-stroke.
-    for (const stroke of drawing.current ? [...strokes, drawing.current.stroke] : strokes) {
-      for (let i = 1; i < stroke.points.length; i++) drawSegment(context, stroke, i);
-      if (stroke.points.length === 1) drawDot(context, stroke);
-    }
+    drawStrokes(context, drawing.current ? [...strokes, drawing.current.stroke] : strokes);
   }, [strokes, size, markup, canvasWidth, canvasHeight]);
 
   /** Draw on the canvas straight away, in image pixels. */
@@ -431,6 +444,14 @@ const midpoint = (a: Point, b: Point): Point => ({ x: (a.x + b.x) / 2, y: (a.y +
 const distance = (a: Point, b: Point) => Math.hypot(a.x - b.x, a.y - b.y);
 
 /** Draw a stroke's segment ending at its `i`th point, at that point's width. */
+/** Draw whole strokes, in image pixels. */
+function drawStrokes(context: CanvasRenderingContext2D, strokes: Stroke[]) {
+  for (const stroke of strokes) {
+    for (let i = 1; i < stroke.points.length; i++) drawSegment(context, stroke, i);
+    if (stroke.points.length === 1) drawDot(context, stroke);
+  }
+}
+
 function drawSegment(context: CanvasRenderingContext2D, stroke: Stroke, i: number) {
   const from = stroke.points[i - 1];
   const to = stroke.points[i];
