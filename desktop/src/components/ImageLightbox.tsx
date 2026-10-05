@@ -6,13 +6,18 @@ import { message } from "../lib/api";
 /** The view: the image's scale (1 is its natural size) and its center's offset from the stage's, in screen pixels. */
 type View = { zoom: number; x: number; y: number };
 type Point = { x: number; y: number };
-type Tool = "draw" | "pan" | "erase" | "line" | "arrow" | "rect" | "circle";
+type Tool = "draw" | "pan" | "erase" | "lasso-erase" | "line" | "arrow" | "rect" | "circle" | "text";
+type Eraser = "erase" | "lasso-erase";
 /** A markup stroke, in image pixels; each point carries its line width, which follows the pen's pressure. A freehand
- * one ("draw", or "erase", which rubs out the ink under it) has a point for each the pointer passed; a shape has two,
- * where its drag started and where it is (or ended). */
-type Stroke = { type: Exclude<Tool, "pan">; color: string; points: (Point & { width: number })[] };
+ * one ("draw", "erase", which rubs out the ink under it, or "lasso-erase", which rubs out all the ink inside the loop
+ * it traces) has a point for each the pointer passed; a shape has two, where its drag started and where it is (or
+ * ended); a text has one, its top left, whose width is its font size. */
+type Stroke = { type: Exclude<Tool, "pan">; color: string; points: (Point & { width: number })[]; text?: string };
+/** A text being typed: where it goes, in image pixels, its font size, in them too, its ink and what's typed so far. */
+type TextEntry = Point & { size: number; color: string; value: string };
 
 const isShape = (type: Tool) => type === "line" || type === "arrow" || type === "rect" || type === "circle";
+const isEraser = (type: Tool): type is Eraser => type === "erase" || type === "lasso-erase";
 
 const MIN_ZOOM = 0.05;
 const MAX_ZOOM = 8;
@@ -30,6 +35,10 @@ const INKS = [
 ];
 /** Line widths, in screen pixels at the zoom a stroke is drawn at. */
 const SIZES = [2, 4, 8];
+/** A text's font size, in screen pixels at the zoom it's placed at, for each line width. */
+const textSize = (lineSize: number) => 8 + lineSize * 4;
+/** A text's font, at a size in pixels. */
+const textFont = (size: number) => `600 ${size}px system-ui, sans-serif`;
 /** The markup canvas's limits, in device pixels: a larger one fails to allocate (and draws nothing) or eats memory. */
 const MAX_CANVAS_SIDE = 16384;
 const MAX_CANVAS_AREA = 4096 * 4096;
@@ -65,6 +74,14 @@ export default function ImageLightbox({
   viewRef.current = view;
   const [markup, setMarkup] = useState(false);
   const [tool, setTool] = useState<Tool>("draw");
+  const toolRef = useRef(tool);
+  toolRef.current = tool;
+  // The eraser the toolbar's eraser button (and Shift) picks, and whether its menu, to pick the other, is open.
+  const [eraser, setEraser] = useState<Eraser>("lasso-erase");
+  const eraserRef = useRef(eraser);
+  eraserRef.current = eraser;
+  const [eraserMenu, setEraserMenu] = useState(false);
+  const eraserMenuRef = useRef<HTMLSpanElement>(null);
   const [ink, setInk] = useState(INKS[0].value);
   const [lineSize, setLineSize] = useState(SIZES[1]);
   const [strokes, setStrokes] = useState<Stroke[]>([]);
@@ -74,6 +91,13 @@ export default function ImageLightbox({
   const pointers = useRef(new Map<number, Point>());
   // The stroke being drawn, and the pointer drawing it.
   const drawing = useRef<{ pointerId: number; stroke: Stroke } | null>(null);
+  // The text being typed, if one is; the ref is cleared as soon as it's finished, so it's only finished once.
+  const [textEntry, setTextEntry] = useState<TextEntry | null>(null);
+  const textEntryRef = useRef(textEntry);
+  textEntryRef.current = textEntry;
+  const textInputRef = useRef<HTMLInputElement>(null);
+  // The tool Shift swapped for the eraser, while it's held.
+  const shiftFrom = useRef<Tool | null>(null);
 
   // The markup canvas's device pixels per image pixel: enough for the screen at the current zoom, so strokes stay
   // sharp when zoomed in, within the canvas's limits.
@@ -171,25 +195,98 @@ export default function ImageLightbox({
   }
 
   function cancelMarkup() {
+    cancelText();
     setStrokes([]);
     setError(null);
     setMarkup(false);
   }
 
-  // The latest `close`, for the key handler.
-  const closeRef = useRef(close);
-  closeRef.current = close;
+  /** Escape: drop the text being typed, or close the eraser's menu, or else the lightbox. */
+  function escape() {
+    if (textEntryRef.current) cancelText();
+    else if (eraserMenu) setEraserMenu(false);
+    else void close();
+  }
+
+  // The latest `escape`, for the key handler.
+  const escapeRef = useRef(escape);
+  escapeRef.current = escape;
   useEffect(() => {
     const keydown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.preventDefault();
         e.stopPropagation();
-        void closeRef.current();
+        escapeRef.current();
       }
     };
     window.addEventListener("keydown", keydown, true);
     return () => window.removeEventListener("keydown", keydown, true);
   }, []);
+
+  const editing = markup && !!onSave;
+
+  // Holding Shift in markup swaps the tool for the eraser, and letting go swaps it back (unless another was picked
+  // meanwhile). Not while typing, where Shift is for capitals.
+  useEffect(() => {
+    if (!editing) return;
+    const typing = (target: EventTarget | null) =>
+      target instanceof HTMLElement && (target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName));
+    const release = () => {
+      const from = shiftFrom.current;
+      shiftFrom.current = null;
+      if (from && isEraser(toolRef.current)) setTool(from);
+    };
+    const keydown = (e: KeyboardEvent) => {
+      if (e.key !== "Shift" || e.repeat || shiftFrom.current || typing(e.target) || isEraser(toolRef.current)) return;
+      shiftFrom.current = toolRef.current;
+      setTool(eraserRef.current);
+    };
+    const keyup = (e: KeyboardEvent) => e.key === "Shift" && release();
+    window.addEventListener("keydown", keydown);
+    window.addEventListener("keyup", keyup);
+    // Shift let go in another window never comes up here.
+    window.addEventListener("blur", release);
+    return () => {
+      window.removeEventListener("keydown", keydown);
+      window.removeEventListener("keyup", keyup);
+      window.removeEventListener("blur", release);
+      release();
+    };
+  }, [editing]);
+
+  // The eraser's menu closes on a click outside it.
+  useEffect(() => {
+    if (!eraserMenu) return;
+    const outside = (e: PointerEvent) => {
+      if (!eraserMenuRef.current?.contains(e.target as Node)) setEraserMenu(false);
+    };
+    window.addEventListener("pointerdown", outside, true);
+    return () => window.removeEventListener("pointerdown", outside, true);
+  }, [eraserMenu]);
+
+  // A text's field takes the focus once the click that placed it is done: the click's own mousedown would blur it.
+  const textAt = textEntry && `${textEntry.x},${textEntry.y}`;
+  useEffect(() => {
+    if (!textAt) return;
+    const timer = setTimeout(() => textInputRef.current?.focus());
+    return () => clearTimeout(timer);
+  }, [textAt]);
+
+  /** Finish the text being typed: kept as a stroke, unless it's blank. */
+  function commitText() {
+    const entry = textEntryRef.current;
+    if (!entry) return;
+    textEntryRef.current = null;
+    setTextEntry(null);
+    if (entry.value.trim()) {
+      setStrokes((s) => [...s, { type: "text", color: entry.color, points: [{ x: entry.x, y: entry.y, width: entry.size }], text: entry.value }]);
+    }
+  }
+
+  function cancelText() {
+    textEntryRef.current = null;
+    setTextEntry(null);
+  }
 
   // React's wheel listener is passive, so it can't keep the page from scrolling: the stage's own is added here.
   useEffect(() => {
@@ -208,7 +305,7 @@ export default function ImageLightbox({
   useLayoutEffect(redraw, [strokes, size, markup, canvasWidth, canvasHeight]);
 
   /** Redraw the canvas whole, with the stroke being drawn too: a pinch can zoom mid-stroke, and a shape's drag moves
-   * its end. */
+   * its end. A lasso being drawn shows as its outline, and erases once it's done. */
   function redraw() {
     const canvas = canvasRef.current;
     const context = canvas?.getContext("2d");
@@ -216,7 +313,10 @@ export default function ImageLightbox({
     context.resetTransform();
     context.clearRect(0, 0, canvas.width, canvas.height);
     context.scale(canvas.width / size.width, canvas.height / size.height);
-    drawStrokes(context, drawing.current ? [...strokes, drawing.current.stroke] : strokes);
+    const current = drawing.current?.stroke;
+    const lasso = current?.type === "lasso-erase";
+    drawStrokes(context, current && !lasso ? [...strokes, current] : strokes);
+    if (current && lasso) drawLassoOutline(context, current, view.zoom);
   }
 
   /** Draw on the canvas straight away, in image pixels. */
@@ -243,9 +343,9 @@ export default function ImageLightbox({
   }
 
   /** A stroke's width in image pixels: the line size on screen at the current zoom, thickened by a pen's pressure
-   * (but for a shape, whose line is even). */
+   * for the pen and the stroke eraser (a shape's line, and a lasso's, is even). */
   const lineWidth = (pointerType: string, pressure: number) =>
-    (lineSize / view.zoom) * (pointerType === "pen" && !isShape(tool) ? 0.5 + (pressure || 0.5) : 1);
+    (lineSize / view.zoom) * (pointerType === "pen" && (tool === "draw" || tool === "erase") ? 0.5 + (pressure || 0.5) : 1);
 
   function pointerDown(e: ReactPointerEvent) {
     if (e.button !== 0 && e.pointerType === "mouse") return;
@@ -254,11 +354,17 @@ export default function ImageLightbox({
     if (draws(e)) {
       const point = imagePoint(e);
       if (!point || drawing.current || tool === "pan") return;
+      if (tool === "text") {
+        // A click places a text, or, while one's being typed, just finishes it.
+        if (textEntryRef.current) commitText();
+        else setTextEntry({ ...point, size: textSize(lineSize) / view.zoom, color: ink, value: "" });
+        return;
+      }
       const width = lineWidth(e.pointerType, e.pressure);
       const stroke: Stroke = { type: tool, color: ink, points: [{ ...point, width }] };
       drawing.current = { pointerId: e.pointerId, stroke };
-      // A shape shows once it's dragged.
-      if (!isShape(tool)) drawOnCanvas((context) => drawDot(context, stroke));
+      // A shape shows once it's dragged, and a lasso once it's drawn out.
+      if (!isShape(tool) && tool !== "lasso-erase") drawOnCanvas((context) => drawDot(context, stroke));
       return;
     }
     pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
@@ -278,12 +384,15 @@ export default function ImageLightbox({
       }
       // A pen reports more points than it fires events for; they're all drawn, for a smooth line.
       const events = e.nativeEvent.getCoalescedEvents?.() ?? [];
+      const lasso = stroke.type === "lasso-erase";
       for (const event of events.length ? events : [e.nativeEvent]) {
         const point = imagePoint(event);
         if (!point) continue;
         stroke.points.push({ ...point, width: lineWidth(e.pointerType, event.pressure) });
-        drawOnCanvas((context) => drawSegment(context, stroke, stroke.points.length - 1));
+        if (!lasso) drawOnCanvas((context) => drawSegment(context, stroke, stroke.points.length - 1));
       }
+      // A lasso's outline is dashed, so it's redrawn whole rather than a segment at a time.
+      if (lasso) redraw();
       return;
     }
     const last = pointers.current.get(e.pointerId);
@@ -315,12 +424,13 @@ export default function ImageLightbox({
     const current = drawing.current;
     if (current?.pointerId !== e.pointerId) return;
     drawing.current = null;
-    // A shape that was never dragged isn't one.
+    // A shape that was never dragged isn't one, nor is a lasso that encloses nothing (which still needs its
+    // outline cleared).
     if (isShape(current.stroke.type) && current.stroke.points.length < 2) return;
+    if (current.stroke.type === "lasso-erase" && current.stroke.points.length < 3) return redraw();
     setStrokes((s) => [...s, current.stroke]);
   }
 
-  const editing = markup && !!onSave;
   const heading = title || alt || name;
 
   return createPortal(
@@ -348,13 +458,58 @@ export default function ImageLightbox({
       </header>
       {editing && (
         <div role="toolbar" aria-label="Markup" className="flex flex-wrap items-center gap-2 border-b border-border-default px-5 py-1.5">
-          {TOOLS.map((t) => (
-            <Segment key={t.tool} on={tool === t.tool} label={t.label} onClick={() => setTool(t.tool)}>
-              <svg aria-hidden width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-                <path d={t.icon} />
-              </svg>
-            </Segment>
-          ))}
+          {TOOLS.map((t) =>
+            !isEraser(t.tool) ? (
+              <Segment key={t.tool} on={tool === t.tool} label={t.label} onClick={() => setTool(t.tool)}>
+                <ToolIcon path={t.icon} />
+              </Segment>
+            ) : (
+              // The erasers share a split button: the eraser last picked, and a menu to pick the other.
+              t.tool === eraser && (
+                <span key="eraser" ref={eraserMenuRef} className="relative flex items-center">
+                  <Segment on={tool === t.tool} label={`${t.label} (or hold Shift)`} onClick={() => setTool(t.tool)}>
+                    <ToolIcon path={t.icon} />
+                  </Segment>
+                  <button
+                    type="button"
+                    title="Choose the eraser"
+                    aria-label="Choose the eraser"
+                    aria-haspopup="menu"
+                    aria-expanded={eraserMenu}
+                    onClick={() => setEraserMenu((open) => !open)}
+                    className="flex h-8 w-4 items-center justify-center rounded text-text-muted hover:bg-surface-raised hover:text-text-primary"
+                  >
+                    <svg aria-hidden width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M1.5 3l2.5 2.5L6.5 3" />
+                    </svg>
+                  </button>
+                  {eraserMenu && (
+                    <div role="menu" aria-label="Eraser" className="absolute left-0 top-full z-20 mt-1 min-w-[200px] rounded-lg border border-border-light bg-surface-raised py-1 shadow-xl">
+                      {ERASERS.map((e) => (
+                        <button
+                          key={e.tool}
+                          type="button"
+                          role="menuitemradio"
+                          aria-checked={eraser === e.tool}
+                          onClick={() => {
+                            setEraser(e.tool);
+                            setTool(e.tool);
+                            setEraserMenu(false);
+                          }}
+                          className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-[13px] hover:bg-surface-hover hover:text-text-primary focus:bg-surface-hover focus:outline-none ${
+                            eraser === e.tool ? "text-accent-soft" : "text-text-secondary"
+                          }`}
+                        >
+                          <ToolIcon path={e.icon} />
+                          {e.name}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </span>
+              )
+            ),
+          )}
           <span aria-hidden className="mx-1 h-5 w-px bg-border-default" />
           {INKS.map((c) => (
             <button
@@ -365,8 +520,8 @@ export default function ImageLightbox({
               aria-pressed={ink === c.value}
               onClick={() => {
                 setInk(c.value);
-                // Ink is for drawing: picking one swaps Move or the eraser for the pen, but keeps a shape.
-                if (tool === "pan" || tool === "erase") setTool("draw");
+                // Ink is for drawing: picking one swaps Move or an eraser for the pen, but keeps a shape or text.
+                if (tool === "pan" || isEraser(tool)) setTool("draw");
               }}
               className={`h-6 w-6 rounded-full border-2 ${ink === c.value ? "border-text-primary" : "border-transparent"}`}
               style={{ background: c.value }}
@@ -411,7 +566,9 @@ export default function ImageLightbox({
       {error && <p className="px-5 pt-2 text-[13px] text-accent">{error}</p>}
       <div
         ref={stageRef}
-        className={`relative flex-1 touch-none select-none overflow-hidden ${editing && tool !== "pan" ? "cursor-crosshair" : "cursor-grab active:cursor-grabbing"}`}
+        className={`relative flex-1 touch-none select-none overflow-hidden ${
+          editing && tool === "text" ? "cursor-text" : editing && tool !== "pan" ? "cursor-crosshair" : "cursor-grab active:cursor-grabbing"
+        }`}
         onPointerDown={pointerDown}
         onPointerMove={pointerMove}
         onPointerUp={pointerUp}
@@ -443,6 +600,35 @@ export default function ImageLightbox({
           {editing && size && (
             <canvas ref={canvasRef} width={canvasWidth} height={canvasHeight} className="absolute inset-0 h-full w-full" />
           )}
+          {editing && textEntry && (
+            // In image pixels, like the canvas, so it zooms with the image and its text sits where it's drawn.
+            <input
+              ref={textInputRef}
+              aria-label="Text"
+              value={textEntry.value}
+              onChange={(e) => setTextEntry({ ...textEntry, value: e.target.value })}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  commitText();
+                }
+              }}
+              onBlur={commitText}
+              // Typing and selecting in it isn't drawing on the stage.
+              onPointerDown={(e) => e.stopPropagation()}
+              className="absolute m-0 select-text border-0 bg-transparent p-0"
+              style={{
+                left: textEntry.x,
+                top: textEntry.y,
+                font: textFont(textEntry.size),
+                lineHeight: 1,
+                color: textEntry.color,
+                width: textWidth(textEntry.value, textEntry.size) + textEntry.size,
+                outline: `${1.5 / view.zoom}px dashed currentColor`,
+                outlineOffset: 2 / view.zoom,
+              }}
+            />
+          )}
         </div>
       </div>
       <footer className="flex items-center justify-center gap-1 border-t border-border-default px-5 py-1.5">
@@ -471,14 +657,31 @@ export default function ImageLightbox({
 const midpoint = (a: Point, b: Point): Point => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
 const distance = (a: Point, b: Point) => Math.hypot(a.x - b.x, a.y - b.y);
 
+/** The erasers, which share a split button in the toolbar, with their icons (paths in a 16 × 16 box). */
+const ERASERS: { tool: Eraser; name: string; label: string; icon: string }[] = [
+  {
+    tool: "lasso-erase",
+    name: "Lasso eraser",
+    label: "Lasso eraser: loop around ink to rub it out",
+    icon: "M8 2.5c3.3 0 5.5 1.6 5.5 3.6S11.3 9.7 8 9.7 2.5 8.1 2.5 6.1 4.7 2.5 8 2.5z M5.2 9.2c-.9.9-.8 2.4.3 3 .9.5 1.4 1 1.2 2.3",
+  },
+  {
+    tool: "erase",
+    name: "Stroke eraser",
+    label: "Stroke eraser: a stylus or the mouse rubs out ink",
+    icon: "M6 13.5h7.5 M2.8 9.7l6.5-6.5a1 1 0 0 1 1.4 0l2.6 2.6a1 1 0 0 1 0 1.4L7.6 13H5.1z M6 6.5l4 4",
+  },
+];
+
 /** The markup tools, with their icons (paths in a 16 × 16 box). */
 const TOOLS: { tool: Tool; label: string; icon: string }[] = [
   { tool: "draw", label: "Pen: a stylus or the mouse draws", icon: "M10.5 2.5l3 3-8 8H2.5v-3z M8.5 4.5l3 3" },
-  { tool: "erase", label: "Eraser: a stylus or the mouse rubs out ink", icon: "M6 13.5h7.5 M2.8 9.7l6.5-6.5a1 1 0 0 1 1.4 0l2.6 2.6a1 1 0 0 1 0 1.4L7.6 13H5.1z M6 6.5l4 4" },
+  ...ERASERS,
   { tool: "line", label: "Line: drag to draw one", icon: "M3 13L13 3" },
   { tool: "arrow", label: "Arrow: drag from its tail to its head", icon: "M3 13L13 3 M7 3h6v6" },
   { tool: "rect", label: "Rectangle: drag across its corners", icon: "M2.5 4h11v8h-11z" },
   { tool: "circle", label: "Ellipse: drag across its bounds", icon: "M14 8a6 4.5 0 1 1-12 0a6 4.5 0 1 1 12 0z" },
+  { tool: "text", label: "Text: click to type some", icon: "M3 4.5V3h10v1.5 M8 3v10 M6 13h4" },
   { tool: "pan", label: "Move: a stylus or the mouse pans", icon: "M8 1.5v13 M1.5 8h13 M6 3.5l2-2 2 2 M6 12.5l2 2 2-2 M3.5 6l-2 2 2 2 M12.5 6l2 2-2 2" },
 ];
 
@@ -486,6 +689,8 @@ const TOOLS: { tool: Tool; label: string; icon: string }[] = [
 function drawStrokes(context: CanvasRenderingContext2D, strokes: Stroke[]) {
   for (const stroke of strokes) {
     if (isShape(stroke.type)) drawShape(context, stroke);
+    else if (stroke.type === "lasso-erase") drawLasso(context, stroke);
+    else if (stroke.type === "text") drawText(context, stroke);
     else {
       for (let i = 1; i < stroke.points.length; i++) drawSegment(context, stroke, i);
       if (stroke.points.length === 1) drawDot(context, stroke);
@@ -526,6 +731,56 @@ function drawDot(context: CanvasRenderingContext2D, stroke: Stroke) {
   context.globalCompositeOperation = "source-over";
 }
 
+/** Trace a lasso's loop, closed. */
+function traceLasso(context: CanvasRenderingContext2D, stroke: Stroke) {
+  context.beginPath();
+  stroke.points.forEach(({ x, y }, i) => (i ? context.lineTo(x, y) : context.moveTo(x, y)));
+  context.closePath();
+}
+
+/** Rub out the ink inside a lasso's loop, and under its line, so the loop's edge goes cleanly too. */
+function drawLasso(context: CanvasRenderingContext2D, stroke: Stroke) {
+  if (stroke.points.length < 3) return;
+  inkFor(context, stroke);
+  context.lineWidth = stroke.points[0].width;
+  traceLasso(context, stroke);
+  context.fill();
+  context.stroke();
+  context.globalCompositeOperation = "source-over";
+}
+
+/** Outline a lasso being drawn: dashed black on white, so it shows on any ink or image, and thin at any `zoom`. */
+function drawLassoOutline(context: CanvasRenderingContext2D, stroke: Stroke, zoom: number) {
+  context.save();
+  context.lineWidth = 1.5 / zoom;
+  context.lineJoin = "round";
+  traceLasso(context, stroke);
+  context.strokeStyle = "#ffffff";
+  context.stroke();
+  context.setLineDash([4 / zoom, 4 / zoom]);
+  context.strokeStyle = "#111111";
+  context.stroke();
+  context.restore();
+}
+
+/** Draw a text, from its top left, at its font size. */
+function drawText(context: CanvasRenderingContext2D, stroke: Stroke) {
+  const { x, y, width: size } = stroke.points[0];
+  inkFor(context, stroke);
+  context.font = textFont(size);
+  context.textBaseline = "top";
+  context.fillText(stroke.text ?? "", x, y);
+}
+
+/** A text's width, in the pixels its size is in. */
+let measure: CanvasRenderingContext2D | null = null;
+function textWidth(text: string, size: number): number {
+  measure ??= document.createElement("canvas").getContext("2d");
+  if (!measure) return text.length * size;
+  measure.font = textFont(size);
+  return measure.measureText(text).width;
+}
+
 /** Draw a shape, from its start point to its end. */
 function drawShape(context: CanvasRenderingContext2D, stroke: Stroke) {
   const [start, end] = stroke.points;
@@ -553,6 +808,15 @@ function drawShape(context: CanvasRenderingContext2D, stroke: Stroke) {
     }
   }
   context.stroke();
+}
+
+/** A tool's icon: a path in a 16 × 16 box. */
+function ToolIcon({ path }: { path: string }) {
+  return (
+    <svg aria-hidden width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <path d={path} />
+    </svg>
+  );
 }
 
 function Segment({
