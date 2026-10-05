@@ -5,6 +5,7 @@ import TextAlign from "@tiptap/extension-text-align";
 import { Color } from "@tiptap/extension-text-style";
 import { Markdown } from "@tiptap/markdown";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
+import { TextSelection } from "@tiptap/pm/state";
 import type { EditorView } from "@tiptap/pm/view";
 import {
   EditorContent,
@@ -145,33 +146,44 @@ export default function NoteEditor({
     for (const file of files) {
       try {
         const { url, name } = await uploadFile(spaceId, file);
-        
-        let inTextblock = false;
+        const { schema } = editor.state;
+
+        // Create the inline node (either image or text link)
+        const node = file.type.startsWith("image/")
+          ? schema.nodes.image.create({ src: url })
+          : schema.text(`${name} `, [schema.marks.link.create({ href: url })]);
+
+        let tr = editor.state.tr;
+        let insertPos = pos;
+        let size = 0;
+
+        // If a specific position is given (drag & drop), set the selection there first
+        if (insertPos !== undefined) {
+          tr = tr.setSelection(TextSelection.create(tr.doc, insertPos));
+        }
+
+        const $from = tr.selection.$from;
+
+        if ($from.parent.isTextblock) {
+          // If we are currently inside a text block (e.g. paragraph), it's safe to insert inline nodes
+          tr = tr.replaceSelectionWith(node, false);
+          size = node.nodeSize;
+        } else {
+          // If we are outside a text block (e.g. root document or NodeSelection on an image),
+          // we MUST wrap the inline node in a paragraph to prevent schema corruption.
+          const pNode = schema.nodes.paragraph.create(null, node);
+          tr = tr.replaceSelectionWith(pNode, false);
+          size = pNode.nodeSize;
+        }
+
+        // For drag and drop, advance `pos` so multiple files are placed in order correctly
         if (pos !== undefined) {
-          try {
-            inTextblock = editor.state.doc.resolve(pos).parent.isTextblock;
-          } catch (e) {
-            // fallback
-          }
-        } else {
-          inTextblock = editor.state.selection.$head.parent.isTextblock;
+          pos += size;
         }
-
-        let content;
-        if (file.type.startsWith("image/")) {
-          const imgNode = { type: "image", attrs: { src: url } };
-          content = inTextblock ? imgNode : { type: "paragraph", content: [imgNode] };
-        } else {
-          const linkNode = { type: "text", text: `${name} `, marks: [{ type: "link", attrs: { href: url } }] };
-          content = inTextblock ? linkNode : { type: "paragraph", content: [linkNode] };
-        }
-
-        if (pos === undefined) {
-          editor.chain().focus().insertContent(content).run();
-        } else {
-          editor.chain().insertContentAt(pos, content).run();
-          pos += 1;
-        }
+        
+        // Dispatch the transaction and scroll into view
+        editor.view.dispatch(tr.scrollIntoView());
+        editor.commands.focus();
       } catch (err) {
         setUploadError(`Could not upload ${file.name} (${message(err)}).`);
       } finally {
