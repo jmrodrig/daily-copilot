@@ -227,13 +227,13 @@ body {
 }
 
 /* File attachments styled as Confluence-like pills */
-.note-body a[href^="/api/notes/image/"] {
+.note-body a[href*="/api/notes/image/"] {
   @apply inline-flex items-center gap-1.5 rounded-full border border-border-default bg-surface-raised px-2.5 py-0.5 text-xs font-medium text-text-primary no-underline align-middle mx-1;
 }
-.note-body a[href^="/api/notes/image/"]:hover {
+.note-body a[href*="/api/notes/image/"]:hover {
   @apply bg-surface-hover border-border-strong;
 }
-.note-body a[href^="/api/notes/image/"]::before {
+.note-body a[href*="/api/notes/image/"]::before {
   content: "";
   display: inline-block;
   width: 12px;
@@ -251,6 +251,6 @@ body {
 }
 
 /* Ensure regular links in the editor are styled as links, not plain text */
-.note-body a:not([href^="/api/notes/image/"]) {
+.note-body a:not([href*="/api/notes/image/"]) {
   @apply text-accent underline;
 }

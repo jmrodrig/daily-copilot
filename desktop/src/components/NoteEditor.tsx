@@ -79,42 +79,6 @@ export default function NoteEditor({
    * Upload files one by one, inserting each at `pos` (or the selection) once it's stored: an image as itself, any
    * other file as a link named after it.
    */
-  async function insertFiles(view: EditorView, files: File[], pos?: number) {
-    setUploadError(null);
-    setUploads((n) => n + files.length);
-    for (const file of files) {
-      try {
-        const { url, name } = await uploadFile(spaceId, file);
-        const { schema } = view.state;
-        const node = file.type.startsWith("image/")
-          ? schema.nodes.image.create({ src: url })
-          : schema.text(name, [schema.marks.link.create({ href: url })]);
-        
-        let tr = view.state.tr;
-        if (pos === undefined) {
-          tr = tr.replaceSelectionWith(node);
-        } else {
-          const $pos = tr.doc.resolve(pos);
-          if ($pos.parent.isTextblock) {
-            tr = tr.insert(pos, node);
-          } else {
-            // Inserting an inline node outside a text block (e.g. at doc root) breaks the schema
-            const pNode = schema.nodes.paragraph.create(null, node);
-            tr = tr.insert(pos, pNode);
-          }
-        }
-        
-        if (pos !== undefined) pos += node.nodeSize;
-        view.dispatch(tr.scrollIntoView());
-      } catch (err) {
-        setUploadError(`Could not upload ${file.name} (${message(err)}).`);
-      } finally {
-        setUploads((n) => n - 1);
-      }
-    }
-  }
-  const insertFilesRef = useRef(insertFiles);
-  insertFilesRef.current = insertFiles;
   const uploadRef = useRef(async (file: File) => (await uploadFile(spaceId, file)).url);
   uploadRef.current = async (file: File) => (await uploadFile(spaceId, file)).url;
 
@@ -160,18 +124,49 @@ export default function NoteEditor({
         const files = extractFiles(event.clipboardData);
         if (!files.length || !view.editable) return false;
         event.preventDefault();
-        void insertFilesRef.current(view, files);
+        void insertFilesRef.current(files);
         return true;
       },
       handleDrop: (view, event, _slice, moved) => {
         const files = moved ? [] : extractFiles(event.dataTransfer);
         if (!files.length || !view.editable) return false;
         event.preventDefault();
-        void insertFilesRef.current(view, files, view.posAtCoords({ left: event.clientX, top: event.clientY })?.pos);
+        void insertFilesRef.current(files, view.posAtCoords({ left: event.clientX, top: event.clientY })?.pos);
         return true;
       },
     },
     onUpdate: ({ editor }) => onChangeRef.current(editor.getMarkdown()),
+  });
+
+  const insertFilesRef = useRef(async (files: File[], pos?: number) => {
+    if (!editor) return;
+    setUploadError(null);
+    setUploads((n) => n + files.length);
+    for (const file of files) {
+      try {
+        const { url, name } = await uploadFile(spaceId, file);
+        if (file.type.startsWith("image/")) {
+          const content = { type: "image", attrs: { src: url } };
+          if (pos === undefined) {
+            editor.chain().focus().insertContent(content).run();
+          } else {
+            editor.chain().insertContentAt(pos, content).run();
+          }
+        } else {
+          // Add a non-breaking space after the link so the cursor can move past it cleanly
+          const content = `<a href="${url}">${name}</a>&nbsp;`;
+          if (pos === undefined) {
+            editor.chain().focus().insertContent(content).run();
+          } else {
+            editor.chain().insertContentAt(pos, content).run();
+          }
+        }
+      } catch (err) {
+        setUploadError(`Could not upload ${file.name} (${message(err)}).`);
+      } finally {
+        setUploads((n) => n - 1);
+      }
+    }
   });
 
   useEffect(() => {
@@ -183,7 +178,7 @@ export default function NoteEditor({
       <Toolbar 
         editor={editor} 
         status={uploads > 0 ? `Uploading ${uploads > 1 ? `${uploads} files` : "file"}…` : null} 
-        onAttach={(files) => editor && void insertFilesRef.current(editor.view, files)}
+        onAttach={(files) => editor && void insertFilesRef.current(files)}
       />
       {uploadError && <p className={`${NOTE_COLUMN} pt-3 text-[13px] text-accent`}>{uploadError}</p>}
       <TitleInput
