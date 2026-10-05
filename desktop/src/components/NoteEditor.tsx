@@ -88,7 +88,21 @@ export default function NoteEditor({
         const node = file.type.startsWith("image/")
           ? schema.nodes.image.create({ src: url })
           : schema.text(name, [schema.marks.link.create({ href: url })]);
-        const tr = pos === undefined ? view.state.tr.replaceSelectionWith(node) : view.state.tr.insert(pos, node);
+        
+        let tr = view.state.tr;
+        if (pos === undefined) {
+          tr = tr.replaceSelectionWith(node);
+        } else {
+          const $pos = tr.doc.resolve(pos);
+          if ($pos.parent.isTextblock) {
+            tr = tr.insert(pos, node);
+          } else {
+            // Inserting an inline node outside a text block (e.g. at doc root) breaks the schema
+            const pNode = schema.nodes.paragraph.create(null, node);
+            tr = tr.insert(pos, pNode);
+          }
+        }
+        
         if (pos !== undefined) pos += node.nodeSize;
         view.dispatch(tr.scrollIntoView());
       } catch (err) {
