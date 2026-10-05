@@ -157,27 +157,20 @@ export default function NoteEditor({
           inTextblock = editor.state.selection.$head.parent.isTextblock;
         }
 
+        let content;
         if (file.type.startsWith("image/")) {
-          // Images are inline, so they must be wrapped in a paragraph if inserted outside a text block
-          const imgNode = `<img src="${url}" />`;
-          const content = inTextblock ? imgNode : `<p>${imgNode}</p>`;
-          if (pos === undefined) {
-            editor.chain().focus().insertContent(content).run();
-          } else {
-            editor.chain().insertContentAt(pos, content).run();
-            // Advance pos slightly for multiple drops so they don't reverse order
-            pos += 1;
-          }
+          const imgNode = { type: "image", attrs: { src: url } };
+          content = inTextblock ? imgNode : { type: "paragraph", content: [imgNode] };
         } else {
-          // Add a non-breaking space after the link so the cursor can move past it cleanly
-          const linkNode = `<a href="${url}">${name}</a>&nbsp;`;
-          const content = inTextblock ? linkNode : `<p>${linkNode}</p>`;
-          if (pos === undefined) {
-            editor.chain().focus().insertContent(content).run();
-          } else {
-            editor.chain().insertContentAt(pos, content).run();
-            pos += 1; // Advance pos slightly
-          }
+          const linkNode = { type: "text", text: `${name} `, marks: [{ type: "link", attrs: { href: url } }] };
+          content = inTextblock ? linkNode : { type: "paragraph", content: [linkNode] };
+        }
+
+        if (pos === undefined) {
+          editor.chain().focus().insertContent(content).run();
+        } else {
+          editor.chain().insertContentAt(pos, content).run();
+          pos += 1;
         }
       } catch (err) {
         setUploadError(`Could not upload ${file.name} (${message(err)}).`);
