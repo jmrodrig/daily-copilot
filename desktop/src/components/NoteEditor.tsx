@@ -7,6 +7,7 @@ import { Markdown } from "@tiptap/markdown";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import type { EditorView } from "@tiptap/pm/view";
 import {
+  BubbleMenu,
   EditorContent,
   NodeViewWrapper,
   ReactNodeViewRenderer,
@@ -194,6 +195,23 @@ export default function NoteEditor({
       />
       {children && <div className={`${NOTE_COLUMN} flex flex-col gap-5 pt-5`}>{children}</div>}
       <EditorContent editor={editor} className="pt-4" />
+      {editor && (
+        <BubbleMenu
+          editor={editor}
+          tippyOptions={{ duration: 100, maxWidth: "none", placement: "bottom", offset: [0, 8] }}
+          shouldShow={({ editor }) => editor.isActive("link")}
+          className="flex items-center overflow-hidden rounded-lg border border-border-default bg-surface-raised shadow-xl"
+        >
+          <a
+            href={editor.getAttributes("link").href}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="px-4 py-2 text-xs font-bold uppercase tracking-wider text-accent hover:bg-surface-hover focus:outline-none"
+          >
+            Open
+          </a>
+        </BubbleMenu>
+      )}
     </div>
   );
 }

@@ -263,7 +263,12 @@ function NoteImage({ node: _node, className, style, src, alt, title, ...props }:
   );
 }
 
-const NOTE_COMPONENTS: Components = { img: NoteImage };
+const NOTE_COMPONENTS: Components = {
+  img: NoteImage,
+  a: ({ node: _node, ref, ...props }) => (
+    <a {...props} target={props.href?.startsWith("#") ? undefined : "_blank"} rel="noopener noreferrer" />
+  ),
+};
 
 function LinkedTasks({ tasks }: { tasks: TaskItem[] }) {
   return (
