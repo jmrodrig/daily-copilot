@@ -10,7 +10,7 @@ import { getJson, message, sendJson } from "../lib/api";
 import { useSpace } from "../lib/space";
 import { useTitle } from "../lib/title";
 import { isOverdue, STATUS_LABELS, taskIdFromHref, useTaskChanges, useTaskPanel, type TaskItem } from "../lib/tasks";
-import ImageLightbox, { ExpandButton } from "../components/ImageLightbox";
+import MediaLightbox, { ExpandButton, isPdfUrl } from "../components/MediaLightbox";
 import NoteEditor from "../components/NoteEditor";
 import { PillIcon, refKind } from "../components/referencePill";
 import { NOTE_COLUMN, NOTE_HTML_SCHEMA, layoutMedia, liftCellColors } from "../components/noteFormatting";
@@ -396,7 +396,7 @@ function NoteImage({ node: _node, className, style, src, alt, title, ...props }:
     <span className={`note-figure group ${className ?? ""}`} style={style}>
       <img src={src} alt={alt ?? ""} title={title} {...props} onClick={() => setExpanded(true)} className="cursor-zoom-in" />
       <ExpandButton onClick={() => setExpanded(true)} />
-      {expanded && <ImageLightbox src={src} alt={alt} title={title} onClose={() => setExpanded(false)} />}
+      {expanded && <MediaLightbox src={src} alt={alt} title={title} onClose={() => setExpanded(false)} />}
     </span>
   );
 }
@@ -421,9 +421,35 @@ const NOTE_COMPONENTS: Components = {
           <span className="reference-pill-label">{props.children}</span>
         </a>
       );
+    if (props.href?.includes("/api/notes/image/") && isPdfUrl(props.href)) return <PdfLink href={props.href}>{props.children}</PdfLink>;
     return <a {...props} target={props.href?.startsWith("#") ? undefined : "_blank"} rel="noopener noreferrer" />;
   },
 };
+
+/** A PDF attached to the read-only note: its pill opens it in the lightbox, read-only. */
+function PdfLink({ href, children }: { href: string; children: ReactNode }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLAnchorElement>(null);
+  return (
+    <>
+      <a
+        ref={ref}
+        href={href}
+        target="_blank"
+        rel="noopener noreferrer"
+        onClick={(e) => {
+          // Ctrl/Cmd-click still opens it in a new tab.
+          if (e.ctrlKey || e.metaKey || e.shiftKey) return;
+          e.preventDefault();
+          setOpen(true);
+        }}
+      >
+        {children}
+      </a>
+      {open && <MediaLightbox src={href} title={ref.current?.textContent || null} onClose={() => setOpen(false)} />}
+    </>
+  );
+}
 
 /** A task pill in the read-only note: opens the task in the side panel, staying on the note. */
 function TaskPillLink({ href, children }: { href: string; children: ReactNode }) {

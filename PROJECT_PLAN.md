@@ -27,6 +27,7 @@ A personal AI co-pilot designed to manage daily workflows against real project G
 - **Phase 10 — Tags UI & Bulk Ingestion:** Pending (Custom frontend tag filtering and bulk data pipeline)
 - **Phase 11 — Android App Expansions:** Pending (Morning brief, Triage, and Evening check-in on the mobile app)
 - **Phase 12 — Annotations Engine:** Pending (Inline PDF/image viewing, vector drawing tools, sidecar storage, and spatial comments)
+  - *Constraint:* Must incorporate and build on top of the existing image markup feature in the app. Do not build from scratch. Do not make architectural assumptions; explicitly ask the user for design decisions.
 
 ## 3. Pending Decisions
 - None currently.

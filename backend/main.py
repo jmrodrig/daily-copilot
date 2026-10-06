@@ -42,6 +42,7 @@ from schemas import (
     GanttTask,
     FolderCreate,
     ImageUpload,
+    MediaMarkup,
     FolderMetaOut,
     FolderMetaUpdate,
     NoteCreate,
@@ -620,6 +621,33 @@ def get_image(name: str, root: Path = Depends(space_content)) -> FileResponse:
         "X-Content-Type-Options": "nosniff",
     }
     return FileResponse(path, headers=headers)
+
+
+@app.get("/api/notes/image/{name}/markup")
+def get_image_markup(name: str, root: Path = Depends(space_content)) -> MediaMarkup:
+    """The strokes and comments drawn over a stored image or PDF (none if it hasn't been marked up)."""
+    try:
+        markup = file_layer.read_asset_markup(name, notes_dir=root)
+        return MediaMarkup() if markup is None else MediaMarkup.model_validate(markup)
+    except file_layer.NotePathError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"No file {name}") from exc
+    except ValueError:
+        # A sidecar that doesn't parse or validate (edited by hand, say) reads as no markup rather than locking the file.
+        return MediaMarkup()
+
+
+@app.put("/api/notes/image/{name}/markup")
+def put_image_markup(markup: MediaMarkup, name: str, root: Path = Depends(space_content)) -> MediaMarkup:
+    """Save a stored image's or PDF's markup in its JSON sidecar, leaving the file itself as it was uploaded."""
+    try:
+        file_layer.write_asset_markup(name, markup.model_dump(), notes_dir=root)
+    except file_layer.NotePathError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"No file {name}") from exc
+    return markup
 
 
 @app.post("/api/notes/apply-edit")

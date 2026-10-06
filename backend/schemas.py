@@ -491,6 +491,26 @@ class ImageUpload(BaseModel):
     url: str
 
 
+class MarkupComment(BaseModel):
+    """A sticky-note comment pinned to a point on an image or a PDF's page (counted from 0), in its pixels."""
+
+    id: str = Field(max_length=64)
+    x: float
+    y: float
+    text: str = Field(max_length=10_000)
+    isExpanded: bool = False
+    page: int = Field(default=0, ge=0)
+
+
+class MediaMarkup(BaseModel):
+    """`GET`/`PUT /api/notes/image/{name}/markup`: the strokes and comments drawn over a stored image or PDF, kept in a
+    sidecar beside it. Strokes are the lightbox's own (see MediaLightbox.tsx), each with the PDF page it's on, and stored as
+    they come."""
+
+    strokes: list[dict[str, Any]] = Field(default_factory=list, max_length=10_000)
+    comments: list[MarkupComment] = Field(default_factory=list, max_length=1_000)
+
+
 class ProposedEdit(BaseModel):
     """A note write the agent wanted to make in `ask_first` mode, waiting for the user's approval."""
 

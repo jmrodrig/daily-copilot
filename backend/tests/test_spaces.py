@@ -320,6 +320,43 @@ def test_attached_files_keep_their_suffix(client):
     assert upload("odd.tar.g z", "application/octet-stream")[1].endswith(".bin")
 
 
+def test_markup_is_kept_in_a_sidecar_beside_the_file(client):
+    url = client.post("/api/notes/image", data={"space_id": 1}, files={"file": ("image.png", PNG, "image/png")}).json()["url"]
+    name = url.removeprefix("/api/notes/image/").removesuffix("?space_id=1")
+    markup_url = f"/api/notes/image/{name}/markup"
+    empty = {"strokes": [], "comments": []}
+    assert client.get(markup_url, params={"space_id": 1}).json() == empty
+
+    stroke = {"type": "draw", "color": "#ef4444", "points": [{"x": 1, "y": 2, "width": 4}], "page": 0}
+    comment = {"id": "c1", "x": 10, "y": 20, "text": "Needs review", "isExpanded": False, "page": 0}
+    markup = {"strokes": [stroke], "comments": [comment]}
+    assert client.put(markup_url, params={"space_id": 1}, json=markup).json() == markup
+    assert client.get(markup_url, params={"space_id": 1}).json() == markup
+
+    # The file itself is left as it was uploaded, and its sidecar can't be fetched as a file.
+    assets = spaces.content_dir(1) / ".assets"
+    assert (assets / name).read_bytes() == PNG
+    assert (assets / f"{name}.json").is_file()
+    assert client.get(f"/api/notes/image/{name}.json", params={"space_id": 1}).status_code in (400, 404)
+
+    # A sidecar that's been mangled reads as no markup.
+    (assets / f"{name}.json").write_text("{not json", encoding="utf-8")
+    assert client.get(markup_url, params={"space_id": 1}).json() == empty
+
+
+def test_markup_needs_a_stored_file(client):
+    other = client.post("/api/spaces", json={"name": "Private"}).json()["id"]
+    url = client.post("/api/notes/image", data={"space_id": 1}, files={"file": ("image.png", PNG, "image/png")}).json()["url"]
+    name = url.removeprefix("/api/notes/image/").removesuffix("?space_id=1")
+    empty = {"strokes": [], "comments": []}
+    missing = f"/api/notes/image/{'0' * 32}.png/markup"
+
+    assert client.get(missing, params={"space_id": 1}).status_code == 404
+    assert client.put(missing, params={"space_id": 1}, json=empty).status_code == 404
+    assert client.put(f"/api/notes/image/{name}/markup", params={"space_id": other}, json=empty).status_code == 404
+    assert client.put("/api/notes/image/notes.md/markup", params={"space_id": 1}, json=empty).status_code == 400
+
+
 @pytest.mark.parametrize(
     ("space_id", "file", "status"),
     [
