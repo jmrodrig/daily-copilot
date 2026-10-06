@@ -356,9 +356,9 @@ export default function Sidebar({ onCollapse }: { onCollapse: () => void }) {
   const isEmpty = content !== null && content.folders.length === 0 && content.notes.length === 0;
 
   return (
-    <div className="flex h-full min-w-[264px] flex-col">
+    <div className="flex h-full min-w-[200px] flex-col">
       <div className="flex items-center justify-between pb-2.5 pl-[18px] pr-3 pt-3.5">
-        <span className="text-[17px] font-semibold">Co-Pilot</span>
+        <span className="text-[18px] font-semibold">Co-Pilot</span>
         <IconButton label="Collapse page tree" onClick={onCollapse} direction="left" />
       </div>
       <SpaceSwitcher />
@@ -478,7 +478,7 @@ export default function Sidebar({ onCollapse }: { onCollapse: () => void }) {
             />
             {health === "ok" ? "Backend online" : health === "error" ? "Backend offline" : "Connecting…"}
           </div>
-          <div className="truncate font-mono text-[11px] text-text-muted">{window.location.host}</div>
+          <div className="truncate font-mono text-[13px] text-text-muted">{window.location.host}</div>
         </div>
         <NavLink
           to="/settings"
@@ -595,7 +595,7 @@ function SpaceSwitcher() {
             onKeyDown={(e) => e.key === "Escape" && setCreating(false)}
             placeholder="Space name, e.g. Private"
             maxLength={64}
-            className="field py-1.5 text-[13px]"
+            className="field py-1.5 text-[15px]"
           />
           {error && <p className="text-xs text-accent">{error}</p>}
           <div className="flex gap-1.5">
@@ -613,7 +613,7 @@ function SpaceSwitcher() {
           <select
             value={spaces.some((s) => s.id === spaceId) ? String(spaceId) : ""}
             onChange={(e) => choose(e.target.value)}
-            className="field cursor-pointer py-1.5 text-[13px] font-medium"
+            className="field cursor-pointer py-1.5 text-[15px] font-medium"
           >
             {spaces.length === 0 && <option value="">Loading spaces…</option>}
             {spaces.map((space) => (
@@ -630,14 +630,14 @@ function SpaceSwitcher() {
 }
 
 function navClass(isActive: boolean): string {
-  return `flex min-h-7 w-full items-center rounded-md px-2 text-left text-[13px] ${
+  return `flex min-h-7 w-full items-center rounded-md px-2 text-left text-[15px] ${
     isActive ? "bg-surface-active font-medium text-text-primary" : "text-text-muted hover:bg-surface-hover"
   }`;
 }
 
 function SectionHeader({ children, actions }: { children: string; actions?: ReactNode }) {
   return (
-    <div className="mb-1 mt-3 flex items-center justify-between border-t border-border-default px-2 pt-3 text-[11px] font-semibold tracking-[0.1em] text-text-muted">
+    <div className="mb-1 mt-3 flex items-center justify-between border-t border-border-default px-2 pt-3 text-[13px] font-semibold tracking-[0.1em] text-text-muted">
       <span>{children}</span>
       {actions && <span className="flex items-center gap-1">{actions}</span>}
     </div>
@@ -659,7 +659,7 @@ function SmallButton({
       onClick={onClick}
       aria-label={label}
       title={label}
-      className="flex h-5 w-5 items-center justify-center rounded text-[13px] leading-none text-text-muted hover:bg-surface-hover hover:text-text-primary"
+      className="flex h-5 w-5 items-center justify-center rounded text-[15px] leading-none text-text-muted hover:bg-surface-hover hover:text-text-primary"
     >
       {children}
     </button>
@@ -706,7 +706,7 @@ function FolderContents({ folder, ...props }: TreeProps & { folder: FolderNode }
             <NavLink
               to={to}
               title={note.title}
-              className={`flex min-h-7 min-w-0 flex-1 items-center rounded-md pl-1 pr-2 text-left text-[13px] ${
+              className={`flex min-h-7 min-w-0 flex-1 items-center rounded-md pl-1 pr-2 text-left text-[15px] ${
                 current === to ? "bg-surface-active font-medium text-text-primary" : "text-text-muted"
               }`}
             >
@@ -741,7 +741,7 @@ function FolderRow({ folder, ...props }: TreeProps & { folder: FolderNode }) {
           type="button"
           onClick={() => toggle(folder.path)}
           title={tags ? `${folder.path} (${tags})` : folder.path}
-          className={`flex min-h-7 min-w-0 flex-1 items-center gap-1.5 rounded-md pl-1 pr-2 text-left text-[13px] ${
+          className={`flex min-h-7 min-w-0 flex-1 items-center gap-1.5 rounded-md pl-1 pr-2 text-left text-[15px] ${
             folder.is_project ? "font-semibold text-project-c7801" : `text-text-secondary ${depth === 0 ? "font-semibold" : "font-medium"}`
           }`}
         >
@@ -835,7 +835,7 @@ function RowAction({
       onClick={onClick}
       aria-label={label}
       title={title}
-      className="flex h-5 w-5 items-center justify-center rounded text-[13px] leading-none text-text-muted hover:bg-surface-active hover:text-text-primary"
+      className="flex h-5 w-5 items-center justify-center rounded text-[15px] leading-none text-text-muted hover:bg-surface-active hover:text-text-primary"
     >
       {children}
     </button>
@@ -875,14 +875,14 @@ function InlineRename({
         }
       }}
       onBlur={(e) => !cancelled.current && onRename(e.target.value)}
-      className="field min-w-0 flex-1 px-1.5 py-0.5 text-[13px]"
+      className="field min-w-0 flex-1 px-1.5 py-0.5 text-[15px]"
     />
   );
 }
 
 function Badge({ className, children }: { className: string; children: string }) {
   return (
-    <span className={`shrink-0 rounded border px-1 font-mono text-[9px] font-normal uppercase leading-[14px] ${className}`}>
+    <span className={`shrink-0 rounded border px-1 font-mono text-[10px] font-normal uppercase leading-[14px] ${className}`}>
       {children}
     </span>
   );
@@ -931,14 +931,14 @@ function PopupMenu({
       className="fixed z-50 min-w-[200px] rounded-lg border border-border-light bg-surface-raised py-1 shadow-xl"
       style={{ left: Math.min(x, window.innerWidth - 220), top: Math.min(y, window.innerHeight - height) }}
     >
-      {heading && <div className="truncate px-3 pb-1 pt-0.5 font-mono text-[11px] text-text-muted">{heading}</div>}
+      {heading && <div className="truncate px-3 pb-1 pt-0.5 font-mono text-[13px] text-text-muted">{heading}</div>}
       {items.map((item) => (
         <button
           key={item.label}
           type="button"
           role="menuitem"
           onClick={item.onClick}
-          className={`block w-full px-3 py-1.5 text-left text-[13px] text-text-secondary hover:bg-surface-hover hover:text-text-primary focus:bg-surface-hover focus:outline-none ${
+          className={`block w-full px-3 py-1.5 text-left text-[15px] text-text-secondary hover:bg-surface-hover hover:text-text-primary focus:bg-surface-hover focus:outline-none ${
             item.separator ? "border-t border-border-default" : ""
           }`}
         >
@@ -993,7 +993,7 @@ function TaskViewRow({
         onClick={onMenu}
         aria-label={`${view.name} options`}
         title="Rename, duplicate or delete"
-        className="absolute right-1 top-1/2 flex h-5 w-5 -translate-y-1/2 items-center justify-center rounded text-[13px] leading-none text-text-muted opacity-0 hover:bg-surface-active hover:text-text-primary focus:opacity-100 group-hover:opacity-100"
+        className="absolute right-1 top-1/2 flex h-5 w-5 -translate-y-1/2 items-center justify-center rounded text-[15px] leading-none text-text-muted opacity-0 hover:bg-surface-active hover:text-text-primary focus:opacity-100 group-hover:opacity-100"
       >
         …
       </button>

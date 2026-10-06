@@ -555,7 +555,7 @@ export default function ImageLightbox({
       <header className="flex min-h-14 items-center justify-between gap-4 border-b border-border-default px-5 py-2">
         <div className="min-w-0">
           <p className="truncate text-sm font-medium text-text-primary">{heading || "Image"}</p>
-          <p className="truncate font-mono text-[11px] text-text-muted">
+          <p className="truncate font-mono text-[13px] text-text-muted">
             {[size && `${size.width} × ${size.height}`, name !== heading && name].filter(Boolean).join(" · ")}
           </p>
         </div>
@@ -613,7 +613,7 @@ export default function ImageLightbox({
                             setTool(e.tool);
                             setEraserMenu(false);
                           }}
-                          className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-[13px] hover:bg-surface-hover hover:text-text-primary focus:bg-surface-hover focus:outline-none ${
+                          className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-[15px] hover:bg-surface-hover hover:text-text-primary focus:bg-surface-hover focus:outline-none ${
                             eraser === e.tool ? "text-accent-soft" : "text-text-secondary"
                           }`}
                         >
@@ -683,7 +683,7 @@ export default function ImageLightbox({
           </span>
         </div>
       )}
-      {error && <p className="px-5 pt-2 text-[13px] text-accent">{error}</p>}
+      {error && <p className="px-5 pt-2 text-[15px] text-accent">{error}</p>}
       <div
         ref={stageRef}
         className={`relative flex-1 touch-none select-none overflow-hidden ${
@@ -1139,7 +1139,7 @@ function Segment({
       aria-pressed={on}
       disabled={disabled}
       onClick={onClick}
-      className={`flex h-8 min-w-8 items-center justify-center rounded px-2 text-[13px] disabled:cursor-not-allowed disabled:opacity-40 ${
+      className={`flex h-8 min-w-8 items-center justify-center rounded px-2 text-[15px] disabled:cursor-not-allowed disabled:opacity-40 ${
         on ? "bg-accent/[0.16] text-accent-soft" : "text-text-secondary hover:bg-surface-raised hover:text-text-primary"
       }`}
     >
@@ -1161,7 +1161,7 @@ export function ExpandButton({ onClick }: { onClick: () => void }) {
         e.stopPropagation();
         onClick();
       }}
-      className="absolute right-2 top-2 z-[2] flex h-8 w-8 items-center justify-center rounded-md border border-border-strong bg-background/80 text-text-primary opacity-0 transition-opacity duration-150 hover:bg-surface-raised focus:opacity-100 group-hover:opacity-100"
+      className="absolute right-2 top-2 z-[2] flex h-8 w-8 print:hidden items-center justify-center rounded-md border border-border-strong bg-background/80 text-text-primary opacity-0 transition-opacity duration-150 hover:bg-surface-raised focus:opacity-100 group-hover:opacity-100"
     >
       <svg aria-hidden width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
         <path d="M8.5 1.5h4v4M12.5 1.5 8 6M5.5 12.5h-4v-4M1.5 12.5 6 8" />

@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 
 import { errorDetail, getJson, message, PROMPTS_CHANGED, type SavedPrompt } from "../lib/api";
+import { useTitle } from "../lib/title";
 
 type Draft = { command: string; description: string; instruction: string };
 type State = { state: "loading" } | { state: "ok"; prompts: SavedPrompt[] } | { state: "error"; message: string };
@@ -12,6 +13,7 @@ const EMPTY: Draft = { command: "/", description: "", instruction: "" };
 export default function Settings() {
   const [prompts, setPrompts] = useState<State>({ state: "loading" });
   const [editing, setEditing] = useState<Editing>(null);
+  useTitle("Settings");
 
   async function load(signal?: AbortSignal) {
     try {
@@ -38,8 +40,8 @@ export default function Settings() {
     <div className="flex max-w-3xl flex-col gap-5 px-9 py-7">
       <header>
         <div className="font-mono text-xs tracking-[0.06em] text-text-muted">SETTINGS</div>
-        <h1 className="mt-1 text-[28px] font-semibold">Saved prompts</h1>
-        <div className="mt-1 text-[13px] text-text-muted">
+        <h1 className="mt-1 text-[29px] font-semibold">Saved prompts</h1>
+        <div className="mt-1 text-[15px] text-text-muted">
           Slash commands for the Co-pilot chat. Type the command (e.g. <span className="font-mono">/prep</span>) at the
           start of a message and the Co-pilot follows its instruction; anything after the command is passed along too.
         </div>
@@ -58,15 +60,15 @@ export default function Settings() {
           </div>
         )}
         {prompts.state === "loading" && (
-          <p className="border-t border-border-default px-[22px] py-4 text-[13px] text-text-muted">Loading…</p>
+          <p className="border-t border-border-default px-[22px] py-4 text-[15px] text-text-muted">Loading…</p>
         )}
         {prompts.state === "error" && (
-          <p className="border-t border-border-default px-[22px] py-4 text-[13px] text-text-secondary">
+          <p className="border-t border-border-default px-[22px] py-4 text-[15px] text-text-secondary">
             Could not load the saved prompts ({prompts.message}).
           </p>
         )}
         {prompts.state === "ok" && prompts.prompts.length === 0 && editing !== "new" && (
-          <p className="border-t border-border-default px-[22px] py-4 text-[13px] text-text-muted">
+          <p className="border-t border-border-default px-[22px] py-4 text-[15px] text-text-muted">
             No commands yet. Create one, e.g. <span className="font-mono">/prep</span> to draft a meeting prep brief.
           </p>
         )}
@@ -110,7 +112,7 @@ function PromptRow({ prompt, onEdit, onDeleted }: { prompt: SavedPrompt; onEdit:
           <span className="font-mono text-sm text-accent">{prompt.command}</span>
           {prompt.description && <span className="text-sm font-medium">{prompt.description}</span>}
         </div>
-        <p className="mt-1.5 whitespace-pre-wrap text-[13px] text-text-secondary">{prompt.instruction}</p>
+        <p className="mt-1.5 whitespace-pre-wrap text-[15px] text-text-secondary">{prompt.instruction}</p>
         {error && <p className="mt-1.5 text-xs text-accent">Could not delete ({error}).</p>}
       </div>
       <div className="flex shrink-0 gap-2">
@@ -168,7 +170,7 @@ function PromptForm({
     <form onSubmit={save} className="flex flex-col gap-3">
       <div className="grid grid-cols-[160px_minmax(0,1fr)] gap-3">
         <label className="flex flex-col gap-1.5">
-          <span className="text-[11px] font-semibold tracking-[0.08em] text-text-muted">COMMAND</span>
+          <span className="text-[13px] font-semibold tracking-[0.08em] text-text-muted">COMMAND</span>
           <input
             value={draft.command}
             onChange={(e) => setDraft({ ...draft, command: e.target.value })}
@@ -180,7 +182,7 @@ function PromptForm({
           />
         </label>
         <label className="flex flex-col gap-1.5">
-          <span className="text-[11px] font-semibold tracking-[0.08em] text-text-muted">DESCRIPTION</span>
+          <span className="text-[13px] font-semibold tracking-[0.08em] text-text-muted">DESCRIPTION</span>
           <input
             value={draft.description}
             onChange={(e) => setDraft({ ...draft, description: e.target.value })}
@@ -191,7 +193,7 @@ function PromptForm({
         </label>
       </div>
       <label className="flex flex-col gap-1.5">
-        <span className="text-[11px] font-semibold tracking-[0.08em] text-text-muted">INSTRUCTION</span>
+        <span className="text-[13px] font-semibold tracking-[0.08em] text-text-muted">INSTRUCTION</span>
         <textarea
           value={draft.instruction}
           onChange={(e) => setDraft({ ...draft, instruction: e.target.value })}

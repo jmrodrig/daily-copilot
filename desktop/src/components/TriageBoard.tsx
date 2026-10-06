@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 
-import { useSpace } from "../lib/space";
+import { notePath, useSpace } from "../lib/space";
+import { announceTaskChange, useTaskChanges, useTaskPanel } from "../lib/tasks";
 
 // Shape returned by GET /api/triage (see TriageItem in backend/schemas.py).
 export type TriageItem = {
@@ -16,8 +18,16 @@ export type TriageItem = {
   due_date: string | null;
   created: string | null;
   path: string | null;
+  /** Gantt tasks only: the note the task is linked to. */
+  note_path: string | null;
   content: string | null;
+  tags: string[];
 };
+
+const TASK_PREFIX = "task:";
+
+/** A Gantt task's id in the tasks table (its triage id is "task:<id>"). */
+const taskIdOf = (item: TriageItem) => (item.kind === "gantt_task" ? Number(item.id.slice(TASK_PREFIX.length)) || null : null);
 
 /** The person using the app: claimed tasks are assigned to them and appear at the Evening Check-in. */
 export const ME = "Jose";
@@ -41,6 +51,8 @@ export const PROJECT_TAG: Record<string, string> = {
   p5002: "border-project-p5002/60 text-project-p5002",
 };
 export const NEUTRAL_TAG = "border-project-neutral/60 text-text-muted";
+// Free-form tags keep their case ("Admin" and "admin" are different tags).
+export const LABEL_TAG = "border-border-default normal-case text-text-secondary";
 
 const PRIORITY_TAG: Record<TriageItem["priority"], string> = {
   urgent: "border-accent bg-accent/15 text-accent",
@@ -107,6 +119,24 @@ export default function TriageBoard() {
       prev.state === "ok" ? { ...prev, items: prev.items.map((i) => (i.id === updated.id ? updated : i)) } : prev,
     );
 
+  // Edited in the task panel: keep the row's fields in step (its rank is recomputed on the next load).
+  useTaskChanges("board", ({ id, task, deleted }) =>
+    setTriage((prev) => {
+      if (prev.state !== "ok") return prev;
+      const key = `${TASK_PREFIX}${id}`;
+      if (deleted) return { ...prev, items: prev.items.filter((i) => i.id !== key) };
+      if (!task) return prev;
+      return {
+        ...prev,
+        items: prev.items.map((i) =>
+          i.id === key
+            ? { ...i, title: task.title, priority: task.priority, status: task.status, assignee: task.assignee, start_date: task.start_date, due_date: task.deadline, note_path: task.note_path, tags: task.tags }
+            : i,
+        ),
+      };
+    }),
+  );
+
   if (triage.state === "loading") return <p className="text-sm text-text-secondary">Loading /api/triage…</p>;
   if (triage.state === "error") {
     return <p className="text-sm text-text-secondary">Could not load the Morning List ({triage.message}).</p>;
@@ -157,16 +187,27 @@ function TriageRow({
   onChange: (item: TriageItem) => void;
 }) {
   const isTask = item.kind === "gantt_task";
+  const taskId = taskIdOf(item);
+  const panel = useTaskPanel();
   // The note body beyond its first line (which is already the title).
   const detail = item.content?.trim().split(/\r?\n/).slice(1).join(" ").trim();
   return (
-    <li className="flex items-start gap-3 px-5 py-3">
+    <li className={`flex items-start gap-3 px-5 py-3 ${taskId !== null && panel.taskId === taskId ? "bg-surface-active" : ""}`}>
       <KindBadge isTask={isTask} />
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-2">
-          <span className={`text-sm ${isTask ? "font-medium text-text-primary" : "text-text-secondary"}`}>
-            {item.title}
-          </span>
+          {taskId !== null ? (
+            <button
+              type="button"
+              onClick={() => panel.openTask(taskId)}
+              title="Open task details"
+              className="text-left text-sm font-medium text-text-primary hover:underline"
+            >
+              {item.title}
+            </button>
+          ) : (
+            <span className={`text-sm ${isTask ? "font-medium text-text-primary" : "text-text-secondary"}`}>{item.title}</span>
+          )}
           <Tag className={item.project ? PROJECT_TAG[item.project.toLowerCase()] ?? NEUTRAL_TAG : NEUTRAL_TAG}>
             {item.project ?? "Inbox"}
           </Tag>
@@ -174,6 +215,8 @@ function TriageRow({
             <Tag className={PRIORITY_TAG[item.priority]}>{item.priority}</Tag>
           )}
           {item.status === "blocked" && <Tag className={PRIORITY_TAG.urgent}>blocked</Tag>}
+          <TagPills tags={item.tags} />
+          {item.note_path && <NoteLink path={item.note_path} />}
         </div>
         {detail && <p className="mt-1 truncate text-xs text-text-muted">{detail}</p>}
       </div>
@@ -198,7 +241,7 @@ function ClaimButton({ item, onChange }: { item: TriageItem; onChange: (item: Tr
     setSaving(true);
     setError(null);
     try {
-      const res = await fetch(`/api/tasks/${item.id.slice("task:".length)}`, {
+      const res = await fetch(`/api/tasks/${item.id.slice(TASK_PREFIX.length)}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -206,6 +249,7 @@ function ClaimButton({ item, onChange }: { item: TriageItem; onChange: (item: Tr
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const task: { assignee: string | null; status: NonNullable<TriageItem["status"]> } = await res.json();
       onChange({ ...item, assignee: task.assignee, status: task.status });
+      announceTaskChange({ id: Number(item.id.slice(TASK_PREFIX.length)), source: "board" });
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -242,20 +286,59 @@ function KindBadge({ isTask }: { isTask: boolean }) {
   return isTask ? (
     <span className="mt-0.5 flex w-12 shrink-0 items-center gap-1.5" title="Gantt task">
       <span className="h-2 w-3 rounded-sm bg-text-secondary" />
-      <span className="font-mono text-[10px] uppercase text-text-muted">Task</span>
+      <span className="font-mono text-[12px] uppercase text-text-muted">Task</span>
     </span>
   ) : (
     <span className="mt-0.5 flex w-12 shrink-0 items-center gap-1.5" title="Captured note">
       <span className="h-3 w-2.5 rounded-sm rounded-tr-none border border-dashed border-text-muted" />
-      <span className="font-mono text-[10px] uppercase text-text-muted">Note</span>
+      <span className="font-mono text-[12px] uppercase text-text-muted">Note</span>
     </span>
   );
 }
 
 export function Tag({ className, children }: { className: string; children: string }) {
   return (
-    <span className={`rounded border px-1.5 py-px font-mono text-[10px] uppercase leading-4 ${className}`}>
+    <span className={`rounded border px-1.5 py-px font-mono text-[12px] uppercase leading-4 ${className}`}>
       {children}
     </span>
+  );
+}
+
+/** A task's linked note: a page icon and the note's name, opening the note. */
+export function NoteLink({ path }: { path: string }) {
+  const { spaceId } = useSpace();
+  const name = path.split("/").pop()!.replace(/\.md$/i, "");
+  return (
+    <Link
+      to={notePath(spaceId, path)}
+      title={`Open note ${path}`}
+      aria-label={`Open linked note ${path}`}
+      draggable={false}
+      onClick={(e) => e.stopPropagation()}
+      className="flex min-w-0 max-w-[180px] items-center gap-1 rounded border border-border-default px-1.5 py-px font-mono text-[12px] leading-4 text-text-muted hover:border-accent/60 hover:text-accent"
+    >
+      <PageIcon />
+      <span className="truncate">{name}</span>
+    </Link>
+  );
+}
+
+function PageIcon() {
+  return (
+    <svg aria-hidden width="9" height="11" viewBox="0 0 9 11" fill="none" stroke="currentColor" strokeWidth="1.1" className="shrink-0">
+      <path d="M1 .6h4.6L8.4 3.4v7H1z" strokeLinejoin="round" />
+      <path d="M5.4.6v3h3M2.6 6h3.8M2.6 8h3.8" />
+    </svg>
+  );
+}
+
+/** A task's or note's free-form tags as `#tag` pills. */
+export function TagPills({ tags }: { tags: string[] | undefined }) {
+  return (
+    <>
+      {tags?.map((tag) => (
+        <Tag key={tag} className={LABEL_TAG}>{`#${tag}`}</Tag>
+      ))}
+    </>
   );
 }

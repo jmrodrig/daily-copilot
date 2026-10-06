@@ -12,7 +12,8 @@ import file_layer
 import main
 import spaces
 from config import Settings
-from models import FolderMeta, HistoryRecord, Project, Space, Task
+from history import soft_delete
+from models import FolderMeta, HistoryRecord, Project, Space, Task, TaskNoteLink
 from schemas import AccessMode, ChatMessage, Status
 
 
@@ -182,6 +183,47 @@ def test_create_folder_and_note_from_template(client, monkeypatch):
     assert template.json()["frontmatter"] == {"type": "meeting"}
 
 
+def test_template_project_placeholder_is_the_folder_project_code(client, monkeypatch):
+    monkeypatch.setattr(main, "_today", lambda: date(2026, 10, 4))
+    (spaces.content_dir(1) / "C7801" / "Meetings").mkdir(parents=True)
+    (spaces.content_dir(1) / "Inbox").mkdir(parents=True)
+    flag(1, "C7801", is_project=True)
+    (spaces.templates_dir(1) / "Tagged.md").write_text(
+        '---\ntags:\n- "{{project}}"\n- {project}\n- meeting\nsummary: "{{ title }} for {project}"\n---\n'
+        "# {title} ({{project}})\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    note = client.post(
+        "/api/notes", json={"space_id": 1, "path": "C7801/Meetings/Kickoff", "template": "Tagged.md"}
+    ).json()
+    assert note["frontmatter"]["tags"] == ["C7801", "C7801", "meeting"]
+    assert note["frontmatter"]["summary"] == "Kickoff for C7801"
+    assert note["content"] == "# Kickoff (C7801)\n"
+    assert file_layer.read_note(note["path"], notes_dir=spaces.content_dir(1))["frontmatter"]["tags"][0] == "C7801"
+
+    # Outside a project folder the project tags are dropped.
+    loose = client.post("/api/notes", json={"space_id": 1, "path": "Inbox/Idea", "template": "Tagged.md"}).json()
+    assert loose["frontmatter"]["tags"] == ["meeting"]
+
+
+def test_update_note_sets_the_tags(client):
+    write(1, "Keel.md", "---\ntitle: Keel\ntags: [old]\n---\nBody\n")
+    root = spaces.content_dir(1)
+
+    tagged = client.put(
+        "/api/notes/file", json={"space_id": 1, "path": "Keel.md", "tags": [" hull ", "C7801", "hull", ""]}
+    )
+    assert tagged.json()["frontmatter"] == {"title": "Keel", "tags": ["hull", "C7801"]}
+    note = file_layer.read_note("Keel.md", notes_dir=root)
+    assert (note["frontmatter"]["tags"], note["content"].strip()) == (["hull", "C7801"], "Body")
+
+    cleared = client.put("/api/notes/file", json={"space_id": 1, "path": "Keel.md", "tags": []})
+    assert cleared.json()["frontmatter"] == {"title": "Keel"}
+    assert "tags" not in file_layer.read_note("Keel.md", notes_dir=root)["frontmatter"]
+
+
 def test_update_note_saves_the_body_and_state(client):
     write(1, "C7801/Keel.md", "---\ncreated: 2026-09-30\ntitle: Keel\n---\nOld body\n")
     root = spaces.content_dir(1)
@@ -332,7 +374,7 @@ def test_move_a_project_folder_keeps_its_flags_and_task_links(client):
     ]
     flag(1, "C7801/Keel", is_reference=True)
     task = client.post(
-        "/api/tasks", json={"space_id": 1, "title": "Check", "note_paths": ["C7801/Keel/Drawings.md"]}
+        "/api/tasks", json={"space_id": 1, "title": "Check", "note_path": "C7801/Keel/Drawings.md"}
     ).json()
 
     moved = client.post("/api/content/move", json={"space_id": 1, "path": "C7801", "destination": "Yachts"})
@@ -342,7 +384,7 @@ def test_move_a_project_folder_keeps_its_flags_and_task_links(client):
     folder = tree["folders"][0]["folders"][0]
     assert (folder["path"], folder["is_project"], folder["project_id"]) == ("Yachts/C7801", True, project_id)
     assert folder["folders"][0]["is_reference"]
-    assert client.get(f"/api/tasks/{task['id']}").json()["note_paths"] == ["Yachts/C7801/Keel/Drawings.md"]
+    assert client.get(f"/api/tasks/{task['id']}").json()["note_path"] == "Yachts/C7801/Keel/Drawings.md"
     assert note_history("Yachts/C7801/Keel/Drawings.md") == [("rename", "C7801/Keel/Drawings.md", None)]
 
 
@@ -421,7 +463,7 @@ def test_delete_a_note_and_a_folder(client):
     write(1, "C7801/Keel.md", "keel")
     write(1, "Loose.md", "loose")
     client.put("/api/folders/meta", json={"space_id": 1, "path": "C7801", "is_project": True})
-    task = client.post("/api/tasks", json={"space_id": 1, "title": "Check", "note_paths": ["C7801/Keel.md"]}).json()
+    task = client.post("/api/tasks", json={"space_id": 1, "title": "Check", "note_path": "C7801/Keel.md"}).json()
 
     assert client.delete("/api/content", params={"space_id": 1, "path": "Loose.md"}).status_code == 204
     assert client.delete("/api/content", params={"space_id": 1, "path": "C7801"}).status_code == 204
@@ -429,7 +471,7 @@ def test_delete_a_note_and_a_folder(client):
 
     assert list(spaces.content_dir(1).iterdir()) == []
     assert note_history("C7801/Keel.md")[-1][0] == "delete"
-    assert client.get(f"/api/tasks/{task['id']}").json()["note_paths"] == []
+    assert client.get(f"/api/tasks/{task['id']}").json()["note_path"] is None
     # A new folder with the same name starts unflagged.
     (spaces.content_dir(1) / "C7801").mkdir()
     assert client.get("/api/tree", params={"space_id": 1}).json()["content"]["folders"][0]["is_project"] is False
@@ -454,7 +496,8 @@ def test_task_crud_filters_and_links(client):
             "title": " Keel drawings ",
             "deadline": "2026-10-10",
             "assignee": "Jose",
-            "note_paths": ["C7801/Keel.md", "C7801/Keel.md"],
+            "tags": [" weld ", "client", "weld", ""],
+            "note_path": "C7801/Keel.md",
         },
     )
     assert created.status_code == 201
@@ -474,10 +517,11 @@ def test_task_crud_filters_and_links(client):
         "completion_percent": 0.0,
         "is_gantt_task": False,
         "is_milestone": False,
-        "note_paths": ["C7801/Keel.md"],
+        "tags": ["weld", "client"],
+        "note_path": "C7801/Keel.md",
     }
-    client.post("/api/tasks", json={"space_id": 1, "title": "Unassigned", "status": "todo"})
-    client.post("/api/tasks", json={"space_id": other, "title": "Private task"})
+    client.post("/api/tasks", json={"space_id": 1, "title": "Unassigned", "status": "todo", "tags": ["Admin"]})
+    client.post("/api/tasks", json={"space_id": other, "title": "Private task", "tags": ["secret"]})
 
     def titles(**params):
         return [t["title"] for t in client.get("/api/tasks", params={"space_id": 1, **params}).json()]
@@ -488,6 +532,12 @@ def test_task_crud_filters_and_links(client):
     assert titles(assignee="") == ["Unassigned"]
     assert titles(status="todo") == ["Unassigned"]
     assert titles(note_path="C7801/Keel.md") == ["Keel drawings"]
+    assert titles(tag="weld") == ["Keel drawings"]
+    assert titles(tag="Admin") == ["Unassigned"]
+    assert titles(tag="nope") == []
+    assert client.get("/api/spaces/1/tags").json() == ["Admin", "client", "weld"]
+    assert client.get(f"/api/spaces/{other}/tags").json() == ["secret"]
+    assert client.get("/api/spaces/999/tags").status_code == 404
     assert [t["title"] for t in client.get("/api/tasks", params={"space_id": other}).json()] == ["Private task"]
 
     patched = client.patch(
@@ -500,25 +550,58 @@ def test_task_crud_filters_and_links(client):
         None,
     )
     assert patched.json()["completed_at"] is not None
+    assert client.patch(f"/api/tasks/{task['id']}", json={"tags": ["weld", " paint "]}).json()["tags"] == ["weld", "paint"]
+    assert client.patch(f"/api/tasks/{task['id']}", json={"title": "Keel drawings v2"}).json()["tags"] == ["weld", "paint"]
     assert client.patch(f"/api/tasks/{task['id']}", json={"title": "  "}).status_code == 422
     assert client.patch(f"/api/tasks/{task['id']}", json={"project_id": 999}).status_code == 400
 
-    unlinked = client.delete(f"/api/tasks/{task['id']}/links", params={"note_path": "C7801/Keel.md"}).json()
-    assert unlinked["note_paths"] == []
-    relinked = client.post(f"/api/tasks/{task['id']}/links", json={"note_path": "C7801/Keel.md"}).json()
-    assert relinked["note_paths"] == ["C7801/Keel.md"]
-    assert client.post(f"/api/tasks/{task['id']}/links", json={"note_path": "missing.md"}).status_code == 400
+    write(1, "C7801/Other.md", "Other")
+    assert client.patch(f"/api/tasks/{task['id']}", json={"note_path": None}).json()["note_path"] is None
+    assert titles(note_path="C7801/Keel.md") == []
+    assert client.patch(f"/api/tasks/{task['id']}", json={"note_path": "C7801/Other.md"}).json()["note_path"] == "C7801/Other.md"
+    assert client.patch(f"/api/tasks/{task['id']}", json={"note_path": "missing.md"}).status_code == 400
+    assert client.patch(f"/api/tasks/{task['id']}", json={"note_path": "../a.md"}).status_code == 400
+    # A note can have many tasks.
+    client.patch(f"/api/tasks/{task['id']}", json={"note_path": "C7801/Keel.md"})
+    weld = client.post("/api/tasks", json={"space_id": 1, "title": "Keel weld", "note_path": "C7801/Keel.md"}).json()
+    assert titles(note_path="C7801/Keel.md") == ["Keel drawings v2", "Keel weld"]
+    client.delete(f"/api/tasks/{weld['id']}")
 
     assert client.delete(f"/api/tasks/{task['id']}").status_code == 204
     assert titles() == ["Unassigned"]
     assert client.get(f"/api/tasks/{task['id']}").status_code == 404
+    assert client.get("/api/spaces/1/tags").json() == ["Admin"]
 
 
 def test_create_task_validation(client):
     assert client.post("/api/tasks", json={"space_id": 1, "title": " "}).status_code == 422
     assert client.post("/api/tasks", json={"space_id": 1, "title": "x", "project_id": 42}).status_code == 400
     assert client.post("/api/tasks", json={"space_id": 7, "title": "x"}).status_code == 404
-    assert client.post("/api/tasks", json={"space_id": 1, "title": "x", "note_paths": ["../a.md"]}).status_code == 400
+    assert client.post("/api/tasks", json={"space_id": 1, "title": "x", "note_path": "../a.md"}).status_code == 400
+
+
+def test_startup_moves_old_note_links_onto_tasks(client):
+    with database.SessionLocal() as db:
+        linked, gone, plain = Task(space_id=1, title="Linked"), Task(space_id=1, title="Gone"), Task(space_id=1, title="Plain")
+        db.add_all([linked, gone, plain])
+        db.flush()
+        db.add_all(
+            [
+                TaskNoteLink(task_id=linked.id, note_path="B.md"),
+                TaskNoteLink(task_id=linked.id, note_path="A.md"),
+                TaskNoteLink(task_id=gone.id, note_path="C.md"),
+            ]
+        )
+        soft_delete(db, gone)
+        db.commit()
+        ids = (linked.id, gone.id, plain.id)
+
+        spaces.migrate(db)
+        spaces.migrate(db)  # safe to run again
+
+        rows = db.scalars(select(Task).where(Task.id.in_(ids)).execution_options(include_deleted=True))
+        assert {t.title: t.note_path for t in rows} == {"Linked": "A.md", "Gone": "C.md", "Plain": None}
+        assert db.scalars(select(TaskNoteLink)).all() == []
 
 
 def test_projects_and_gantt_are_per_space(client):
@@ -580,7 +663,7 @@ def two_spaces(client):
     ]
     task = client.post(
         "/api/tasks",
-        json={"space_id": 1, "project_id": project_id, "title": "Keel drawings", "status": "todo", "note_paths": ["C7801/Design/Keel.md"]},
+        json={"space_id": 1, "project_id": project_id, "title": "Keel drawings", "status": "todo", "note_path": "C7801/Design/Keel.md"},
     ).json()
     client.post("/api/tasks", json={"space_id": 1, "project_id": project_id, "title": "Old", "status": "done"})
     client.post("/api/tasks", json={"space_id": other, "title": "Mow the lawn"})
@@ -673,7 +756,7 @@ def test_folder_meta_is_per_space(two_spaces):
 def test_default_views_are_seeded_per_space(client):
     views = client.get("/api/views?space_id=1").json()
     assert [(v["name"], v["view_type"]) for v in views] == [("Kanban", "kanban"), ("Backlog", "backlog"), ("Gantt", "gantt")]
-    assert views[0]["filters"] == {"project_id": None, "assignee": None}
+    assert views[0]["filters"] == {"project_id": None, "assignee": None, "tag": None}
 
     space = client.post("/api/spaces", json={"name": "Private"}).json()
     assert [v["view_type"] for v in client.get(f"/api/views?space_id={space['id']}").json()] == ["kanban", "backlog", "gantt"]
@@ -701,16 +784,16 @@ def test_view_crud(client):
     assert created.status_code == 201
     view = created.json()
     assert (view["name"], view["view_type"]) == ("C7801 Kanban", "kanban")
-    assert view["filters"] == {"project_id": project_id, "assignee": None}
+    assert view["filters"] == {"project_id": project_id, "assignee": None, "tag": None}
     assert client.get(f"/api/views/{view['id']}").json() == view
 
     renamed = client.put(f"/api/views/{view['id']}", json={"name": "Hull board"}).json()
     assert renamed["name"] == "Hull board"
     assert renamed["filters"]["project_id"] == project_id
 
-    refiltered = client.put(f"/api/views/{view['id']}", json={"filters": {"assignee": " Jose "}}).json()
+    refiltered = client.put(f"/api/views/{view['id']}", json={"filters": {"assignee": " Jose ", "tag": " weld "}}).json()
     assert refiltered["name"] == "Hull board"
-    assert refiltered["filters"] == {"project_id": None, "assignee": "Jose"}
+    assert refiltered["filters"] == {"project_id": None, "assignee": "Jose", "tag": "weld"}
 
     assert client.delete(f"/api/views/{view['id']}").status_code == 204
     assert view["id"] not in [v["id"] for v in client.get("/api/views?space_id=1").json()]

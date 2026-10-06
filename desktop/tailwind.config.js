@@ -24,6 +24,18 @@ export default {
         sans: fontStack(typography.fontFamily.ui),
         mono: fontStack(typography.fontFamily.mono),
       },
+      // Two pixels above Tailwind's defaults (12px / 14px) for readability.
+      fontSize: {
+        xs: ["0.875rem", { lineHeight: "1rem" }],
+        sm: ["1rem", { lineHeight: "1.25rem" }],
+      },
+      keyframes: {
+        // Animates a pane from nothing to its own width; omitting `to` lets it end at the inline style.
+        "pane-in": { from: { width: "0px", minWidth: "0px", opacity: "0" } },
+      },
+      animation: {
+        "pane-in": "pane-in 200ms ease-out",
+      },
     },
   },
   plugins: [],

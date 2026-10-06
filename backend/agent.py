@@ -37,7 +37,7 @@ import database
 import file_layer
 import spaces
 from config import Settings, get_settings
-from models import FolderMeta, Project, Space, Task, TaskNoteLink
+from models import FolderMeta, Project, Space, Task
 from schemas import AccessMode, ChatMessage, ChatResponse, ProposedEdit, Status, ToolCallSummary
 
 # History sources: the agent writing by itself, and the user approving a proposed edit.
@@ -332,7 +332,7 @@ def space_context(space_id: int, note_path: str | None = None) -> tuple[str, str
         project_meta = spaces.project_folder_for(metas, note_path) if note_path else None
         project = session.get(Project, project_meta.project_id) if project_meta and project_meta.project_id else None
         linked_ids = (
-            list(session.scalars(select(TaskNoteLink.task_id).where(TaskNoteLink.note_path == note_path)))
+            list(session.scalars(select(Task.id).where(Task.space_id == space_id, Task.note_path == note_path)))
             if note_path
             else []
         )

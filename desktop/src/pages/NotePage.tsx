@@ -1,16 +1,18 @@
-import { useEffect, useRef, useState, type ComponentProps } from "react";
+import { useEffect, useRef, useState, type ComponentProps, type ReactNode } from "react";
 import Markdown, { type Components } from "react-markdown";
 import { Link, useSearchParams } from "react-router-dom";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 
-import { formatDay, NEUTRAL_TAG, PROJECT_TAG, Tag } from "../components/TriageBoard";
+import { formatDay, LABEL_TAG, NEUTRAL_TAG, PROJECT_TAG, Tag, TagPills } from "../components/TriageBoard";
 import { getJson, message, sendJson } from "../lib/api";
 import { useSpace } from "../lib/space";
-import { isOverdue, STATUS_LABELS, type TaskItem } from "../lib/tasks";
+import { useTitle } from "../lib/title";
+import { isOverdue, STATUS_LABELS, taskIdFromHref, useTaskChanges, useTaskPanel, type TaskItem } from "../lib/tasks";
 import ImageLightbox, { ExpandButton } from "../components/ImageLightbox";
 import NoteEditor from "../components/NoteEditor";
+import { PillIcon, refKind } from "../components/referencePill";
 import { NOTE_COLUMN, NOTE_HTML_SCHEMA, layoutMedia, liftCellColors } from "../components/noteFormatting";
 
 // GET /api/notes/file (see NoteFile in backend/schemas.py).
@@ -22,8 +24,9 @@ type NoteState = "draft" | "published";
 const noteState = (frontmatter: Record<string, unknown>): NoteState =>
   frontmatter.state === "draft" ? "draft" : "published";
 
-// Front-matter keys that aren't shown: the title is the heading, and priorities belong to tasks, not notes.
-const HIDDEN_PROPS = new Set(["title", "priority"]);
+// Front-matter keys that aren't listed: the title is the heading, the tags are pills in the header, and
+// priorities belong to tasks, not notes.
+const HIDDEN_PROPS = new Set(["title", "tags", "priority"]);
 
 // A draft is saved once it's been left alone this long (ms).
 const AUTO_SAVE_DELAY = 2000;
@@ -31,6 +34,12 @@ const AUTO_SAVE_DELAY = 2000;
 /** The note's `title` front-matter, or else its file name. */
 const noteTitle = (frontmatter: Record<string, unknown>, path: string): string =>
   typeof frontmatter.title === "string" && frontmatter.title ? frontmatter.title : (path.split("/").pop() ?? "").replace(/\.md$/i, "");
+
+/** The `tags` front-matter, a list or a single tag, without blanks or repeats. */
+const noteTags = (frontmatter: Record<string, unknown>): string[] => {
+  const raw = Array.isArray(frontmatter.tags) ? frontmatter.tags : [frontmatter.tags];
+  return [...new Set(raw.filter((t) => typeof t === "string" || typeof t === "number").map((t) => String(t).trim()))].filter(Boolean);
+};
 
 function show(value: unknown): string {
   // ISO timestamps (`2026-10-02T22:46:19`) read as `2026-10-02 22:46`.
@@ -56,6 +65,9 @@ export default function NotePage() {
   // An auto-save or Ctrl+S ("content") keeps the draft editable; publishing or editing a note ("state") doesn't.
   const [saving, setSaving] = useState<"content" | "state" | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
+  // Tags are saved on their own, straight away; the body's auto-save waits for them.
+  const [savingTags, setSavingTags] = useState(false);
+  const [tagError, setTagError] = useState<string | null>(null);
   // The title and body that last failed to save: auto-save waits for another edit rather than retrying them.
   const failedRef = useRef<string | null>(null);
   // The draft's unsaved changes, saved when the page moves to another note (or closes) before auto-save has.
@@ -64,6 +76,7 @@ export default function NotePage() {
   const parts = path.split("/");
   const fm = note.state === "ok" ? note.note.frontmatter : {};
   const title = noteTitle(fm, path);
+  useTitle(title);
   // The edited title, saved to the `title` front-matter; a blank one is ignored.
   const newTitle = titleDraft.trim() !== (fm.title || '') ? titleDraft.trim() : null;
   const props = Object.entries(fm).filter(
@@ -84,6 +97,7 @@ export default function NotePage() {
     unsavedRef.current = null;
     setNote({ state: "loading" });
     setSaveError(null);
+    setTagError(null);
     failedRef.current = null;
     const query = new URLSearchParams({ space_id: String(spaceId), path, root: isTemplate ? "templates" : "content" });
     getJson<NoteFile>(`/api/notes/file?${query}`, controller.signal)
@@ -115,16 +129,23 @@ export default function NotePage() {
     return () => controller.abort();
   }, [path, spaceId, isTemplate]);
 
+  // Edited in the task panel: update the linked tasks, dropping one that was deleted or linked elsewhere.
+  useTaskChanges("board", ({ id, task, deleted }) =>
+    setTasks((current) =>
+      current.flatMap((t) => (t.id !== id ? [t] : deleted || (task && task.note_path !== path) ? [] : [task ?? t])),
+    ),
+  );
+
   // Auto-save: a draft is saved once it's been left alone for a moment. Each edit restarts the wait.
   useEffect(() => {
-    if (state !== "draft" || !dirty || saving || failedRef.current === draftKey) return;
+    if (state !== "draft" || !dirty || saving || savingTags || failedRef.current === draftKey) return;
     const timer = window.setTimeout(() => void save(), AUTO_SAVE_DELAY);
     return () => window.clearTimeout(timer);
-  }, [state, dirty, saving, draftKey]);
+  }, [state, dirty, saving, savingTags, draftKey]);
 
   /** Save the draft's title and body and/or switch the note's state (PUT /api/notes/file). */
   async function save(next?: NoteState) {
-    if (note.state !== "ok" || saving) return;
+    if (note.state !== "ok" || saving || savingTags) return;
     const content = body;
     const draft = titleDraft;
     setSaving(next ? "state" : "content");
@@ -151,7 +172,27 @@ export default function NotePage() {
     }
   }
 
-  const actions =
+  /** Replace the note's `tags` front-matter (PUT /api/notes/file), leaving its body and unsaved edits alone. */
+  async function saveTags(tags: string[]) {
+    if (note.state !== "ok" || saving || savingTags) return;
+    setSavingTags(true);
+    setTagError(null);
+    try {
+      const saved = await sendJson<NoteFile>("PUT", "/api/notes/file", { space_id: spaceId, path, tags });
+      // Only the front-matter changed on disk: the last saved body stays the baseline for unsaved edits.
+      setNote((current) =>
+        current.state === "ok" && current.note.path === saved.path
+          ? { state: "ok", note: { ...current.note, frontmatter: saved.frontmatter } }
+          : current,
+      );
+    } catch (err) {
+      setTagError(message(err));
+    } finally {
+      setSavingTags(false);
+    }
+  }
+
+  const status =
     state === "draft" ? (
       <div className="flex items-center gap-3">
         {saveError && !saving ? (
@@ -172,20 +213,44 @@ export default function NotePage() {
         Edit
       </button>
     ) : undefined;
+  // Printing (or saving as PDF from the print dialog) shows just the note; see the print styles in index.css.
+  const actions = (
+    <div className="flex items-center gap-3 print:hidden">
+      {status}
+      <button type="button" className="btn" onClick={() => window.print()} disabled={note.state !== "ok"}>
+        Print / PDF
+      </button>
+    </div>
+  );
 
+  const tags = noteTags(fm);
+  // A note's tags can always be edited, drafts and published notes alike; a template's are only shown.
+  const tagsEditable = state !== null;
   const details =
-    props.length > 0 || tasks.length > 0 ? (
+    props.length > 0 || tasks.length > 0 || tags.length > 0 || tagsEditable ? (
       <>
-        {props.length > 0 && (
-          <dl className="flex flex-wrap gap-x-5 gap-y-1 text-xs">
-            {props.map(([key, value]) => (
-              <div key={key} className="flex gap-1.5">
-                <dt className="text-text-muted">{key}</dt>
-                <dd className="text-text-secondary">{show(value)}</dd>
+        <div className="flex flex-wrap items-center gap-x-5 gap-y-1 text-xs">
+          {props.length > 0 && (
+            <dl className="contents">
+              {props.map(([key, value]) => (
+                <div key={key} className="flex gap-1.5">
+                  <dt className="text-text-muted">{key}</dt>
+                  <dd className="text-text-secondary">{show(value)}</dd>
+                </div>
+              ))}
+            </dl>
+          )}
+          {tagsEditable ? (
+            <NoteTags tags={tags} onChange={saveTags} disabled={saving !== null || savingTags} />
+          ) : (
+            tags.length > 0 && (
+              <div className="flex flex-wrap items-center gap-1.5">
+                <TagPills tags={tags} />
               </div>
-            ))}
-          </dl>
-        )}
+            )
+          )}
+        </div>
+        {tagError && <p className="-mt-3 print:hidden text-[15px] text-accent">Could not update the tags ({tagError}).</p>}
         {tasks.length > 0 && <LinkedTasks tasks={tasks} />}
       </>
     ) : null;
@@ -193,9 +258,9 @@ export default function NotePage() {
   return (
     // The page fills the canvas, so the editor's toolbar spans it; the note sits in a centered text column, out of
     // which resized images and tables can break.
-    <div className="flex w-full flex-col gap-5 px-9 py-7">
+    <div className="flex w-full flex-col gap-5 px-9 py-7 print:gap-4 print:p-0">
       {/* Breadcrumb and actions sit above the document, so the title reads as its first line. */}
-      <div className="flex min-h-10 flex-wrap items-center justify-between gap-4">
+      <div className="flex min-h-10 flex-wrap items-center justify-between gap-4 print:hidden">
         <div className="flex min-w-0 items-center gap-3">
           <span className="truncate font-mono text-xs tracking-[0.06em] text-text-muted">
             {isTemplate ? "TEMPLATE" : parts.slice(0, -1).join(" / ").toUpperCase() || "NOTES"}
@@ -204,12 +269,14 @@ export default function NotePage() {
         </div>
         {actions}
       </div>
-      {saveError && <p className={`${NOTE_COLUMN} text-[13px] text-accent`}>Could not save {path} ({saveError}).</p>}
+      {saveError && <p className={`${NOTE_COLUMN} text-[15px] print:hidden text-accent`}>Could not save {path} ({saveError}).</p>}
       {state === "draft" && note.state === "ok" ? (
         // The editor's toolbar sits above the title, which is edited in place, and the properties.
         <NoteEditor
           key={path}
           spaceId={spaceId}
+          notePath={path}
+          onTaskCreated={(task) => task.note_path === path && setTasks((current) => [...current, task])}
           title={titleDraft}
           onTitleChange={setTitleDraft}
           value={body}
@@ -221,13 +288,13 @@ export default function NotePage() {
         </NoteEditor>
       ) : (
         <>
-          <h1 className={`${NOTE_COLUMN} -mb-2 text-[32px] font-semibold leading-tight`}>{title}</h1>
-          {note.state === "loading" && <p className={`${NOTE_COLUMN} text-[13px] text-text-muted`}>Loading…</p>}
-          {note.state === "error" && <p className={`${NOTE_COLUMN} text-[13px] text-text-secondary`}>Could not open {path} ({note.message}).</p>}
+          <h1 className={`${NOTE_COLUMN} -mb-2 text-[33px] font-semibold leading-tight`}>{title}</h1>
+          {note.state === "loading" && <p className={`${NOTE_COLUMN} text-[15px] text-text-muted`}>Loading…</p>}
+          {note.state === "error" && <p className={`${NOTE_COLUMN} text-[15px] text-text-secondary`}>Could not open {path} ({note.message}).</p>}
           {note.state === "ok" && (
             <>
               {details && <div className={`${NOTE_COLUMN} flex flex-col gap-5`}>{details}</div>}
-              <article className="note-body markdown text-sm leading-relaxed text-text-secondary">
+              <article className="note-body markdown text-[17px] leading-relaxed text-text-secondary">
                 {/* Inline HTML carries text and cell colors, alignment and image and table sizes; anything else in it is stripped. */}
                 <Markdown
                   remarkPlugins={[remarkGfm]}
@@ -248,6 +315,77 @@ export default function NotePage() {
 const DRAFT_TAG = "border-accent/60 text-accent";
 
 /**
+ * A note's tags as `#tag` pills (project codes in their project's color): hovering a pill shows an × that removes
+ * it, and "+ Add tag" opens an inline input (Enter adds, Escape closes). Each change is saved through `onChange`.
+ */
+function NoteTags({ tags, onChange, disabled }: { tags: string[]; onChange: (tags: string[]) => void; disabled: boolean }) {
+  const [adding, setAdding] = useState(false);
+  const [draft, setDraft] = useState("");
+
+  function add() {
+    const tag = draft.trim().replace(/^#+/, "").trim();
+    setDraft("");
+    if (tag && !tags.includes(tag)) onChange([...tags, tag]);
+  }
+
+  return (
+    <div role="group" aria-label="Tags" className="flex flex-wrap items-center gap-1.5">
+      {tags.map((tag) => (
+        <span
+          key={tag}
+          className={`group inline-flex items-center gap-1 rounded border px-1.5 py-px font-mono text-[12px] leading-4 ${PROJECT_TAG[tag.toLowerCase()] ?? LABEL_TAG}`}
+        >
+          {`#${tag}`}
+          <button
+            type="button"
+            aria-label={`Remove tag ${tag}`}
+            title="Remove tag"
+            disabled={disabled}
+            onClick={() => onChange(tags.filter((t) => t !== tag))}
+            className="hidden leading-none text-text-muted hover:text-accent focus-visible:inline group-hover:inline group-focus-within:inline disabled:opacity-50"
+          >
+            ×
+          </button>
+        </span>
+      ))}
+      {adding ? (
+        <input
+          autoFocus
+          aria-label="New tag"
+          placeholder="tag"
+          value={draft}
+          disabled={disabled}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              add();
+            } else if (e.key === "Escape") {
+              setDraft("");
+              setAdding(false);
+            }
+          }}
+          onBlur={() => {
+            add();
+            setAdding(false);
+          }}
+          className="w-28 rounded border border-border-default bg-transparent print:hidden px-1.5 py-px font-mono text-[12px] leading-4 text-text-primary outline-none focus:border-accent/60"
+        />
+      ) : (
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={() => setAdding(true)}
+          className="rounded border border-dashed border-border-default px-1.5 print:hidden py-px font-mono text-[12px] leading-4 text-text-muted hover:border-accent/60 hover:text-accent disabled:opacity-50"
+        >
+          + Add tag
+        </button>
+      )}
+    </div>
+  );
+}
+
+/**
  * A published note's image, in a box laid out as the image would be (taking its `note-media` class and width) with
  * an expand button on hover. Clicking it opens it fullscreen, read-only.
  */
@@ -265,26 +403,70 @@ function NoteImage({ node: _node, className, style, src, alt, title, ...props }:
 
 const NOTE_COMPONENTS: Components = {
   img: NoteImage,
-  a: ({ node: _node, ref, ...props }) => (
-    <a {...props} target={props.href?.startsWith("#") ? undefined : "_blank"} rel="noopener noreferrer" />
-  ),
+  a: ({ node: _node, ref, ...props }) => {
+    // A task or note pill opens in the app, a URL pill in a new tab (see referencePill).
+    const kind = refKind(props.title);
+    if (kind === "task" && props.href) return <TaskPillLink href={props.href}>{props.children}</TaskPillLink>;
+    if (kind && kind !== "url" && props.href)
+      return (
+        <Link to={props.href} className={`reference-pill ${kind}`}>
+          <PillIcon kind={kind} />
+          <span className="reference-pill-label">{props.children}</span>
+        </Link>
+      );
+    if (kind)
+      return (
+        <a href={props.href} title={props.href} target="_blank" rel="noopener noreferrer" className="reference-pill url">
+          <PillIcon kind="url" />
+          <span className="reference-pill-label">{props.children}</span>
+        </a>
+      );
+    return <a {...props} target={props.href?.startsWith("#") ? undefined : "_blank"} rel="noopener noreferrer" />;
+  },
 };
 
+/** A task pill in the read-only note: opens the task in the side panel, staying on the note. */
+function TaskPillLink({ href, children }: { href: string; children: ReactNode }) {
+  const { openTask } = useTaskPanel();
+  const taskId = taskIdFromHref(href);
+  return (
+    <Link
+      to={href}
+      className="reference-pill task"
+      onClick={(e) => {
+        // Ctrl/Cmd-click still opens the backlog in a new tab.
+        if (taskId === null || e.ctrlKey || e.metaKey || e.shiftKey) return;
+        e.preventDefault();
+        openTask(taskId);
+      }}
+    >
+      <PillIcon kind="task" />
+      <span className="reference-pill-label">{children}</span>
+    </Link>
+  );
+}
+
 function LinkedTasks({ tasks }: { tasks: TaskItem[] }) {
+  const { taskId, openTask } = useTaskPanel();
   return (
     <section aria-label="Linked tasks" className="rounded-lg border border-border-default bg-surface-raised">
       <h2 className="flex items-center justify-between border-b border-border-default px-4 py-2 text-xs font-medium uppercase tracking-wider text-text-muted">
         <span>Linked tasks</span>
-        <Link to="/tasks/backlog" className="normal-case tracking-normal text-accent hover:underline">
+        <Link to="/tasks/backlog" className="print:hidden normal-case tracking-normal text-accent hover:underline">
           Backlog
         </Link>
       </h2>
       <ul className="divide-y divide-border-default/60">
         {tasks.map((task) => (
-          <li key={task.id} className="flex items-center gap-2 px-4 py-2 text-[13px]">
-            <span className={`flex-1 truncate ${task.status === "done" ? "text-text-muted line-through" : "text-text-primary"}`}>
+          <li key={task.id} className={`flex items-center gap-2 px-4 py-2 text-[15px] ${taskId === task.id ? "bg-surface-active" : ""}`}>
+            <button
+              type="button"
+              onClick={() => openTask(task.id)}
+              title="Open task details"
+              className={`flex-1 truncate text-left hover:underline ${task.status === "done" ? "text-text-muted line-through" : "text-text-primary"}`}
+            >
               {task.title}
-            </span>
+            </button>
             {task.project_code && (
               <Tag className={PROJECT_TAG[task.project_code.toLowerCase()] ?? NEUTRAL_TAG}>{task.project_code}</Tag>
             )}

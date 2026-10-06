@@ -55,7 +55,7 @@ import { defaultSchema, type Options as SanitizeSchema } from "rehype-sanitize";
  */
 
 /** The text column a note's title, properties and body sit in, centered on the page (see `.note-body` in index.css). */
-export const NOTE_COLUMN = "mx-auto w-full max-w-4xl";
+export const NOTE_COLUMN = "mx-auto w-full max-w-4xl print:max-w-none";
 
 export const ALIGNMENTS = ["left", "center", "right"] as const;
 export type Alignment = (typeof ALIGNMENTS)[number];
@@ -100,6 +100,13 @@ function aligned(node: JSONContent, markdown: string, parentType?: string | null
 export const AlignedParagraph = Paragraph.extend({
   renderMarkdown(node, h, ctx) {
     return aligned(node, this.parent?.(node, h, ctx) ?? "", ctx.parentType);
+  },
+  parseMarkdown(token, h) {
+    // Tiptap unwraps a paragraph of nothing but an image into the image itself, a block; ours is inline (as
+    // `![]()` is), so it would sit loose in the doc, which the schema doesn't allow. Keep its paragraph.
+    const tokens = token.tokens ?? [];
+    if (tokens.length === 1 && tokens[0].type === "image") return h.createNode("paragraph", null, h.parseInline(tokens));
+    return this.parent?.(token, h) ?? [];
   },
 });
 

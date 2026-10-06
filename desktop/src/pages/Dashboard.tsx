@@ -5,6 +5,7 @@ import { formatDay, ME, type TriageItem } from "../components/TriageBoard";
 import { getJson, message } from "../lib/api";
 import { useSpace } from "../lib/space";
 import { projectSwatch } from "../lib/projects";
+import { useTitle } from "../lib/title";
 
 // The visible working day and its scale (the mockups use 64px per hour).
 const DAY_START = 8 * 60;
@@ -118,6 +119,7 @@ export default function Dashboard() {
   const [triage, setTriage] = useState<State>({ state: "loading" });
   const [now, setNow] = useState(nowMinutes);
   const { spaceId } = useSpace();
+  useTitle("Today");
 
   const load = useCallback((signal?: AbortSignal) => {
     setTriage({ state: "loading" });
@@ -150,8 +152,8 @@ export default function Dashboard() {
           <div className="font-mono text-xs tracking-[0.06em] text-text-muted">
             {WEEKDAYS[today.getDay()]} {today.getDate()} {MONTHS[today.getMonth()]} · WEEK {isoWeek(today)}
           </div>
-          <h1 className="mt-1 text-[28px] font-semibold">Today</h1>
-          <div className="mt-1 text-[13px] text-text-muted">
+          <h1 className="mt-1 text-[29px] font-semibold">Today</h1>
+          <div className="mt-1 text-[15px] text-text-muted">
             The plan for the day, built from your tasks, the Gantt and your captured notes.
           </div>
         </div>
@@ -169,9 +171,9 @@ export default function Dashboard() {
       <div className="grid grid-cols-[minmax(0,1fr)_260px] items-start gap-6">
         <section className="panel px-[22px] py-4" aria-label="Schedule">
           <Timeline blocks={plan?.blocks ?? []} now={now} />
-          {triage.state === "loading" && <p className="mt-3 text-[13px] text-text-muted">Loading the day…</p>}
+          {triage.state === "loading" && <p className="mt-3 text-[15px] text-text-muted">Loading the day…</p>}
           {plan && plan.unscheduled > 0 && (
-            <p className="mt-3 text-[13px] text-text-muted">
+            <p className="mt-3 text-[15px] text-text-muted">
               {plan.unscheduled} more task{plan.unscheduled === 1 ? "" : "s"} due today did not fit.{" "}
               <Link to="/triage" className="text-accent hover:underline">
                 See all tasks
@@ -183,7 +185,7 @@ export default function Dashboard() {
         <section className="panel" aria-label="Coming up">
           <h2 className="mb-2 text-base font-semibold">Coming up</h2>
           {plan && plan.comingUp.length === 0 && (
-            <p className="border-t border-border-default pt-2.5 text-[13px] text-text-muted">Nothing starts this week.</p>
+            <p className="border-t border-border-default pt-2.5 text-[15px] text-text-muted">Nothing starts this week.</p>
           )}
           {plan?.comingUp.map((item) => (
             <Link
@@ -194,7 +196,7 @@ export default function Dashboard() {
               <span className="font-mono text-xs text-text-muted">
                 {item.start_date ? upperDay(item.start_date) : "SOON"} · {item.project ?? "INBOX"}
               </span>
-              <span className="text-[13px]">{item.title}</span>
+              <span className="text-[15px]">{item.title}</span>
             </Link>
           ))}
         </section>
@@ -252,7 +254,7 @@ function TimelineBlock({ block }: { block: Block }) {
       <Link
         to={block.to}
         title={block.detail}
-        className={`${base} ${look} flex items-center justify-between gap-2 text-[13px] font-semibold`}
+        className={`${base} ${look} flex items-center justify-between gap-2 text-[15px] font-semibold`}
         style={{ top, height }}
       >
         <span className="truncate">{block.title}</span>
@@ -263,9 +265,9 @@ function TimelineBlock({ block }: { block: Block }) {
   return (
     <Link to={block.to} className={`${base} ${look} flex flex-col gap-0.5 py-2`} style={{ top, height }}>
       <span className="flex items-center justify-between gap-2">
-        <span className="truncate text-[13px] font-semibold">{block.title}</span>
+        <span className="truncate text-[15px] font-semibold">{block.title}</span>
         {block.chip && (
-          <span className={`chip shrink-0 !py-0 !text-[11px] ${block.chip === "Overdue" ? "!border-accent/60 !text-accent" : ""}`}>
+          <span className={`chip shrink-0 !py-0 !text-[13px] ${block.chip === "Overdue" ? "!border-accent/60 !text-accent" : ""}`}>
             {block.chip}
           </span>
         )}

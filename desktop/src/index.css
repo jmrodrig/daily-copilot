@@ -20,22 +20,22 @@ body {
 /* Shared controls, as in docs/mockups/Main.dc.html. */
 @layer components {
   .btn {
-    @apply inline-flex min-h-10 items-center justify-center gap-2 rounded-lg border border-border-strong bg-transparent px-3.5 text-[13px] font-medium text-text-primary hover:bg-surface-raised disabled:cursor-not-allowed disabled:opacity-40;
+    @apply inline-flex min-h-10 items-center justify-center gap-2 rounded-lg border border-border-strong bg-transparent px-3.5 text-[15px] font-medium text-text-primary hover:bg-surface-raised disabled:cursor-not-allowed disabled:opacity-40;
   }
   .btn-primary {
-    @apply inline-flex min-h-10 items-center justify-center rounded-lg bg-accent px-4 text-[13px] font-semibold text-text-onAccent hover:bg-accent-soft disabled:cursor-not-allowed disabled:opacity-40;
+    @apply inline-flex min-h-10 items-center justify-center rounded-lg bg-accent px-4 text-[15px] font-semibold text-text-onAccent hover:bg-accent-soft disabled:cursor-not-allowed disabled:opacity-40;
   }
   .chip {
-    @apply inline-flex items-center gap-1.5 whitespace-nowrap rounded-full border border-border-light px-2.5 py-[3px] text-xs text-text-secondary;
+    @apply inline-flex items-center gap-1.5  rounded-full border border-border-light px-2.5 py-[3px] text-xs text-text-secondary;
   }
   .panel {
     @apply rounded-xl border border-border-default bg-surface-raised px-[22px] py-5;
   }
   .seg {
-    @apply min-h-9 rounded-full border border-border-strong bg-surface-panel px-3.5 text-[13px] text-text-secondary hover:text-text-primary;
+    @apply min-h-9 rounded-full border border-border-strong bg-surface-panel px-3.5 text-[15px] text-text-secondary hover:text-text-primary;
   }
   .seg-on {
-    @apply min-h-9 rounded-full border border-accent bg-accent/[0.16] px-3.5 text-[13px] font-semibold text-accent-soft;
+    @apply min-h-9 rounded-full border border-accent bg-accent/[0.16] px-3.5 text-[15px] font-semibold text-accent-soft;
   }
   .field {
     @apply w-full rounded-lg border border-border-light bg-surface-panel px-3 py-2.5 text-sm text-text-primary placeholder:text-[#8797A1] focus:border-accent/70 focus:outline-none;
@@ -101,10 +101,10 @@ body {
   @apply mt-5 text-xl;
 }
 .note-body h3 {
-  @apply mt-4 text-base;
+  @apply mt-4 text-lg;
 }
 .note-body table {
-  @apply w-full text-[13px];
+  @apply w-full text-[15px];
 }
 .note-body th {
   @apply bg-surface-raised font-semibold text-text-primary;
@@ -194,7 +194,7 @@ body {
   @apply bg-accent;
 }
 .media-width-label {
-  @apply absolute left-1/2 top-2 z-[2] -translate-x-1/2 rounded bg-background/90 px-1.5 py-0.5 font-mono text-[11px] text-text-primary;
+  @apply absolute left-1/2 top-2 z-[2] -translate-x-1/2 rounded bg-background/90 px-1.5 py-0.5 font-mono text-[13px] text-text-primary;
 }
 /* In the read-only view an image sits in a box with its expand button (NotePage's NoteImage), laid out as the image
    would be: the box takes its width, and the image fills it. */
@@ -233,6 +233,13 @@ body {
 .note-body a[href*="/api/notes/image/"]:hover {
   @apply bg-surface-hover border-border-strong;
 }
+/* A contenteditable shows the text cursor over links (and over the marks and icon inside them) unless told otherwise,
+   so the whole pill, everything in it, and its icon ask for the pointer explicitly. */
+.note-body a[href*="/api/notes/image/"],
+.note-body a[href*="/api/notes/image/"] *,
+.note-body a[href*="/api/notes/image/"]::before {
+  cursor: pointer;
+}
 .note-body a[href*="/api/notes/image/"]::before {
   content: "";
   display: inline-block;
@@ -250,7 +257,123 @@ body {
   opacity: 0.7;
 }
 
+/* A file still uploading (NoteEditor's upload placeholders): a pill like an attachment's, with a progress bar. */
+.ProseMirror .upload-pill {
+  @apply mx-1 inline-flex min-w-28 max-w-64 flex-col gap-1 rounded-full border border-dashed border-border-default bg-surface-raised px-2.5 py-1 align-middle text-xs font-medium text-text-secondary;
+  cursor: progress;
+  user-select: none;
+}
+.ProseMirror .upload-pill-name {
+  @apply truncate leading-none;
+}
+.ProseMirror .upload-pill-track {
+  @apply block h-1 w-full overflow-hidden rounded-full bg-surface-hover;
+}
+.ProseMirror .upload-pill-bar {
+  @apply block h-full rounded-full bg-accent transition-[width] duration-150 ease-out;
+  width: 0;
+}
+
 /* Ensure regular links in the editor are styled as links, not plain text */
-.note-body a:not([href*="/api/notes/image/"]) {
+.note-body a:not([href*="/api/notes/image/"]):not(.reference-pill) {
   @apply text-accent underline;
+}
+
+/* Task, note and URL references (referencePill): inline pills like Confluence macros, an icon and the name. Each kind
+   has its own icon color; in the editor a pill is one unit, selected by a click and opened by a double-click. */
+.note-body .reference-pill {
+  @apply mx-0.5 inline-flex  items-center gap-1  rounded border border-border-default bg-surface-raised px-1.5 align-baseline text-[0.92em] font-medium leading-[1.55] text-text-primary no-underline;
+  cursor: pointer;
+  user-select: none;
+}
+.note-body .reference-pill:hover {
+  @apply border-border-strong bg-surface-hover;
+}
+.note-body .reference-pill.selected,
+.note-body .ProseMirror-selectednode.reference-pill,
+.note-body .ProseMirror-selectednode > .reference-pill {
+  @apply border-accent bg-accent/[0.12];
+}
+.note-body .reference-pill .reference-pill-icon {
+  @apply shrink-0;
+}
+.note-body .reference-pill.task .reference-pill-icon {
+  color: #56c8a8;
+}
+.note-body .reference-pill.note .reference-pill-icon {
+  color: #6cb6ea;
+}
+.note-body .reference-pill.url .reference-pill-icon {
+  color: #b7a3f2;
+}
+.note-body .reference-pill-label {
+  @apply break-words;
+}
+
+/* Printing a note (NotePage's Print button, or Save as PDF from the print dialog): the app chrome is hidden with
+   `print:hidden`, and the note prints as a document, black on white at the page's full width, whatever the theme.
+   Text and cell colors set in the note (inline styles) are kept. */
+@media print {
+  /* The page margins are painted with the canvas colour, which follows color-scheme; index.html pins it to dark
+     with an inline style, so it takes !important to get white margins rather than dark ones. */
+  /* A zero page margin leaves the browser no room for its date/title/URL headers and footers, so they are
+     dropped; the body padding puts the 16mm back, and box-decoration-break repeats it on every page. */
+  @page {
+    margin: 0;
+    background: #fff;
+  }
+  :root {
+    color-scheme: light !important;
+  }
+  html,
+  body,
+  #root {
+    height: auto;
+    background: #fff !important;
+    color: #000 !important;
+  }
+  body {
+    padding: 16mm !important;
+    box-decoration-break: clone;
+    -webkit-box-decoration-break: clone;
+  }
+  *:not([style*="color"]),
+  *::before,
+  *::after {
+    color: inherit !important;
+    background-color: transparent !important;
+    border-color: #c8c8c8 !important;
+    box-shadow: none !important;
+  }
+  [style*="color"] {
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
+  .note-body > * {
+    max-width: none;
+  }
+  .note-body th:not([style*="color"]) {
+    background-color: #f0f0f0 !important;
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
+  .note-body a::before {
+    background-color: currentColor !important;
+  }
+  .note-body pre,
+  .note-body table,
+  .note-body img,
+  .note-body blockquote {
+    break-inside: avoid;
+  }
+  .note-body h1,
+  .note-body h2,
+  .note-body h3 {
+    break-after: avoid;
+  }
+  .ProseMirror .column-resize-handle,
+  .ProseMirror .table-width-handle,
+  .media-guides {
+    display: none !important;
+  }
 }

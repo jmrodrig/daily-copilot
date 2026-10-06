@@ -123,6 +123,14 @@ class Task(Versioned, Base):
     is_milestone: Mapped[bool] = mapped_column(default=False)
     # Who is personally working on the task; None means nobody has claimed it.
     assignee: Mapped[str | None] = mapped_column(String(64), default=None)
+    # Free-form labels, e.g. ["welding", "client"]; None only for rows from before Phase 10.
+    tags: Mapped[list[str] | None] = mapped_column(JSON, default=list)
+    # Discussion on the task, oldest first: `schemas.TaskComment` dicts. None only for rows from before
+    # the task panel. Replace the list rather than mutating it, so the change is detected and versioned.
+    comments: Mapped[list[dict] | None] = mapped_column(JSON, default=list)
+    # The note the task was created from or belongs to, relative to the space's `content/`.
+    # A task links to at most one note; a note can have many tasks.
+    note_path: Mapped[str | None] = mapped_column(default=None, index=True)
     created_at: Mapped[dt.datetime] = mapped_column(server_default=func.now())
     completed_at: Mapped[dt.datetime | None]
 
@@ -170,7 +178,10 @@ class Link(Versioned, Base):
 
 
 class TaskNoteLink(Base):
-    """Many-to-many link between a task and a note (path relative to the task's space `content/`)."""
+    """Deprecated: many-to-many task-note links, replaced by `Task.note_path` (one note per task).
+
+    Kept so old databases load; `spaces.migrate` moves any rows into `Task.note_path`.
+    """
 
     __tablename__ = "task_note_links"
 

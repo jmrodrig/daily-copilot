@@ -124,16 +124,19 @@ optionally in a project. Statuses: `backlog`, `todo`, `in_progress`, `blocked`, 
 Gantt imports land here too (`is_gantt_task=True`).
 
 - `GET /api/tasks?space_id=1` lists a space's tasks, earliest due date first, as
-  `TaskItem`s (`project_code`, `completion_percent`, linked `note_paths`, …). Filters:
+  `TaskItem`s (`project_code`, `completion_percent`, linked `note_path`, …). Filters:
   `project_id`, `status`, `note_path` (tasks linked to that note) and `assignee` (an
   empty `assignee=` means unassigned).
 - `POST /api/tasks` `{"space_id", "title", "project_id"?, "status"?, "start_date"?,
-  "deadline"?, "assignee"?, "note_paths"?}` creates a task (201; default status `backlog`).
+  "deadline"?, "assignee"?, "note_path"?}` creates a task (201; default status `backlog`).
 - `GET /api/tasks/{id}`; `PATCH /api/tasks/{id}` changes any of `title`, `description`,
-  `status`, `priority`, `assignee`, `project_id`, `start_date`, `deadline`;
+  `status`, `priority`, `assignee`, `project_id`, `start_date`, `deadline`, `note_path`;
   `DELETE /api/tasks/{id}` soft-deletes it (204).
-- `POST /api/tasks/{id}/links` `{"note_path"}` links a note of the task's space
-  (`TaskNoteLink`, many-to-many); `DELETE /api/tasks/{id}/links?note_path=...` unlinks it.
+- A task links to at most one note (`note_path`, relative to the space's `content/`; it
+  must exist), and a note can have many tasks. `"note_path": null` in a PATCH unlinks.
+  Moving a note carries its tasks' links along; deleting it unlinks them. The old
+  many-to-many `TaskNoteLink` table is deprecated: startup moves its rows onto
+  `Task.note_path` (a task keeps its first link alphabetically).
 - `GET /api/projects?space_id=1` lists the space's projects (those with tasks or a project
   folder in it; a project with neither belongs to the Default space) for filters and pickers.
 

@@ -4,6 +4,7 @@ import { useParams } from "react-router-dom";
 import GanttChart, { type GanttProject } from "../components/GanttChart";
 import { getJson, message } from "../lib/api";
 import { useSpace } from "../lib/space";
+import { useTaskPanel } from "../lib/tasks";
 import PageHeader from "../components/PageHeader";
 
 type State = { state: "loading" } | { state: "ok"; project: GanttProject | null } | { state: "error"; message: string };
@@ -13,6 +14,7 @@ export default function ProjectPlan() {
   const { code = "" } = useParams();
   const [gantt, setGantt] = useState<State>({ state: "loading" });
   const { spaceId } = useSpace();
+  const { taskId, openTask } = useTaskPanel();
 
   useEffect(() => {
     const controller = new AbortController();
@@ -31,13 +33,13 @@ export default function ProjectPlan() {
   return (
     <div className="flex flex-col gap-5 px-9 py-7">
       <PageHeader eyebrow={`${code.toUpperCase()} · PLAN`} title={project?.name || code} subtitle="Shop floor Gantt" />
-      {gantt.state === "loading" && <p className="text-[13px] text-text-muted">Loading the Gantt…</p>}
+      {gantt.state === "loading" && <p className="text-[15px] text-text-muted">Loading the Gantt…</p>}
       {gantt.state === "error" && (
-        <p className="text-[13px] text-text-secondary">Could not load the Gantt ({gantt.message}).</p>
+        <p className="text-[15px] text-text-secondary">Could not load the Gantt ({gantt.message}).</p>
       )}
       {gantt.state === "ok" &&
         (project && project.tasks.length > 0 ? (
-          <GanttChart projects={[project]} />
+          <GanttChart projects={[project]} activeTaskId={taskId} onTaskClick={openTask} />
         ) : (
           <p className="panel text-center text-sm text-text-muted">
             No shop floor tasks loaded for this project yet. Import its Gantt PDF with cli_import.py.

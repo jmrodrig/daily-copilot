@@ -1,6 +1,7 @@
 """FastAPI entry point. Run with `uvicorn main:app --reload` from backend/."""
 
 import re
+import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
@@ -10,7 +11,7 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
-from sqlalchemy import delete, func, select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 import agent
@@ -19,7 +20,7 @@ import database
 import spaces
 from database import get_db, init_db
 from history import set_source, soft_delete, to_jsonable, utcnow
-from models import FolderMeta, Project, SavedPrompt, Space, Task, TaskNoteLink, TaskView, TimeLog
+from models import FolderMeta, Project, SavedPrompt, Space, Task, TaskView, TimeLog
 import schemas
 from schemas import (
     AccessMode,
@@ -47,14 +48,15 @@ from schemas import (
     NoteFile,
     NoteRoot,
     NoteState,
+    NoteRecent,
     NoteSummary,
     NoteUpdate,
     Priority,
     ProjectOption,
     Status,
+    TaskCommentIn,
     TaskCreate,
     TaskItem,
-    TaskNoteLinkIn,
     TaskUpdate,
     TreeResponse,
     TriageItem,
@@ -245,6 +247,8 @@ def _triage_tasks(db: Session, today: date, space_id: int) -> list[tuple[tuple, 
             assignee=task.assignee,
             start_date=task.start_date,
             due_date=task.deadline,
+            note_path=task.note_path,
+            tags=task.tags,
         )
         # Earliest deadline first; tasks without one go after those with one.
         key = (task.deadline is None, task.deadline or date.max, task.start_date, task.id)
@@ -303,6 +307,7 @@ def _triage_notes(root: Path) -> list[tuple[tuple, TriageItem]]:
             created=created,
             path=path,
             content=content,
+            tags=frontmatter.get("tags"),
         )
         # Oldest first, so nothing sits at the bottom of a bucket forever; undated notes last.
         key = (created is None, created or datetime.max, path)
@@ -340,13 +345,15 @@ def _check_project(db: Session, project_id: int | None) -> None:
 @app.patch("/api/tasks/{task_id}")
 def update_task(task_id: int, request: TaskUpdate, db: Session = Depends(get_db)) -> schemas.Task:
     """Change a task: claim or unclaim it (`assignee`), move it on the board (`status`), or edit its
-    title, dates or project. Unsent fields are left alone."""
+    title, dates, project or linked note (`note_path`; null unlinks). Unsent fields are left alone."""
     task = _get_task(db, task_id)
-    set_source(db, TASK_UPDATE_SOURCE)
     changes = request.model_dump(exclude_unset=True)
     if "project_id" in changes:
         _check_project(db, changes["project_id"])
-    for key in ("assignee", "title", "description", "priority", "project_id", "start_date", "deadline"):
+    if "note_path" in changes:
+        changes["note_path"] = _link_path(spaces.content_dir(task.space_id or spaces.DEFAULT_SPACE_ID), changes["note_path"])
+    set_source(db, TASK_UPDATE_SOURCE)
+    for key in ("assignee", "title", "description", "priority", "project_id", "start_date", "deadline", "tags", "note_path"):
         if key in changes:
             setattr(task, key, changes[key])
     if "status" in changes and changes["status"] != task.status:
@@ -514,6 +521,22 @@ def list_notes(root: Path = Depends(space_content)) -> list[NoteSummary]:
     return [spaces.note_summary(path, root) for path in paths if not _hidden(path)]
 
 
+@app.get("/api/notes/recent")
+def recent_notes(root: Path = Depends(space_content)) -> list[NoteRecent]:
+    """Every note of a space with its tags, most recently modified first (for the editor's link picker)."""
+    notes = []
+    for path in file_layer.list_notes("**/*.md", notes_dir=root):
+        if _hidden(path):
+            continue
+        try:
+            modified = datetime.fromtimestamp((root / path).stat().st_mtime)
+            tags = schemas.clean_tags(file_layer.read_note(path, notes_dir=root)["frontmatter"].get("tags"))
+        except (file_layer.FileLayerError, OSError, UnicodeDecodeError):
+            continue
+        notes.append(NoteRecent(**spaces.note_summary(path, root).model_dump(), tags=tags, modified=modified))
+    return sorted(notes, key=lambda note: note.modified, reverse=True)
+
+
 @app.get("/api/notes/file")
 def get_note(
     path: str,
@@ -534,7 +557,8 @@ def get_note(
 
 @app.put("/api/notes/file")
 def update_note(request: NoteUpdate, db: Session = Depends(get_db)) -> NoteFile:
-    """Save a draft's body and/or title, and/or switch it between draft and published (the `state` front-matter)."""
+    """Save a draft's body and/or title, set the note's tags, and/or switch it between draft and published (the
+    `state` front-matter)."""
     root = spaces.content_dir(_space_id_or_404(db, request.space_id))
     try:
         note = file_layer.read_note(request.path, notes_dir=root)
@@ -549,6 +573,11 @@ def update_note(request: NoteUpdate, db: Session = Depends(get_db)) -> NoteFile:
         frontmatter["state"] = request.state.value
     if request.title is not None:
         frontmatter["title"] = request.title
+    if request.tags is not None:
+        if request.tags:
+            frontmatter["tags"] = request.tags
+        else:
+            frontmatter.pop("tags", None)
     content = note["content"] if request.content is None else request.content
     file_layer.write_note(
         note["path"], content, frontmatter, AccessMode.WRITE_DIRECTLY, notes_dir=root, source=DESKTOP_SOURCE
@@ -696,15 +725,45 @@ def create_folder(request: FolderCreate, db: Session = Depends(get_db)) -> schem
     return schemas.FolderNode(name=folder.name, path=rel)
 
 
-def _fill_template(text: str, title: str, today: date) -> str:
-    return text.replace("{title}", title).replace("{date}", today.isoformat())
+# `{title}`, `{date}` and `{project}` placeholders, also written `{{title}}` etc.
+_PLACEHOLDER = re.compile(r"\{\{\s*(title|date|project)\s*\}\}|\{(title|date|project)\}")
+
+
+def _fill_template(text: str, values: dict[str, str]) -> str:
+    return _PLACEHOLDER.sub(lambda m: values[m.group(1) or m.group(2)], text)
+
+
+def _fill_frontmatter(value: Any, values: dict[str, str]) -> Any:
+    """Fill the placeholders of a template's front-matter value; tags left blank (no project) are dropped."""
+    if isinstance(value, str):
+        return _fill_template(value, values)
+    if isinstance(value, list):
+        filled = []
+        for item in value:
+            # An unquoted `- {project}` reads as the mapping `{project: null}`.
+            if isinstance(item, dict) and len(item) == 1 and next(iter(item.values())) is None:
+                item = f"{{{next(iter(item))}}}"
+            item = _fill_frontmatter(item, values)
+            if not (isinstance(item, str) and not item.strip()):
+                filled.append(item)
+        return filled
+    if isinstance(value, dict):
+        return {key: _fill_frontmatter(item, values) for key, item in value.items()}
+    return value
+
+
+def _folder_project_code(db: Session, space_id: int, note_path: str) -> str:
+    """The project code of the note's nearest project folder, or "" outside one."""
+    meta = spaces.project_folder_for(spaces.folder_metas(db, space_id), note_path)
+    return meta.project.code if meta is not None and meta.project is not None else ""
 
 
 @app.post("/api/notes", status_code=201)
 def create_note(request: NoteCreate, db: Session = Depends(get_db)) -> NoteFile:
     """Create a note in content/, scaffolded from a template when `template` is given.
 
-    Templates may use `{title}` and `{date}` placeholders in their body and front-matter values.
+    Templates may use `{title}`, `{date}` and `{project}` placeholders (or `{{title}}` etc.) in their body and
+    front-matter values; `{project}` is the code of the note's project folder, e.g. `tags: ["{project}"]`.
     """
     root = spaces.content_dir(_space_id_or_404(db, request.space_id))
     path = request.path.strip().strip("/")
@@ -731,11 +790,13 @@ def create_note(request: NoteCreate, db: Session = Depends(get_db)) -> NoteFile:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=f"No template at {request.template}") from exc
-        frontmatter = {
-            key: _fill_template(value, title, today) if isinstance(value, str) else value
-            for key, value in template["frontmatter"].items()
+        values = {
+            "title": title,
+            "date": today.isoformat(),
+            "project": _folder_project_code(db, request.space_id, rel),
         }
-        content = _fill_template(template["content"], title, today)
+        frontmatter = {key: _fill_frontmatter(value, values) for key, value in template["frontmatter"].items()}
+        content = _fill_template(template["content"], values)
     frontmatter.setdefault("created", today.isoformat())
     frontmatter.setdefault("state", NoteState.DRAFT.value)
     file_layer.write_note(rel, content, frontmatter, AccessMode.WRITE_DIRECTLY, notes_dir=root, source=DESKTOP_SOURCE)
@@ -884,10 +945,6 @@ def list_projects(space_id: int = spaces.DEFAULT_SPACE_ID, db: Session = Depends
 
 
 def _task_items(db: Session, tasks: list[Task]) -> list[TaskItem]:
-    ids = [t.id for t in tasks]
-    links: dict[int, list[str]] = {}
-    for link in db.scalars(select(TaskNoteLink).where(TaskNoteLink.task_id.in_(ids)).order_by(TaskNoteLink.note_path)):
-        links.setdefault(link.task_id, []).append(link.note_path)
     project_ids = {t.project_id for t in tasks if t.project_id is not None}
     codes = dict(
         db.execute(
@@ -910,14 +967,19 @@ def _task_items(db: Session, tasks: list[Task]) -> list[TaskItem]:
             completion_percent=t.completion_percent,
             is_gantt_task=t.is_gantt_task,
             is_milestone=t.is_milestone,
-            note_paths=links.get(t.id, []),
+            tags=schemas.clean_tags(t.tags),
+            note_path=t.note_path,
+            comments=schemas.clean_comments(t.comments),
         )
         for t in tasks
     ]
 
 
-def _link_path(root: Path, note_path: str) -> str:
-    """A linkable note: an existing note in the space's content/, as a path relative to it."""
+def _link_path(root: Path, note_path: str | None) -> str | None:
+    """A linkable note: an existing note in the space's content/, as a path relative to it.
+    None (or blank) means no note."""
+    if note_path is None or not note_path.strip():
+        return None
     try:
         path = file_layer.resolve_note_path(note_path, root)
     except file_layer.NotePathError as exc:
@@ -934,12 +996,13 @@ def list_tasks(
     assignee: str | None = None,
     status: Status | None = None,
     note_path: str | None = None,
+    tag: str | None = None,
     db: Session = Depends(get_db),
 ) -> list[TaskItem]:
     """The tasks of a space for the Kanban, Backlog and Gantt views, earliest due date first.
 
-    Filters: `project_id`, `status`, `note_path` (tasks linked to that note), and `assignee`
-    (an empty `assignee=` means unassigned).
+    Filters: `project_id`, `status`, `note_path` (tasks linked to that note), `tag` (tasks with
+    that tag), and `assignee` (an empty `assignee=` means unassigned).
     """
     query = select(Task).where(_in_space(_space_id_or_404(db, space_id)))
     if project_id is not None:
@@ -949,24 +1012,34 @@ def list_tasks(
     if status is not None:
         query = query.where(Task.status == status)
     if note_path is not None:
-        query = query.where(Task.id.in_(select(TaskNoteLink.task_id).where(TaskNoteLink.note_path == note_path)))
+        query = query.where(Task.note_path == note_path)
     query = query.order_by(Task.deadline.is_(None), Task.deadline, Task.start_date.is_(None), Task.start_date, Task.id)
-    return _task_items(db, list(db.scalars(query)))
+    tasks = list(db.scalars(query))
+    if tag is not None and tag.strip():
+        # Tags are a JSON list, so match them here rather than in SQL.
+        tasks = [t for t in tasks if tag.strip() in schemas.clean_tags(t.tags)]
+    return _task_items(db, tasks)
+
+
+@app.get("/api/spaces/{space_id}/tags")
+def list_tags(space_id: int, db: Session = Depends(get_db)) -> list[str]:
+    """Every tag used on the tasks of a space, sorted case-insensitively (for the tag filter)."""
+    query = select(Task.tags).where(_in_space(_space_id_or_404(db, space_id)))
+    tags = {tag for task_tags in db.scalars(query) for tag in schemas.clean_tags(task_tags)}
+    return sorted(tags, key=lambda tag: (tag.lower(), tag))
 
 
 @app.post("/api/tasks", status_code=201)
 def create_task(request: TaskCreate, db: Session = Depends(get_db)) -> TaskItem:
-    """Create a task in a space, optionally in a project and linked to notes."""
+    """Create a task in a space, optionally in a project and linked to a note (`note_path`)."""
     root = spaces.content_dir(_space_id_or_404(db, request.space_id))
     _check_project(db, request.project_id)
-    note_paths = list(dict.fromkeys(_link_path(root, p) for p in request.note_paths))
+    note_path = _link_path(root, request.note_path)
     set_source(db, DESKTOP_SOURCE)
-    task = Task(**request.model_dump(exclude={"note_paths"}), is_gantt_task=False)
+    task = Task(**request.model_dump(exclude={"note_path"}), note_path=note_path, is_gantt_task=False)
     if task.status == Status.DONE:
         task.completed_at = utcnow()
     db.add(task)
-    db.flush()
-    db.add_all(TaskNoteLink(task_id=task.id, note_path=path) for path in note_paths)
     db.commit()
     return _task_items(db, [task])[0]
 
@@ -985,23 +1058,49 @@ def delete_task(task_id: int, db: Session = Depends(get_db)) -> None:
     db.commit()
 
 
-@app.post("/api/tasks/{task_id}/links")
-def link_note(task_id: int, request: TaskNoteLinkIn, db: Session = Depends(get_db)) -> TaskItem:
-    """Link a note of the task's space to the task (linking twice is harmless)."""
-    task = _get_task(db, task_id)
-    path = _link_path(spaces.content_dir(task.space_id or spaces.DEFAULT_SPACE_ID), request.note_path)
-    if db.get(TaskNoteLink, (task.id, path)) is None:
-        db.add(TaskNoteLink(task_id=task.id, note_path=path))
-        db.commit()
-    return _task_items(db, [task])[0]
-
-
-@app.delete("/api/tasks/{task_id}/links")
-def unlink_note(task_id: int, note_path: str, db: Session = Depends(get_db)) -> TaskItem:
-    task = _get_task(db, task_id)
-    db.execute(delete(TaskNoteLink).where(TaskNoteLink.task_id == task.id, TaskNoteLink.note_path == note_path))
+def _save_comments(db: Session, task: Task, comments: list[schemas.TaskComment]) -> TaskItem:
+    # Assign a new list (not an in-place change) so the JSON column is flagged dirty and versioned.
+    set_source(db, DESKTOP_SOURCE)
+    task.comments = [comment.model_dump(mode="json") for comment in comments]
     db.commit()
     return _task_items(db, [task])[0]
+
+
+def _comment_index(comments: list[schemas.TaskComment], comment_id: str) -> int:
+    for index, comment in enumerate(comments):
+        if comment.id == comment_id:
+            return index
+    raise HTTPException(status_code=404, detail=f"Unknown comment id: {comment_id}")
+
+
+@app.post("/api/tasks/{task_id}/comments", status_code=201)
+def add_task_comment(task_id: int, request: TaskCommentIn, db: Session = Depends(get_db)) -> TaskItem:
+    """Add a comment to the end of a task's discussion."""
+    task = _get_task(db, task_id)
+    comments = schemas.clean_comments(task.comments)
+    comments.append(
+        schemas.TaskComment(id=secrets.token_hex(6), author=request.author, text=request.text, created_at=utcnow())
+    )
+    return _save_comments(db, task, comments)
+
+
+@app.patch("/api/tasks/{task_id}/comments/{comment_id}")
+def edit_task_comment(task_id: int, comment_id: str, request: TaskCommentIn, db: Session = Depends(get_db)) -> TaskItem:
+    """Change a comment's text; its author and creation time are kept."""
+    task = _get_task(db, task_id)
+    comments = schemas.clean_comments(task.comments)
+    index = _comment_index(comments, comment_id)
+    comments[index] = comments[index].model_copy(update={"text": request.text, "updated_at": utcnow()})
+    return _save_comments(db, task, comments)
+
+
+@app.delete("/api/tasks/{task_id}/comments/{comment_id}")
+def delete_task_comment(task_id: int, comment_id: str, db: Session = Depends(get_db)) -> TaskItem:
+    """Remove a comment (the previous state stays in `history`)."""
+    task = _get_task(db, task_id)
+    comments = schemas.clean_comments(task.comments)
+    del comments[_comment_index(comments, comment_id)]
+    return _save_comments(db, task, comments)
 
 
 # --- Saved task views (Phase 9.1) -------------------------------------------------

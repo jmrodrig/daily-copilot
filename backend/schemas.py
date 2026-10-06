@@ -46,6 +46,18 @@ class LinkType(str, Enum):
     FINISH_TO_START = "finish_to_start"
 
 
+def clean_tags(value: Any) -> list[str]:
+    """Tags: stripped, blanks and duplicates dropped, order kept (None means no tags).
+
+    A single string (e.g. hand-written front-matter `tags: urgent`) counts as one tag.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        value = [value]
+    return list(dict.fromkeys(tag.strip() for tag in value if isinstance(tag, str) and tag.strip()))
+
+
 class Project(BaseModel):
     id: int | None = None
     code: str = Field(min_length=1, description="Project number, e.g. C7801")
@@ -66,6 +78,46 @@ class Subtask(BaseModel):
     completed_at: datetime | None = None
 
 
+class TaskComment(BaseModel):
+    """One comment in a task's discussion, as stored in `Task.comments`."""
+
+    id: str = Field(description="Random hex id, unique within the task")
+    author: str | None = Field(default=None, max_length=64)
+    text: str = Field(min_length=1)
+    created_at: datetime
+    updated_at: datetime | None = Field(default=None, description="Set when the text was edited")
+
+
+def clean_comments(value: Any) -> list[dict]:
+    """Stored comments that parse; None (rows from before the task panel) means none."""
+    comments = []
+    for raw in value or []:
+        try:
+            comments.append(TaskComment.model_validate(raw))
+        except ValueError:
+            continue
+    return comments
+
+
+class TaskCommentIn(BaseModel):
+    """`POST /api/tasks/{id}/comments` and `PATCH /api/tasks/{id}/comments/{comment_id}`."""
+
+    text: str = Field(min_length=1, max_length=10_000)
+    author: str | None = Field(default=None, max_length=64, description="Ignored when editing")
+
+    @field_validator("text")
+    @classmethod
+    def _text_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("text must not be blank")
+        return value.strip()
+
+    @field_validator("author")
+    @classmethod
+    def _blank_is_anonymous(cls, value: str | None) -> str | None:
+        return (value.strip() or None) if value is not None else None
+
+
 class Task(BaseModel):
     id: int | None = None
     space_id: int | None = None
@@ -82,9 +134,22 @@ class Task(BaseModel):
     is_gantt_task: bool = Field(default=False, description="True for shop floor Gantt tasks")
     is_milestone: bool = Field(default=False, description="Zero-duration Gantt event")
     assignee: str | None = Field(default=None, description="Who has claimed the task; None if unclaimed")
+    tags: list[str] = Field(default_factory=list)
+    note_path: str | None = Field(default=None, description="The linked note, relative to content/")
+    comments: list[TaskComment] = Field(default_factory=list, description="Oldest first")
     subtasks: list[Subtask] = Field(default_factory=list)
     created_at: datetime | None = None
     completed_at: datetime | None = None
+
+    @field_validator("tags", mode="before")
+    @classmethod
+    def _clean_tags(cls, value: Any) -> list[str]:
+        return clean_tags(value)
+
+    @field_validator("comments", mode="before")
+    @classmethod
+    def _clean_comments(cls, value: Any) -> list[TaskComment]:
+        return clean_comments(value)
 
 
 class TaskUpdate(BaseModel):
@@ -98,11 +163,18 @@ class TaskUpdate(BaseModel):
     project_id: int | None = Field(default=None, description="null removes the task from its project")
     start_date: date | None = None
     deadline: date | None = None
+    tags: list[str] | None = Field(default=None, description="Replaces the task's tags; [] or null clears them")
+    note_path: str | None = Field(default=None, description="Links the task to a note (relative to content/); null unlinks")
 
     @field_validator("assignee")
     @classmethod
     def _blank_is_unassigned(cls, value: str | None) -> str | None:
         return (value.strip() or None) if value is not None else None
+
+    @field_validator("tags")
+    @classmethod
+    def _clean_tags(cls, value: list[str] | None) -> list[str]:
+        return clean_tags(value)
 
     @field_validator("status", "title", "description", "priority")
     @classmethod
@@ -233,7 +305,14 @@ class TriageItem(BaseModel):
     due_date: date | None = None
     created: datetime | None = Field(default=None, description="Capture notes only")
     path: str | None = Field(default=None, description="Capture note path relative to the notes directory")
+    note_path: str | None = Field(default=None, description="Gantt tasks only; the linked note, relative to content/")
     content: str | None = None
+    tags: list[str] = Field(default_factory=list)
+
+    @field_validator("tags", mode="before")
+    @classmethod
+    def _clean_tags(cls, value: Any) -> list[str]:
+        return clean_tags(value)
 
 
 class TimeEntry(BaseModel):
@@ -356,6 +435,13 @@ class NoteSummary(BaseModel):
     title: str
 
 
+class NoteRecent(NoteSummary):
+    """One note in the editor's link picker (`GET /api/notes/recent`): most recently modified first."""
+
+    tags: list[str] = Field(default_factory=list)
+    modified: datetime = Field(description="When the file was last written")
+
+
 class NoteFile(BaseModel):
     """`GET /api/notes/file`: a note as stored on disk."""
 
@@ -382,6 +468,14 @@ class NoteUpdate(BaseModel):
     content: str | None = Field(default=None, description="The new body (without front-matter); unchanged if omitted")
     state: NoteState | None = Field(default=None, description="Unchanged if omitted")
     title: str | None = Field(default=None, description="The new front-matter `title`; unchanged if omitted")
+    tags: list[str] | None = Field(
+        default=None, description="The new front-matter `tags` (an empty list removes them); unchanged if omitted"
+    )
+
+    @field_validator("tags")
+    @classmethod
+    def _clean_tags(cls, value: list[str] | None) -> list[str] | None:
+        return None if value is None else clean_tags(value)
 
     @field_validator("title")
     @classmethod
@@ -583,7 +677,8 @@ class TaskCreate(BaseModel):
     start_date: date | None = None
     deadline: date | None = Field(default=None, description="Due date")
     assignee: str | None = Field(default=None, max_length=64)
-    note_paths: list[str] = Field(default_factory=list, description="Notes to link, relative to content/")
+    tags: list[str] = Field(default_factory=list)
+    note_path: str | None = Field(default=None, description="The note to link, relative to content/")
 
     @field_validator("title")
     @classmethod
@@ -596,6 +691,11 @@ class TaskCreate(BaseModel):
     @classmethod
     def _blank_is_unassigned(cls, value: str | None) -> str | None:
         return (value.strip() or None) if value is not None else None
+
+    @field_validator("tags")
+    @classmethod
+    def _clean_tags(cls, value: list[str]) -> list[str]:
+        return clean_tags(value)
 
 
 class TaskItem(BaseModel):
@@ -615,11 +715,9 @@ class TaskItem(BaseModel):
     completion_percent: float
     is_gantt_task: bool
     is_milestone: bool
-    note_paths: list[str] = Field(default_factory=list)
-
-
-class TaskNoteLinkIn(BaseModel):
-    note_path: str = Field(min_length=1)
+    tags: list[str] = Field(default_factory=list)
+    note_path: str | None = None
+    comments: list[TaskComment] = Field(default_factory=list, description="Oldest first")
 
 
 class ViewType(str, Enum):
@@ -633,11 +731,17 @@ class TaskViewFilters(BaseModel):
 
     project_id: int | None = Field(default=None, description="None means every project")
     assignee: str | None = Field(default=None, max_length=64, description='None means everyone; "" means unassigned')
+    tag: str | None = Field(default=None, max_length=64, description="None means any tag")
 
     @field_validator("assignee")
     @classmethod
     def _strip_assignee(cls, value: str | None) -> str | None:
         return value.strip() if value is not None else None
+
+    @field_validator("tag")
+    @classmethod
+    def _blank_is_any_tag(cls, value: str | None) -> str | None:
+        return (value.strip() or None) if value is not None else None
 
 
 class TaskViewIn(BaseModel):

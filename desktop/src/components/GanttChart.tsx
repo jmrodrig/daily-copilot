@@ -67,7 +67,10 @@ function span(task: GanttTask): Span | null {
   return { start: Math.min(a, b), end: Math.max(a, b) };
 }
 
-export default function GanttChart({ projects }: { projects: GanttProject[] }) {
+/** Clicking a task opens it (in the task panel) when `onTaskClick` is given; `activeTaskId` is highlighted. */
+type TaskClick = { onTaskClick?: (id: number) => void; activeTaskId?: number | null };
+
+export default function GanttChart({ projects, onTaskClick, activeTaskId = null }: { projects: GanttProject[] } & TaskClick) {
   const today = todayDay();
   const spans = projects.flatMap((p) => p.tasks.map(span)).filter((s): s is Span => s !== null);
 
@@ -102,7 +105,7 @@ export default function GanttChart({ projects }: { projects: GanttProject[] }) {
                   {formatDay(day)}
                 </span>
               ))}
-              <span className="absolute top-1 pl-1 text-[10px] text-accent" style={{ left: x(today) }}>
+              <span className="absolute top-1 pl-1 text-[12px] text-accent" style={{ left: x(today) }}>
                 TODAY
               </span>
             </div>
@@ -121,9 +124,12 @@ export default function GanttChart({ projects }: { projects: GanttProject[] }) {
                     return (
                       <div
                         key={m.id}
-                        className="absolute top-1/2 flex -translate-y-1/2 items-center gap-1.5 whitespace-nowrap"
+                        className={`absolute top-1/2 flex -translate-y-1/2 items-center gap-1.5 whitespace-nowrap ${
+                          onTaskClick ? "cursor-pointer hover:underline" : ""
+                        } ${m.id === activeTaskId ? "underline" : ""}`}
                         style={{ left: x(day) + DAY_PX / 2 - 6 }}
                         title={`${m.name} · ${formatDay(day)}`}
+                        onClick={onTaskClick && (() => onTaskClick(m.id))}
                       >
                         <span className="h-3 w-3 rotate-45 bg-accent" />
                         <span className="font-mono text-xs text-accent">
@@ -134,8 +140,13 @@ export default function GanttChart({ projects }: { projects: GanttProject[] }) {
                   })}
                 </Row>
                 {bars.map((task) => (
-                  <Row key={task.id} label={<span className="truncate pl-4 text-text-secondary">{task.name}</span>} width={width}>
-                    <TaskBar task={task} span={span(task)!} x={x} swatch={swatch} />
+                  <Row
+                    key={task.id}
+                    label={<TaskLabel task={task} onTaskClick={onTaskClick} activeTaskId={activeTaskId} />}
+                    width={width}
+                    active={task.id === activeTaskId}
+                  >
+                    <TaskBar task={task} span={span(task)!} x={x} swatch={swatch} onClick={onTaskClick && (() => onTaskClick(task.id))} />
                   </Row>
                 ))}
                 {dated.length === 0 && (
@@ -148,17 +159,19 @@ export default function GanttChart({ projects }: { projects: GanttProject[] }) {
       </div>
 
       {projects.map((project) => (
-        <Unscheduled key={project.id} project={project} />
+        <Unscheduled key={project.id} project={project} onTaskClick={onTaskClick} activeTaskId={activeTaskId} />
       ))}
     </div>
   );
 }
 
-function Row({ label, width, children }: { label: ReactNode; width: number; children?: ReactNode }) {
+function Row({ label, width, active, children }: { label: ReactNode; width: number; active?: boolean; children?: ReactNode }) {
   return (
-    <div className="flex h-9 items-stretch">
+    <div className={`flex h-9 items-stretch ${active ? "bg-surface-active" : ""}`}>
       <div
-        className="sticky left-0 z-10 flex shrink-0 items-center border-r border-border-default bg-surface-raised pr-3 text-sm"
+        className={`sticky left-0 z-10 flex shrink-0 items-center border-r border-border-default pr-3 text-sm ${
+          active ? "bg-surface-active" : "bg-surface-raised"
+        }`}
         style={{ width: LABEL_W }}
       >
         {label}
@@ -180,15 +193,43 @@ function ProjectLabel({ project, dot }: { project: GanttProject; dot: string }) 
   );
 }
 
-function TaskBar({ task, span, x, swatch }: { task: GanttTask; span: Span; x: (day: number) => number; swatch: Swatch }) {
+function TaskLabel({ task, onTaskClick, activeTaskId }: { task: GanttTask } & TaskClick) {
+  if (!onTaskClick) return <span className="truncate pl-4 text-text-secondary">{task.name}</span>;
+  return (
+    <button
+      type="button"
+      onClick={() => onTaskClick(task.id)}
+      title="Open task details"
+      aria-current={task.id === activeTaskId || undefined}
+      className={`truncate pl-4 text-left hover:underline ${task.id === activeTaskId ? "text-text-primary" : "text-text-secondary"}`}
+    >
+      {task.name}
+    </button>
+  );
+}
+
+function TaskBar({
+  task,
+  span,
+  x,
+  swatch,
+  onClick,
+}: {
+  task: GanttTask;
+  span: Span;
+  x: (day: number) => number;
+  swatch: Swatch;
+  onClick?: () => void;
+}) {
   const percent = Math.round(task.completion_percent);
   const left = x(span.start);
   const width = (span.end - span.start + 1) * DAY_PX;
   return (
     <div
-      className="absolute top-1/2 flex -translate-y-1/2 items-center gap-2 whitespace-nowrap"
+      className={`absolute top-1/2 flex -translate-y-1/2 items-center gap-2 whitespace-nowrap ${onClick ? "cursor-pointer" : ""}`}
       style={{ left }}
       title={`${task.name} · ${formatDay(span.start)} – ${formatDay(span.end)} · ${percent}%`}
+      onClick={onClick}
     >
       <div className={`relative h-5 overflow-hidden rounded-md border ${swatch.track}`} style={{ width }}>
         <div className={`h-full ${swatch.fill}`} style={{ width: `${percent}%` }} />
@@ -198,7 +239,7 @@ function TaskBar({ task, span, x, swatch }: { task: GanttTask; span: Span; x: (d
   );
 }
 
-function Unscheduled({ project }: { project: GanttProject }) {
+function Unscheduled({ project, onTaskClick, activeTaskId }: { project: GanttProject } & TaskClick) {
   const undated = project.tasks.filter((t) => span(t) === null);
   if (undated.length === 0) return null;
   return (
@@ -209,7 +250,17 @@ function Unscheduled({ project }: { project: GanttProject }) {
       <ul className="max-h-80 overflow-y-auto border-t border-border-default px-5 py-2 text-sm">
         {undated.map((task) => (
           <li key={task.id} className="flex justify-between gap-4 py-1">
-            <span className="text-text-secondary">{task.name}</span>
+            {onTaskClick ? (
+              <button
+                type="button"
+                onClick={() => onTaskClick(task.id)}
+                className={`text-left hover:underline ${task.id === activeTaskId ? "text-text-primary" : "text-text-secondary"}`}
+              >
+                {task.name}
+              </button>
+            ) : (
+              <span className="text-text-secondary">{task.name}</span>
+            )}
             <span className="font-mono text-text-muted">{Math.round(task.completion_percent)}%</span>
           </li>
         ))}

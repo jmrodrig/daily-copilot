@@ -1,3 +1,4 @@
+import os
 from datetime import date, datetime
 
 import pytest
@@ -280,7 +281,9 @@ def test_triage_item_shapes(client, triage_today, triage_db):
         "due_date": "2026-10-02",
         "created": None,
         "path": None,
+        "note_path": None,
         "content": None,
+        "tags": [],
     }
     assert task["id"].startswith("task:")
     note = next(i for i in items if i["kind"] == "capture")
@@ -297,7 +300,9 @@ def test_triage_item_shapes(client, triage_today, triage_db):
         "due_date": None,
         "created": "2026-10-02T10:00:00",
         "path": "C7801/Notes-in/Capture_1.md",
+        "note_path": None,
         "content": "# Check weld spec\nOn the transom",
+        "tags": [],
     }
 
 
@@ -657,6 +662,22 @@ def test_list_notes_with_titles(client, notes_dir):
     ]
 
 
+def test_recent_notes_newest_first_with_tags(client, notes_dir):
+    (notes_dir / "old.md").write_text("---\ntitle: Old\ntags: [spec, client]\n---\nBody\n", encoding="utf-8")
+    (notes_dir / "new.md").write_text("---\ntags: urgent\n---\n# New one\n", encoding="utf-8")
+    (notes_dir / ".trash").mkdir()
+    (notes_dir / ".trash" / "gone.md").write_text("gone", encoding="utf-8")
+    os.utime(notes_dir / "old.md", (1_700_000_000, 1_700_000_000))
+    os.utime(notes_dir / "new.md", (1_800_000_000, 1_800_000_000))
+
+    notes = client.get("/api/notes/recent").json()
+    assert [(n["path"], n["title"], n["tags"]) for n in notes] == [
+        ("new.md", "New one", ["urgent"]),
+        ("old.md", "Old", ["spec", "client"]),
+    ]
+    assert notes[0]["modified"] > notes[1]["modified"]
+
+
 def test_get_note_file(client, notes_dir):
     (notes_dir / "a.md").write_bytes(b"---\ncreated: 2026-09-30\n---\nHello\n")
     assert client.get("/api/notes/file", params={"path": "a.md"}).json() == {
@@ -666,6 +687,18 @@ def test_get_note_file(client, notes_dir):
     }
     assert client.get("/api/notes/file", params={"path": "missing.md"}).status_code == 404
     assert client.get("/api/notes/file", params={"path": "../x.md"}).status_code == 400
+
+
+def test_update_note_tags(client, notes_dir):
+    (notes_dir / "a.md").write_bytes(b"---\nstate: draft\ntags: [C7801]\n---\nHello\n")
+    res = client.put("/api/notes/file", json={"space_id": 1, "path": "a.md", "tags": ["C7801", " urgent ", ""]})
+    assert res.status_code == 200
+    assert res.json()["frontmatter"] == {"state": "draft", "tags": ["C7801", "urgent"]}
+    # Saved on disk, body untouched.
+    assert client.get("/api/notes/file", params={"path": "a.md"}).json() == res.json() | {"content": "Hello\n"}
+
+    client.put("/api/notes/file", json={"space_id": 1, "path": "a.md", "tags": []})
+    assert client.get("/api/notes/file", params={"path": "a.md"}).json()["frontmatter"] == {"state": "draft"}
 
 
 def test_capture_records_source(client, notes_dir):

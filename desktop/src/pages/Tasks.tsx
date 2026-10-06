@@ -1,17 +1,20 @@
 import { useCallback, useEffect, useMemo, useState, type DragEvent, type FormEvent, type ReactNode } from "react";
-import { Link, NavLink, Navigate, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { NavLink, Navigate, useNavigate, useParams, useSearchParams } from "react-router-dom";
 
 import GanttChart, { type GanttProject } from "../components/GanttChart";
 import PageHeader from "../components/PageHeader";
-import { formatDay, ME, NEUTRAL_TAG, PROJECT_TAG, Tag } from "../components/TriageBoard";
+import { formatDay, ME, NEUTRAL_TAG, NoteLink, PROJECT_TAG, Tag, TagPills } from "../components/TriageBoard";
 import { getJson, message, sendJson } from "../lib/api";
-import { notePath, useSpace } from "../lib/space";
+import { useSpace } from "../lib/space";
 import {
+  announceTaskChange,
   BOARD_COLUMNS,
   boardColumn,
   isOverdue,
   STATUS_LABELS,
   taskQuery,
+  useTaskChanges,
+  useTaskPanel,
   type ProjectOption,
   type TaskItem,
   type TaskPatch,
@@ -29,8 +32,8 @@ import {
 } from "../lib/views";
 
 const SUBTITLES: Record<ViewType, string> = {
-  kanban: "Tasks from the task database. Drag cards between columns to change their status.",
-  backlog: "Every task, earliest due date first. Click a task for its dates and linked notes.",
+  kanban: "Tasks from the task database. Drag cards between columns to change their status; click one for its details.",
+  backlog: "Every task, earliest due date first. Click a task to open its details, description and comments.",
   gantt: "Tasks with start and due dates, grouped by project.",
 };
 
@@ -91,8 +94,8 @@ export default function SavedTaskView() {
     }
   }
 
-  if (loadError) return <p className="px-9 py-7 text-[13px] text-text-secondary">Could not load this view ({loadError}).</p>;
-  if (!view) return <p className="px-9 py-7 text-[13px] text-text-muted">Loading view…</p>;
+  if (loadError) return <p className="px-9 py-7 text-[15px] text-text-secondary">Could not load this view ({loadError}).</p>;
+  if (!view) return <p className="px-9 py-7 text-[15px] text-text-muted">Loading view…</p>;
   const dirty = !sameFilters(filters, view.filters);
 
   return (
@@ -119,7 +122,7 @@ export default function SavedTaskView() {
   );
 }
 
-/** An unsaved view (`/tasks/:view?project=&assignee=`), e.g. the note page's link to the backlog. "Save as view" adds it to the sidebar. */
+/** An unsaved view (`/tasks/:view?project=&assignee=&tag=`), e.g. the note page's link to the backlog. "Save as view" adds it to the sidebar. */
 export function AdHocTasks() {
   const { view = "" } = useParams();
   const [params, setParams] = useSearchParams();
@@ -132,13 +135,17 @@ export function AdHocTasks() {
   const filters: ViewFilters = {
     project_id: params.get("project") && Number.isInteger(project) ? project : null,
     assignee: params.get("assignee"),
+    tag: params.get("tag") || null,
   };
   const setFilters = (next: ViewFilters) =>
     setParams(
       () => {
         const query = new URLSearchParams();
+        const taskId = params.get("taskId");
+        if (taskId) query.set("taskId", taskId);
         if (next.project_id !== null) query.set("project", String(next.project_id));
         if (next.assignee !== null) query.set("assignee", next.assignee);
+        if (next.tag !== null) query.set("tag", next.tag);
         return query;
       },
       { replace: true },
@@ -194,7 +201,7 @@ export function AdHocTasks() {
   );
 }
 
-/** A space's tasks from the database as a Kanban, Backlog or Gantt, narrowed by the Project/Assignee filters. */
+/** A space's tasks from the database as a Kanban, Backlog or Gantt, narrowed by the Project/Assignee/Tag filters. */
 function TaskBoard({
   spaceId,
   viewType,
@@ -215,6 +222,7 @@ function TaskBoard({
   const { spaces } = useSpace();
   const [tasks, setTasks] = useState<State>({ state: "loading" });
   const [projects, setProjects] = useState<ProjectOption[]>([]);
+  const [tags, setTags] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [reload, setReload] = useState(0);
 
@@ -240,6 +248,14 @@ function TaskBoard({
     return () => controller.abort();
   }, [spaceId]);
 
+  useEffect(() => {
+    const controller = new AbortController();
+    getJson<string[]>(`/api/spaces/${spaceId}/tags`, controller.signal)
+      .then(setTags)
+      .catch(() => {});
+    return () => controller.abort();
+  }, [spaceId, reload]);
+
   /** Optimistic update: show the change at once, roll back if the server refuses it. */
   const patchTask = useCallback(async (task: TaskItem, patch: TaskPatch) => {
     const apply = (next: TaskItem) =>
@@ -248,6 +264,7 @@ function TaskBoard({
     setError(null);
     try {
       await sendJson("PATCH", `/api/tasks/${task.id}`, patch);
+      announceTaskChange({ id: task.id, source: "board" });
       if ("project_id" in patch) setReload((n) => n + 1); // refresh the project code
     } catch (err: unknown) {
       apply(task);
@@ -255,15 +272,14 @@ function TaskBoard({
     }
   }, []);
 
-  const deleteTask = useCallback(async (task: TaskItem) => {
-    if (!window.confirm(`Delete "${task.title}"? It stays in the version history.`)) return;
-    try {
-      await sendJson("DELETE", `/api/tasks/${task.id}`);
-      setTasks((prev) => (prev.state === "ok" ? { ...prev, tasks: prev.tasks.filter((t) => t.id !== task.id) } : prev));
-    } catch (err: unknown) {
-      setError(`Could not delete "${task.title}": ${message(err)}`);
-    }
-  }, []);
+  // Edited in the task panel: show its copy (the next load re-applies the filters).
+  useTaskChanges("board", ({ id, task, deleted }) =>
+    setTasks((prev) => {
+      if (prev.state !== "ok") return prev;
+      if (deleted) return { ...prev, tasks: prev.tasks.filter((t) => t.id !== id) };
+      return task ? { ...prev, tasks: prev.tasks.map((t) => (t.id === id ? task : t)) } : prev;
+    }),
+  );
 
   const assignees = useMemo(() => {
     const names = new Set<string>([ME]);
@@ -277,6 +293,8 @@ function TaskBoard({
     filters.project_id === null || projects.some((p) => p.id === filters.project_id)
       ? projects
       : [...projects, { id: filters.project_id, code: `#${filters.project_id}`, name: `#${filters.project_id}`, folder_path: null }];
+  // Likewise a tag that no task carries any more.
+  const tagChoices = filters.tag === null || tags.includes(filters.tag) ? tags : [...tags, filters.tag];
 
   return (
     <div className="flex flex-col gap-5 px-9 py-7">
@@ -295,7 +313,7 @@ function TaskBoard({
             <select
               value={filters.project_id ?? ""}
               onChange={(e) => onFilters({ ...filters, project_id: e.target.value ? Number(e.target.value) : null })}
-              className="field w-auto py-1.5 text-[13px]"
+              className="field w-auto py-1.5 text-[15px]"
             >
               <option value="">All projects</option>
               {projectChoices.map((p) => (
@@ -311,13 +329,28 @@ function TaskBoard({
             <select
               value={filters.assignee === null ? "*" : filters.assignee}
               onChange={(e) => onFilters({ ...filters, assignee: e.target.value === "*" ? null : e.target.value })}
-              className="field w-auto py-1.5 text-[13px]"
+              className="field w-auto py-1.5 text-[15px]"
             >
               <option value="*">Everyone</option>
               <option value="">Unassigned</option>
               {assignees.map((name) => (
                 <option key={name} value={name}>
                   {name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="flex items-center gap-1.5">
+            Tag
+            <select
+              value={filters.tag ?? ""}
+              onChange={(e) => onFilters({ ...filters, tag: e.target.value || null })}
+              className="field w-auto py-1.5 text-[15px]"
+            >
+              <option value="">All tags</option>
+              {tagChoices.map((tag) => (
+                <option key={tag} value={tag}>
+                  #{tag}
                 </option>
               ))}
             </select>
@@ -335,12 +368,12 @@ function TaskBoard({
         }
       />
 
-      {error && <p className="text-[13px] text-accent">{error}</p>}
-      {tasks.state === "loading" && <p className="text-[13px] text-text-muted">Loading tasks…</p>}
-      {tasks.state === "error" && <p className="text-[13px] text-text-secondary">Could not load the tasks ({tasks.message}).</p>}
+      {error && <p className="text-[15px] text-accent">{error}</p>}
+      {tasks.state === "loading" && <p className="text-[15px] text-text-muted">Loading tasks…</p>}
+      {tasks.state === "error" && <p className="text-[15px] text-text-secondary">Could not load the tasks ({tasks.message}).</p>}
       {tasks.state === "ok" && viewType === "kanban" && <Kanban tasks={tasks.tasks} onPatch={patchTask} />}
       {tasks.state === "ok" && viewType === "backlog" && (
-        <Backlog tasks={tasks.tasks} projects={projects} spaceId={spaceId} onPatch={patchTask} onDelete={deleteTask} />
+        <Backlog tasks={tasks.tasks} projects={projects} onPatch={patchTask} />
       )}
       {tasks.state === "ok" && viewType === "gantt" && <TaskGantt tasks={tasks.tasks} projects={projects} />}
     </div>
@@ -400,11 +433,11 @@ function NewTaskForm({
 
   return (
     <form onSubmit={submit} className="flex flex-wrap items-end gap-2 rounded-lg border border-border-default bg-surface-raised p-3">
-      <label className="flex min-w-[220px] flex-1 flex-col gap-1 text-[11px] text-text-muted">
+      <label className="flex min-w-[220px] flex-1 flex-col gap-1 text-[13px] text-text-muted">
         New task
         <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="What needs doing?" className="field py-1.5" />
       </label>
-      <label className="flex flex-col gap-1 text-[11px] text-text-muted">
+      <label className="flex flex-col gap-1 text-[13px] text-text-muted">
         Project
         <select value={project} onChange={(e) => setProject(e.target.value)} className="field w-36 py-1.5">
           <option value="">No project</option>
@@ -415,15 +448,15 @@ function NewTaskForm({
           ))}
         </select>
       </label>
-      <label className="flex flex-col gap-1 text-[11px] text-text-muted">
+      <label className="flex flex-col gap-1 text-[13px] text-text-muted">
         Assignee
         <input value={assignee} onChange={(e) => setAssignee(e.target.value)} placeholder={ME} className="field w-28 py-1.5" />
       </label>
-      <label className="flex flex-col gap-1 text-[11px] text-text-muted">
+      <label className="flex flex-col gap-1 text-[13px] text-text-muted">
         Start
         <input type="date" value={start} onChange={(e) => setStart(e.target.value)} className="field w-36 py-1.5" />
       </label>
-      <label className="flex flex-col gap-1 text-[11px] text-text-muted">
+      <label className="flex flex-col gap-1 text-[13px] text-text-muted">
         Due
         <input type="date" value={due} onChange={(e) => setDue(e.target.value)} className="field w-36 py-1.5" />
       </label>
@@ -488,27 +521,39 @@ function Kanban({ tasks, onPatch }: { tasks: TaskItem[]; onPatch: (task: TaskIte
 
 function KanbanCard({ task, onPatch }: { task: TaskItem; onPatch: (task: TaskItem, patch: TaskPatch) => void }) {
   const overdue = isOverdue(task);
+  const { taskId, openTask } = useTaskPanel();
+  const active = taskId === task.id;
+  const open = () => !active && openTask(task.id);
   return (
     <li
       draggable
+      tabIndex={0}
+      aria-current={active || undefined}
+      title="Click for details · drag to change status"
       onDragStart={(e) => {
         e.dataTransfer.setData(DRAG_TYPE, String(task.id));
         e.dataTransfer.effectAllowed = "move";
       }}
-      className="cursor-grab rounded-md border border-border-default bg-surface-raised p-2.5 active:cursor-grabbing"
+      onClick={open}
+      onKeyDown={(e) => {
+        if ((e.key === "Enter" || e.key === " ") && e.target === e.currentTarget) {
+          e.preventDefault();
+          open();
+        }
+      }}
+      className={`cursor-grab rounded-md border bg-surface-raised p-2.5 hover:border-border-light focus:outline-none focus-visible:border-accent/70 active:cursor-grabbing ${
+        active ? "border-accent/70" : "border-border-default"
+      }`}
     >
-      <div className="text-[13px] text-text-primary">{task.title}</div>
+      <div className="text-[15px] text-text-primary">{task.title}</div>
       <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
         {task.project_code && <Tag className={projectTag(task.project_code)}>{task.project_code}</Tag>}
         {task.status === "blocked" && <Tag className="border-accent bg-accent/15 text-accent">blocked</Tag>}
         {task.is_milestone && <Tag className="border-accent/60 text-accent">milestone</Tag>}
-        {task.note_paths.length > 0 && (
-          <span className="font-mono text-[10px] text-text-muted" title={task.note_paths.join("\n")}>
-            📄 {task.note_paths.length}
-          </span>
-        )}
+        <TagPills tags={task.tags} />
+        {task.note_path && <NoteLink path={task.note_path} />}
       </div>
-      <div className="mt-1.5 flex items-center justify-between gap-2 font-mono text-[11px]">
+      <div className="mt-1.5 flex items-center justify-between gap-2 font-mono text-[13px]">
         <span
           className={`whitespace-nowrap ${overdue ? "text-accent" : "text-text-muted"}`}
           title={task.deadline ? `Due ${task.deadline}${overdue ? " (overdue)" : ""}` : undefined}
@@ -519,8 +564,10 @@ function KanbanCard({ task, onPatch }: { task: TaskItem; onPatch: (task: TaskIte
         <select
           aria-label={`Status of ${task.title}`}
           value={task.status}
+          // Changing the status shouldn't also open the card.
+          onClick={(e) => e.stopPropagation()}
           onChange={(e) => onPatch(task, { status: e.target.value as TaskStatus })}
-          className="min-w-0 max-w-[104px] rounded border border-border-default bg-surface-panel px-1 py-0.5 text-[11px] text-text-muted"
+          className="min-w-0 max-w-[104px] rounded border border-border-default bg-surface-panel px-1 py-0.5 text-[13px] text-text-muted"
         >
           {Object.entries(STATUS_LABELS).map(([value, label]) => (
             <option key={value} value={value}>
@@ -529,7 +576,7 @@ function KanbanCard({ task, onPatch }: { task: TaskItem; onPatch: (task: TaskIte
           ))}
         </select>
       </div>
-      {task.assignee && <div className="mt-1 text-[11px] text-text-muted">👤 {task.assignee}</div>}
+      {task.assignee && <div className="mt-1 text-[13px] text-text-muted">👤 {task.assignee}</div>}
     </li>
   );
 }
@@ -539,18 +586,15 @@ function KanbanCard({ task, onPatch }: { task: TaskItem; onPatch: (task: TaskIte
 function Backlog({
   tasks,
   projects,
-  spaceId,
   onPatch,
-  onDelete,
 }: {
   tasks: TaskItem[];
   projects: ProjectOption[];
-  spaceId: number;
   onPatch: (task: TaskItem, patch: TaskPatch) => void;
-  onDelete: (task: TaskItem) => void;
 }) {
-  const [open, setOpen] = useState<number | null>(null);
-  const [hideDone, setHideDone] = useState(true);
+  // A task's pill in a note links here with `?taskId=<id>`: show that task even if it's done.
+  const { taskId, openTask } = useTaskPanel();
+  const [hideDone, setHideDone] = useState(() => !tasks.some((t) => t.id === taskId && t.status === "done"));
   const shown = hideDone ? tasks.filter((t) => t.status !== "done") : tasks;
 
   return (
@@ -563,8 +607,8 @@ function Backlog({
         <p className="panel text-center text-sm text-text-muted">No tasks match these filters.</p>
       ) : (
         <div className="overflow-hidden rounded-lg border border-border-default bg-surface-raised">
-          <table className="w-full table-fixed text-[13px]">
-            <thead className="bg-surface-panel text-left text-[11px] uppercase tracking-wider text-text-muted">
+          <table className="w-full table-fixed text-[15px]">
+            <thead className="bg-surface-panel text-left text-[13px] uppercase tracking-wider text-text-muted">
               <tr>
                 <th className="px-4 py-2 font-medium">Task</th>
                 <th className="w-28 px-2 py-2 font-medium">Project</th>
@@ -580,11 +624,9 @@ function Backlog({
                   key={task.id}
                   task={task}
                   projects={projects}
-                  spaceId={spaceId}
-                  open={open === task.id}
-                  onToggle={() => setOpen((prev) => (prev === task.id ? null : task.id))}
+                  active={taskId === task.id}
+                  onOpen={() => openTask(task.id)}
                   onPatch={onPatch}
-                  onDelete={onDelete}
                 />
               ))}
             </tbody>
@@ -598,22 +640,18 @@ function Backlog({
 function BacklogRow({
   task,
   projects,
-  spaceId,
-  open,
-  onToggle,
+  active,
+  onOpen,
   onPatch,
-  onDelete,
 }: {
   task: TaskItem;
   projects: ProjectOption[];
-  spaceId: number;
-  open: boolean;
-  onToggle: () => void;
+  active: boolean;
+  onOpen: () => void;
   onPatch: (task: TaskItem, patch: TaskPatch) => void;
-  onDelete: (task: TaskItem) => void;
 }) {
   const overdue = isOverdue(task);
-  const cell = "rounded border border-transparent bg-transparent px-1 py-0.5 text-[13px] hover:border-border-default focus:border-accent/70 focus:outline-none";
+  const cell = "rounded border border-transparent bg-transparent px-1 py-0.5 text-[15px] hover:border-border-default focus:border-accent/70 focus:outline-none";
   const projectChoices = projects.some((p) => p.id === task.project_id)
     ? projects
     : task.project_id !== null
@@ -621,57 +659,64 @@ function BacklogRow({
       : projects;
 
   return (
-    <>
-      <tr className={task.status === "done" ? "text-text-muted" : "text-text-secondary"}>
-        <td className="px-4 py-1.5">
-          <button type="button" onClick={onToggle} className="flex w-full min-w-0 items-center gap-2 text-left" aria-expanded={open}>
-            <span className={`truncate ${task.status === "done" ? "line-through" : "text-text-primary"}`}>{task.title}</span>
+    <tr className={`${task.status === "done" ? "text-text-muted" : "text-text-secondary"} ${active ? "bg-surface-active" : ""}`}>
+      <td className="px-4 py-1.5">
+        <div className="flex min-w-0 items-center gap-2">
+          <button
+            type="button"
+            onClick={() => !active && onOpen()}
+            title="Open task details"
+            aria-current={active || undefined}
+            className="flex min-w-0 flex-1 items-center gap-2 text-left"
+          >
+            <span className={`truncate hover:underline ${task.status === "done" ? "line-through" : "text-text-primary"}`}>{task.title}</span>
             {task.is_gantt_task && <Tag className={NEUTRAL_TAG}>gantt</Tag>}
-            {task.note_paths.length > 0 && <span className="font-mono text-[10px] text-text-muted">📄 {task.note_paths.length}</span>}
+            <TagPills tags={task.tags} />
           </button>
-        </td>
-        <td className="px-2 py-1.5">
-          <select
-            aria-label={`Project of ${task.title}`}
-            value={task.project_id ?? NO_PROJECT_ID}
-            onChange={(e) => {
-              const id = Number(e.target.value);
-              onPatch(task, { project_id: id === NO_PROJECT_ID ? null : id });
-            }}
-            className={`${cell} w-full`}
-          >
-            <option value={NO_PROJECT_ID}>—</option>
-            {projectChoices.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.code}
-              </option>
-            ))}
-          </select>
-        </td>
-        <td className="px-2 py-1.5">
-          <select
-            aria-label={`Status of ${task.title}`}
-            value={task.status}
-            onChange={(e) => onPatch(task, { status: e.target.value as TaskStatus })}
-            className={`${cell} w-full`}
-          >
-            {Object.entries(STATUS_LABELS).map(([value, label]) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-          </select>
-        </td>
-        <td className="px-2 py-1.5">
-          <AssigneeInput task={task} className={`${cell} w-full`} onPatch={onPatch} />
-        </td>
-        <td className="px-2 py-1.5 font-mono text-xs text-text-muted">{task.start_date ? formatDay(task.start_date) : "—"}</td>
-        <td className={`px-2 py-1.5 font-mono text-xs ${overdue ? "text-accent" : "text-text-muted"}`}>
-          {task.deadline ? formatDay(task.deadline) : "—"}
-        </td>
-      </tr>
-      {open && <TaskDetail task={task} spaceId={spaceId} onPatch={onPatch} onDelete={onDelete} />}
-    </>
+          {/* Outside the button: a link can't sit inside a button. */}
+          {task.note_path && <NoteLink path={task.note_path} />}
+        </div>
+      </td>
+      <td className="px-2 py-1.5">
+        <select
+          aria-label={`Project of ${task.title}`}
+          value={task.project_id ?? NO_PROJECT_ID}
+          onChange={(e) => {
+            const id = Number(e.target.value);
+            onPatch(task, { project_id: id === NO_PROJECT_ID ? null : id });
+          }}
+          className={`${cell} w-full`}
+        >
+          <option value={NO_PROJECT_ID}>—</option>
+          {projectChoices.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.code}
+            </option>
+          ))}
+        </select>
+      </td>
+      <td className="px-2 py-1.5">
+        <select
+          aria-label={`Status of ${task.title}`}
+          value={task.status}
+          onChange={(e) => onPatch(task, { status: e.target.value as TaskStatus })}
+          className={`${cell} w-full`}
+        >
+          {Object.entries(STATUS_LABELS).map(([value, label]) => (
+            <option key={value} value={value}>
+              {label}
+            </option>
+          ))}
+        </select>
+      </td>
+      <td className="px-2 py-1.5">
+        <AssigneeInput task={task} className={`${cell} w-full`} onPatch={onPatch} />
+      </td>
+      <td className="px-2 py-1.5 font-mono text-xs text-text-muted">{task.start_date ? formatDay(task.start_date) : "—"}</td>
+      <td className={`px-2 py-1.5 font-mono text-xs ${overdue ? "text-accent" : "text-text-muted"}`}>
+        {task.deadline ? formatDay(task.deadline) : "—"}
+      </td>
+    </tr>
   );
 }
 
@@ -701,127 +746,6 @@ function AssigneeInput({
       onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()}
       className={className}
     />
-  );
-}
-
-function TaskDetail({
-  task,
-  spaceId,
-  onPatch,
-  onDelete,
-}: {
-  task: TaskItem;
-  spaceId: number;
-  onPatch: (task: TaskItem, patch: TaskPatch) => void;
-  onDelete: (task: TaskItem) => void;
-}) {
-  const [notes, setNotes] = useState<string[]>(task.note_paths);
-  const [allNotes, setAllNotes] = useState<{ path: string; title: string }[]>([]);
-  const [link, setLink] = useState("");
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    getJson<{ path: string; title: string }[]>(`/api/notes?space_id=${spaceId}`, controller.signal)
-      .then(setAllNotes)
-      .catch(() => {});
-    return () => controller.abort();
-  }, [spaceId]);
-
-  async function addLink(event: FormEvent) {
-    event.preventDefault();
-    if (!link.trim()) return;
-    try {
-      const updated = await sendJson<TaskItem>("POST", `/api/tasks/${task.id}/links`, { note_path: link.trim() });
-      setNotes(updated.note_paths);
-      setLink("");
-      setError(null);
-    } catch (err: unknown) {
-      setError(message(err));
-    }
-  }
-
-  async function removeLink(path: string) {
-    try {
-      const updated = await sendJson<TaskItem>(
-        "DELETE",
-        `/api/tasks/${task.id}/links?note_path=${encodeURIComponent(path)}`,
-      );
-      setNotes(updated.note_paths);
-    } catch (err: unknown) {
-      setError(message(err));
-    }
-  }
-
-  return (
-    <tr className="bg-surface-panel/60">
-      <td colSpan={6} className="px-4 py-3">
-        <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)] gap-6">
-          <div className="flex flex-col gap-2">
-            <div className="flex gap-3 text-xs text-text-muted">
-              <label className="flex flex-col gap-1">
-                Start
-                <input
-                  type="date"
-                  value={task.start_date ?? ""}
-                  onChange={(e) => onPatch(task, { start_date: e.target.value || null })}
-                  className="field w-36 py-1"
-                />
-              </label>
-              <label className="flex flex-col gap-1">
-                Due
-                <input
-                  type="date"
-                  value={task.deadline ?? ""}
-                  onChange={(e) => onPatch(task, { deadline: e.target.value || null })}
-                  className="field w-36 py-1"
-                />
-              </label>
-            </div>
-            {task.description && <p className="whitespace-pre-line text-xs text-text-muted">{task.description}</p>}
-            <button type="button" className="self-start text-xs text-text-muted hover:text-accent" onClick={() => onDelete(task)}>
-              Delete task
-            </button>
-          </div>
-          <div className="flex flex-col gap-1.5 text-xs">
-            <span className="text-text-muted">Linked notes</span>
-            {notes.length === 0 && <span className="text-text-muted">None yet.</span>}
-            {notes.map((path) => (
-              <span key={path} className="flex items-center gap-2">
-                <Link to={notePath(spaceId, path)} className="truncate text-accent hover:underline">
-                  {path}
-                </Link>
-                <button type="button" onClick={() => removeLink(path)} className="text-text-muted hover:text-accent" aria-label={`Unlink ${path}`}>
-                  ×
-                </button>
-              </span>
-            ))}
-            <form onSubmit={addLink} className="flex gap-1.5">
-              <input
-                list={`notes-${task.id}`}
-                value={link}
-                onChange={(e) => setLink(e.target.value)}
-                placeholder="Link a note…"
-                className="field py-1 text-xs"
-              />
-              <datalist id={`notes-${task.id}`}>
-                {allNotes
-                  .filter((n) => !notes.includes(n.path))
-                  .map((n) => (
-                    <option key={n.path} value={n.path}>
-                      {n.title}
-                    </option>
-                  ))}
-              </datalist>
-              <button type="submit" className="btn min-h-0 px-2 py-1 text-xs" disabled={!link.trim()}>
-                Link
-              </button>
-            </form>
-            {error && <span className="text-accent">{error}</span>}
-          </div>
-        </div>
-      </td>
-    </tr>
   );
 }
 
@@ -858,6 +782,7 @@ function TaskGantt({ tasks, projects }: { tasks: TaskItem[]; projects: ProjectOp
       .sort((a, b) => (a.id === 0 ? 1 : b.id === 0 ? -1 : a.code.localeCompare(b.code)));
   }, [tasks, projects]);
 
+  const { taskId, openTask } = useTaskPanel();
   if (groups.length === 0) return <p className="panel text-center text-sm text-text-muted">No tasks match these filters.</p>;
-  return <GanttChart projects={groups} />;
+  return <GanttChart projects={groups} activeTaskId={taskId} onTaskClick={openTask} />;
 }

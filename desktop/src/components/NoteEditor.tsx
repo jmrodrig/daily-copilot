@@ -1,12 +1,14 @@
+import { Extension } from "@tiptap/core";
 import type { ImageOptions } from "@tiptap/extension-image";
 import { TaskItem, TaskList } from "@tiptap/extension-list";
 import { TableKit, TableView } from "@tiptap/extension-table";
 import TextAlign from "@tiptap/extension-text-align";
 import { Color } from "@tiptap/extension-text-style";
 import { Markdown } from "@tiptap/markdown";
-import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
-import { TextSelection } from "@tiptap/pm/state";
-import type { EditorView } from "@tiptap/pm/view";
+import { Fragment, type Node as ProseMirrorNode } from "@tiptap/pm/model";
+import { Plugin, PluginKey, TextSelection, type EditorState, type Transaction } from "@tiptap/pm/state";
+import { insertPoint } from "@tiptap/pm/transform";
+import { Decoration, DecorationSet, type EditorView } from "@tiptap/pm/view";
 import {
   EditorContent,
   NodeViewWrapper,
@@ -21,7 +23,11 @@ import StarterKit from "@tiptap/starter-kit";
 import { useEffect, useLayoutEffect, useRef, useState, useMemo, useCallback, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 
 import { errorDetail, message } from "../lib/api";
+import type { TaskItem as TaskRow } from "../lib/tasks";
 import ImageLightbox, { ExpandButton } from "./ImageLightbox";
+import { LinkPanel, panelPosition, TaskPanel, type PanelDraft } from "./refPanels";
+import { pillContent, ReferencePill, taskHref, type RefPillAttrs } from "./referencePill";
+import { SlashCommand, SlashMenu, type SlashItem, type SlashMenuState } from "./slashCommand";
 import {
   ALIGNMENTS,
   AlignedBlocks,
@@ -47,24 +53,30 @@ import {
  * Confluence page: a sticky formatting toolbar across the page, then the title, `children` (the note's properties
  * and tasks), and the body in a centered text column, edited rendered and handed back as markdown. Pasted or dropped
  * images and files are uploaded to the space (a file is linked by name), and an image opens fullscreen to be marked
- * up. Ctrl/Cmd+S saves.
+ * up. Ctrl/Cmd+S saves. Typing `/` offers to insert a task or a link, and selected text can be turned into either:
+ * each goes in as an inline pill (see referencePill), replacing the selected text. With `notePath`, a new task can be
+ * linked to the note.
  */
 export default function NoteEditor({
   spaceId,
+  notePath,
   title,
   onTitleChange,
   value,
   onChange,
   onSave,
+  onTaskCreated,
   disabled,
   children,
 }: {
   spaceId: number;
+  notePath?: string;
   title: string;
   onTitleChange: (title: string) => void;
   value: string;
   onChange: (value: string) => void;
   onSave: () => void;
+  onTaskCreated?: (task: TaskRow) => void;
   disabled: boolean;
   children?: ReactNode;
 }) {
@@ -75,6 +87,11 @@ export default function NoteEditor({
   onSaveRef.current = onSave;
   const [uploads, setUploads] = useState(0);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [panel, setPanel] = useState<{ type: SlashItem["id"]; draft: PanelDraft } | null>(null);
+  const [slashMenu, setSlashMenu] = useState<SlashMenuState | null>(null);
+  // The `/` menu's key handling while it's shown (see SlashMenu), and what picking one of its items does.
+  const slashKeyRef = useRef<(event: KeyboardEvent) => boolean>(() => false);
+  const slashPickRef = useRef<(item: SlashItem, range: { from: number; to: number }) => void>(() => {});
 
   /**
    * Upload files one by one, inserting each at `pos` (or the selection) once it's stored: an image as itself, any
@@ -106,12 +123,19 @@ export default function NoteEditor({
       // marked-up image is uploaded as a new one.
       ResizableImage.configure({ inline: true, allowBase64: false, upload: (file: File) => uploadRef.current(file) }),
       Markdown,
+      UploadPlaceholders,
+      ReferencePill,
+      SlashCommand.configure({
+        onChange: setSlashMenu,
+        onKeyDown: (event) => slashKeyRef.current(event),
+        onPick: (item, range) => slashPickRef.current(item, range),
+      }),
     ],
     // Parsed once: the editor owns the text from here, and NotePage remounts it for another note.
     content: value,
     contentType: "markdown",
     editorProps: {
-      attributes: { class: "note-body markdown min-h-64 text-sm leading-relaxed text-text-secondary focus:outline-none", spellcheck: "true" },
+      attributes: { class: "note-body markdown min-h-64 text-[17px] leading-relaxed text-text-secondary focus:outline-none", spellcheck: "true" },
       handleKeyDown: (_view, event) => {
         if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
           event.preventDefault();
@@ -137,64 +161,114 @@ export default function NoteEditor({
       },
     },
     onUpdate: ({ editor }) => onChangeRef.current(editor.getMarkdown()),
+    // A note saved before images kept their paragraph may hold one loose in the doc: repair it quietly, so it
+    // neither counts as an edit nor breaks the next one.
+    onCreate: ({ editor }) => {
+      const tr = normalizeDoc(editor.state);
+      if (tr) editor.view.dispatch(tr.setMeta("addToHistory", false).setMeta("preventUpdate", true));
+    },
   });
 
-  const insertFilesRef = useRef(async (files: File[], pos?: number) => {
-    if (!editor) return;
+  // Reassigned every render, so an upload reads the current editor and space rather than the first render's.
+  const insertFilesRef = useRef<(files: File[], pos?: number) => Promise<void>>(async () => {});
+  insertFilesRef.current = async (files: File[], pos?: number) => {
+    if (!editor || editor.isDestroyed) return;
     setUploadError(null);
     setUploads((n) => n + files.length);
-    for (const file of files) {
-      try {
-        const { url, name } = await uploadFile(spaceId, file);
-        const { schema } = editor.state;
-
-        // Create the inline node (either image or text link)
-        const node = file.type.startsWith("image/")
-          ? schema.nodes.image.create({ src: url })
-          : schema.text(`${name} `, [schema.marks.link.create({ href: url })]);
-
-        let tr = editor.state.tr;
-        let insertPos = pos;
-        let size = 0;
-
-        // If a specific position is given (drag & drop), set the selection there first
-        if (insertPos !== undefined) {
-          tr = tr.setSelection(TextSelection.create(tr.doc, insertPos));
+    // Where the files go: the drop point, or after the selection (after a selected image, not before it). Each shows
+    // there at once as a placeholder pill with a progress bar, which edits made while they upload carry along.
+    const at = Math.min(Math.max(pos ?? editor.state.selection.to, 0), editor.state.doc.content.size);
+    const batch = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const placeholders = files.map((file, order) => {
+      const id = `${batch}-${order}`;
+      const { dom, setProgress } = placeholderPill(file.name);
+      editor.view.dispatch(editor.state.tr.setMeta(uploadPlaceholderKey, { add: { id, pos: at, dom, order } } satisfies PlaceholderMeta));
+      return { id, setProgress };
+    });
+    const removePlaceholder = (id: string) => editor.state.tr.setMeta(uploadPlaceholderKey, { remove: id } satisfies PlaceholderMeta);
+    let pending = files.length;
+    try {
+      for (const [i, file] of files.entries()) {
+        const { id, setProgress } = placeholders[i];
+        try {
+          const { url, name } = await uploadFile(spaceId, file, setProgress);
+          if (editor.isDestroyed) return;
+          const { state } = editor;
+          const { schema } = state;
+          const inline = file.type.startsWith("image/")
+            ? [schema.nodes.image.create({ src: url })]
+            : [schema.text(name, [schema.marks.link.create({ href: url })]), schema.text(" ")];
+          const size = Fragment.from(inline).size;
+          // At its placeholder, or after the selection if the text around that has been deleted.
+          const $at = state.doc.resolve(placeholderPos(state, id) ?? state.selection.to);
+          const tr = removePlaceholder(id);
+          let end: number;
+          if ($at.parent.inlineContent && $at.parent.canReplace($at.index(), $at.index(), Fragment.from(inline))) {
+            // Within a paragraph or heading: inline, at the point.
+            tr.insert($at.pos, inline);
+            end = $at.pos + size;
+          } else {
+            // Between blocks (or in a block that can't take them): in a paragraph of their own, where one fits.
+            const paragraph = schema.nodes.paragraph.create(null, inline);
+            const point = insertPoint(state.doc, $at.pos, schema.nodes.paragraph) ?? state.doc.content.size;
+            tr.insert(point, paragraph);
+            end = point + 1 + size;
+          }
+          tr.setSelection(TextSelection.create(tr.doc, end)).scrollIntoView();
+          editor.view.dispatch(tr);
+          editor.view.focus();
+        } catch (err) {
+          if (!editor.isDestroyed) editor.view.dispatch(removePlaceholder(id));
+          setUploadError(`Could not upload ${file.name} (${message(err)}).`);
+        } finally {
+          pending--;
+          setUploads((n) => n - 1);
         }
-
-        const $from = tr.selection.$from;
-
-        if ($from.parent.isTextblock) {
-          // If we are currently inside a text block (e.g. paragraph), it's safe to insert inline nodes
-          tr = tr.replaceSelectionWith(node, false);
-          size = node.nodeSize;
-        } else {
-          // If we are outside a text block (e.g. root document or NodeSelection on an image),
-          // we MUST wrap the inline node in a paragraph to prevent schema corruption.
-          const pNode = schema.nodes.paragraph.create(null, node);
-          tr = tr.replaceSelectionWith(pNode, false);
-          size = pNode.nodeSize;
-        }
-
-        // For drag and drop, advance `pos` so multiple files are placed in order correctly
-        if (pos !== undefined) {
-          pos += size;
-        }
-        
-        // Dispatch the transaction and scroll into view
-        editor.view.dispatch(tr.scrollIntoView());
-        editor.commands.focus();
-      } catch (err) {
-        setUploadError(`Could not upload ${file.name} (${message(err)}).`);
-      } finally {
-        setUploads((n) => n - 1);
       }
+    } finally {
+      // Files never uploaded, the editor having gone, stop counting too.
+      setUploads((n) => n - pending);
     }
-  });
+  };
 
   useEffect(() => {
     editor?.setEditable(!disabled);
   }, [editor, disabled]);
+
+  /** Open a panel for the text at `from`..`to` (or the caret, if they're the same). */
+  function openPanel(type: SlashItem["id"], from: number, to: number) {
+    if (!editor) return;
+    const text = editor.state.doc.textBetween(from, to, " ").replace(/\s+/g, " ").trim();
+    setPanel({ type, draft: { text, from, to, ...panelPosition(editor.view.coordsAtPos(from), editor.view.coordsAtPos(to)) } });
+  }
+
+  // The `/` and what was typed after it go, and the picked item's panel opens where they were.
+  slashPickRef.current = (item, range) => {
+    if (!editor) return;
+    editor.chain().focus().deleteRange(range).run();
+    openPanel(item.id, range.from, range.from);
+  };
+
+  /**
+   * Put a pill where the panel's draft points: over the selected text, or at the caret. If the text there has
+   * changed meanwhile (an upload landed, say), at the current selection instead.
+   */
+  function insertPill(draft: PanelDraft, pill: RefPillAttrs) {
+    if (!editor || editor.isDestroyed) return;
+    const { doc, selection } = editor.state;
+    const size = doc.content.size;
+    const intact = draft.to <= size && doc.textBetween(draft.from, draft.to, " ").replace(/\s+/g, " ").trim() === draft.text;
+    const from = intact ? draft.from : selection.from;
+    const to = intact ? draft.to : selection.to;
+    // A space after the pill, so typing carries on past it, unless one's already there.
+    const next = doc.textBetween(to, Math.min(to + 1, size));
+    const content = pillContent(pill);
+    editor
+      .chain()
+      .focus()
+      .insertContentAt({ from, to }, /\s/.test(next) ? content.slice(0, 1) : content)
+      .run();
+  }
 
   return (
     <div className="flex flex-col">
@@ -203,7 +277,7 @@ export default function NoteEditor({
         status={uploads > 0 ? `Uploading ${uploads > 1 ? `${uploads} files` : "file"}…` : null} 
         onAttach={(files) => editor && void insertFilesRef.current(files)}
       />
-      {uploadError && <p className={`${NOTE_COLUMN} pt-3 text-[13px] text-accent`}>{uploadError}</p>}
+      {uploadError && <p className={`${NOTE_COLUMN} pt-3 text-[15px] text-accent`}>{uploadError}</p>}
       <TitleInput
         value={title}
         onChange={onTitleChange}
@@ -216,14 +290,134 @@ export default function NoteEditor({
       {editor && (
         <BubbleMenuWrapper editor={editor} />
       )}
+      {editor && !panel && (
+        <SelectionMenu editor={editor} onOpen={(type) => openPanel(type, editor.state.selection.from, editor.state.selection.to)} />
+      )}
+      {editor && slashMenu && !panel && <SlashMenu menu={slashMenu} keyHandler={slashKeyRef} />}
+      {editor && panel?.type === "task" && (
+        <TaskPanel
+          spaceId={spaceId}
+          notePath={notePath}
+          draft={panel.draft}
+          onCreated={(task) => {
+            setPanel(null);
+            insertPill(panel.draft, { kind: "task", href: taskHref(task.id), label: task.title });
+            onTaskCreated?.(task);
+          }}
+          onClose={(refocus) => {
+            setPanel(null);
+            if (refocus) editor.commands.focus();
+          }}
+        />
+      )}
+      {editor && panel?.type === "link" && (
+        <LinkPanel
+          spaceId={spaceId}
+          draft={panel.draft}
+          onPick={(pill) => {
+            setPanel(null);
+            insertPill(panel.draft, pill);
+          }}
+          onClose={(refocus) => {
+            setPanel(null);
+            if (refocus) editor.commands.focus();
+          }}
+        />
+      )}
     </div>
   );
 }
 
-// Extract BubbleMenu wrapper to safely memoize its props without cluttering NoteEditor's top level hooks
+/** The menu over selected text (not a link, which has its own): turn the selection into a task or a link. */
+function SelectionMenu({ editor, onOpen }: { editor: Editor; onOpen: (type: SlashItem["id"]) => void }) {
+  const options = useMemo(() => ({ placement: "top" as const, offset: 8 }), []);
+  const shouldShow = useCallback(
+    ({ editor: e, state, from, to }: { editor: Editor; state: EditorState; from: number; to: number }) =>
+      e.isEditable &&
+      e.view.hasFocus() &&
+      state.selection instanceof TextSelection &&
+      !e.isActive("link") &&
+      state.doc.textBetween(from, to, " ").trim() !== "",
+    [],
+  );
+  const button =
+    "flex items-center gap-1.5 px-3 py-2 text-xs font-bold uppercase tracking-wider text-text-secondary hover:bg-surface-hover hover:text-accent focus:outline-none";
+
+  return (
+    <BubbleMenu
+      editor={editor}
+      pluginKey="selectionMenu"
+      options={options}
+      shouldShow={shouldShow}
+      className="flex items-center overflow-hidden rounded-lg border border-border-default bg-surface-raised shadow-xl"
+    >
+      {/* Each keeps the editor's selection until the click lands. */}
+      <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => onOpen("task")} className={button}>
+        <CheckboxIcon />
+        Create task
+      </button>
+      <button
+        type="button"
+        onMouseDown={(event) => event.preventDefault()}
+        onClick={() => onOpen("link")}
+        className={`${button} border-l border-border-default`}
+      >
+        <LinkIcon />
+        Link
+      </button>
+    </BubbleMenu>
+  );
+}
+
+function LinkIcon() {
+  return (
+    <svg aria-hidden width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M6.7 9.3a3 3 0 0 0 4.2 0l2.4-2.4a3 3 0 0 0-4.2-4.2L8 3.8M9.3 6.7a3 3 0 0 0-4.2 0L2.7 9.1a3 3 0 0 0 4.2 4.2L8 12.2" />
+    </svg>
+  );
+}
+
+function CheckboxIcon() {
+  return (
+    <svg aria-hidden width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="0.7" y="0.7" width="10.6" height="10.6" rx="2" />
+      <path d="M3.3 6.2l1.9 1.9 3.6-4" />
+    </svg>
+  );
+}
+
+/** True for a link to a file uploaded to the space (shown as a pill, see index.css). */
+function isAttachmentHref(href: string | undefined): boolean {
+  return !!href && href.includes("/api/notes/image/");
+}
+
+/**
+ * The menu under a link: open it, and for an uploaded file in an editable note, remove it. Extracted so its props
+ * memoize without cluttering NoteEditor's top-level hooks.
+ */
 function BubbleMenuWrapper({ editor }: { editor: Editor }) {
   const options = useMemo(() => ({ placement: "bottom" as const, offset: 8 }), []);
   const shouldShow = useCallback(({ editor: e }: { editor: Editor }) => e.isActive("link"), []);
+  const link = useEditorState({
+    editor,
+    selector: ({ editor: e }) => ({ href: e.getAttributes("link").href as string | undefined, editable: e.isEditable }),
+  });
+
+  /** Delete the whole linked name, and the space inserted after it with the upload. */
+  function removeAttachment() {
+    editor
+      .chain()
+      .focus()
+      .extendMarkRange("link")
+      .command(({ tr, state }) => {
+        const { from, to } = tr.selection;
+        const after = state.doc.textBetween(to, Math.min(to + 1, state.doc.content.size));
+        tr.delete(from, after === " " ? to + 1 : to);
+        return true;
+      })
+      .run();
+  }
+
   return (
     <BubbleMenu
       editor={editor}
@@ -232,13 +426,27 @@ function BubbleMenuWrapper({ editor }: { editor: Editor }) {
       className="flex items-center overflow-hidden rounded-lg border border-border-default bg-surface-raised shadow-xl"
     >
       <a
-        href={editor.getAttributes("link").href}
+        href={link.href}
         target="_blank"
         rel="noopener noreferrer"
         className="px-4 py-2 text-xs font-bold uppercase tracking-wider text-accent hover:bg-surface-hover focus:outline-none"
       >
         Open
       </a>
+      {link.editable && isAttachmentHref(link.href) && (
+        <button
+          type="button"
+          title="Remove attachment"
+          aria-label="Remove attachment"
+          // Keep the editor's selection on the link until the click lands.
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={removeAttachment}
+          className="flex items-center gap-1.5 border-l border-border-default px-3 py-2 text-xs font-bold uppercase tracking-wider text-text-secondary hover:bg-surface-hover hover:text-accent focus:outline-none"
+        >
+          <TrashIcon />
+          Remove
+        </button>
+      )}
     </BubbleMenu>
   );
 }
@@ -514,24 +722,154 @@ function TitleInput({
           onSave();
         }
       }}
-      className={`${NOTE_COLUMN} mt-5 block resize-none overflow-hidden bg-transparent text-[32px] font-semibold leading-tight text-text-primary placeholder:text-text-muted focus:outline-none`}
+      className={`${NOTE_COLUMN} mt-5 block resize-none overflow-hidden bg-transparent text-[33px] font-semibold leading-tight text-text-primary placeholder:text-text-muted focus:outline-none`}
     />
   );
 }
 
 /** The files of a paste or drop, if any. */
+/**
+ * A transaction repairing a doc the schema doesn't allow, or `null` if it's valid: runs of inline nodes (an image
+ * or text) sitting loose in the doc are gathered into paragraphs.
+ */
+function normalizeDoc(state: EditorState): Transaction | null {
+  try {
+    state.doc.check();
+    return null;
+  } catch {
+    const { paragraph } = state.schema.nodes;
+    const blocks: ProseMirrorNode[] = [];
+    let run: ProseMirrorNode[] = [];
+    const flush = () => {
+      if (run.length) blocks.push(paragraph.create(null, run));
+      run = [];
+    };
+    state.doc.forEach((child) => {
+      if (child.isInline) {
+        run.push(child);
+      } else {
+        flush();
+        blocks.push(child);
+      }
+    });
+    flush();
+    const content = Fragment.from(blocks.length ? blocks : [paragraph.create()]);
+    // Broken some other way: leave it be rather than guess.
+    if (!state.doc.type.validContent(content)) return null;
+    return state.tr.replaceWith(0, state.doc.content.size, content);
+  }
+}
+
 function extractFiles(data: DataTransfer | null): File[] {
   return Array.from(data?.files ?? []);
 }
 
-/** POST /api/notes/image: store an image or other file in the space, returning the URL it's served from and its name. */
-async function uploadFile(spaceId: number, file: File): Promise<{ url: string; name: string }> {
+/**
+ * POST /api/notes/image: store an image or other file in the space, returning the URL it's served from and its name.
+ * Sent with XHR rather than fetch, so `onProgress` hears how much of the file has gone (0 to 1).
+ */
+function uploadFile(spaceId: number, file: File, onProgress?: (fraction: number) => void): Promise<{ url: string; name: string }> {
   const form = new FormData();
   form.append("space_id", String(spaceId));
   form.append("file", file);
-  const res = await fetch("/api/notes/image", { method: "POST", body: form });
-  if (!res.ok) throw new Error(await errorDetail(res));
-  return { url: ((await res.json()) as { url: string }).url, name: file.name };
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "/api/notes/image");
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) onProgress?.(event.loaded / event.total);
+    };
+    xhr.onload = () => {
+      // Wrapped in a Response so errors read the same as the rest of the API's.
+      const res = new Response(xhr.responseText, { status: xhr.status, statusText: xhr.statusText });
+      if (!res.ok) return void errorDetail(res).then((detail) => reject(new Error(detail)), reject);
+      res.json().then((body: { url: string }) => resolve({ url: body.url, name: file.name }), reject);
+    };
+    xhr.onerror = () => reject(new Error("network error"));
+    xhr.onabort = () => reject(new Error("aborted"));
+    xhr.send(form);
+  });
+}
+
+type PlaceholderMeta = { add: { id: string; pos: number; dom: HTMLElement; order: number } } | { remove: string };
+
+/**
+ * Placeholders for files being uploaded: a pill with a progress bar, shown as a widget decoration where each file
+ * will go. Being a decoration, not a node, it is never saved to markdown or caught up in undo, and it moves with edits
+ * made around it. A transaction adds one with the meta `{ add: { id, pos, dom, order } }` and drops it with
+ * `{ remove: id }`.
+ */
+const uploadPlaceholderKey = new PluginKey<DecorationSet>("uploadPlaceholder");
+
+const UploadPlaceholders = Extension.create({
+  name: "uploadPlaceholders",
+  addProseMirrorPlugins() {
+    return [
+      new Plugin<DecorationSet>({
+        key: uploadPlaceholderKey,
+        state: {
+          init: () => DecorationSet.empty,
+          apply(tr, set) {
+            set = set.map(tr.mapping, tr.doc);
+            const meta = tr.getMeta(uploadPlaceholderKey) as PlaceholderMeta | undefined;
+            if (meta && "add" in meta) {
+              const { id, pos, dom, order } = meta.add;
+              // A positive side keeps a placeholder after a file inserted at its position, so the files queue up in order.
+              set = set.add(tr.doc, [Decoration.widget(pos, dom, { id, side: 1 + order, ignoreSelection: true })]);
+            } else if (meta && "remove" in meta) {
+              set = set.remove(set.find(undefined, undefined, (spec) => spec.id === meta.remove));
+            }
+            return set;
+          },
+        },
+        props: {
+          decorations: (state) => uploadPlaceholderKey.getState(state),
+        },
+      }),
+    ];
+  },
+});
+
+/** Where an upload's placeholder is now, or null if the text around it has been deleted. */
+function placeholderPos(state: EditorState, id: string): number | null {
+  const found = uploadPlaceholderKey.getState(state)?.find(undefined, undefined, (spec) => spec.id === id);
+  return found?.length ? found[0].from : null;
+}
+
+/** A placeholder pill: the file's name over a bar that fills as it uploads (`setProgress`). */
+function placeholderPill(name: string): { dom: HTMLElement; setProgress: (fraction: number) => void } {
+  const dom = document.createElement("span");
+  dom.className = "upload-pill";
+  dom.contentEditable = "false";
+  dom.setAttribute("role", "progressbar");
+  dom.setAttribute("aria-label", `Uploading ${name}`);
+  dom.setAttribute("aria-valuemin", "0");
+  dom.setAttribute("aria-valuemax", "100");
+  dom.setAttribute("aria-valuenow", "0");
+  const label = document.createElement("span");
+  label.className = "upload-pill-name";
+  label.textContent = name;
+  const track = document.createElement("span");
+  track.className = "upload-pill-track";
+  const bar = document.createElement("span");
+  bar.className = "upload-pill-bar";
+  track.append(bar);
+  dom.append(label, track);
+  return {
+    dom,
+    setProgress: (fraction) => {
+      const percent = Math.round(Math.min(Math.max(fraction, 0), 1) * 100);
+      bar.style.width = `${percent}%`;
+      dom.setAttribute("aria-valuenow", String(percent));
+    },
+  };
+}
+
+function TrashIcon() {
+  return (
+    <svg aria-hidden width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M10 11v6M14 11v6" />
+    </svg>
+  );
 }
 
 function AttachIcon() {
@@ -572,7 +910,7 @@ function Toolbar({ editor, status, onAttach }: { editor: Editor | null; status: 
     <div
       role="toolbar"
       aria-label="Formatting"
-      className="sticky top-0 z-10 -mx-2 flex min-h-11 flex-wrap items-center gap-0.5 border-b border-border-default bg-background px-2 py-1.5"
+      className="sticky top-0 z-10 -mx-2 flex print:hidden min-h-11 flex-wrap items-center gap-0.5 border-b border-border-default bg-background px-2 py-1.5"
     >
       <ToolButton label="Bold (Ctrl+B)" on={active.bold} disabled={off} onClick={() => chain().toggleBold().run()}>
         <span className="font-bold">B</span>
@@ -646,7 +984,7 @@ function Toolbar({ editor, status, onAttach }: { editor: Editor | null; status: 
       {active.table && (
         // Shown only with the cursor in a table, and marked as such so the controls are easy to find.
         <div className="ml-1 flex items-center gap-0.5 rounded-md border border-accent/40 bg-accent/[0.06] pl-2">
-          <span className="mr-1 font-mono text-[11px] uppercase tracking-[0.06em] text-accent-soft">Table</span>
+          <span className="mr-1 font-mono text-[13px] uppercase tracking-[0.06em] text-accent-soft">Table</span>
           <ColorPicker
             label="Cell color"
             colors={CELL_COLORS}
@@ -709,7 +1047,7 @@ function ToolButton({
       disabled={disabled}
       onMouseDown={(e) => e.preventDefault()} // keep the editor's selection
       onClick={onClick}
-      className={`flex h-8 min-w-8 items-center justify-center rounded px-1.5 text-[13px] disabled:cursor-not-allowed disabled:opacity-40 ${
+      className={`flex h-8 min-w-8 items-center justify-center rounded px-1.5 text-[15px] disabled:cursor-not-allowed disabled:opacity-40 ${
         on ? "bg-accent/[0.16] text-accent-soft" : "text-text-secondary hover:bg-surface-raised hover:text-text-primary"
       }`}
     >

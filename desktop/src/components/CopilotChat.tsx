@@ -85,6 +85,14 @@ function pageContext(location: Location, spaceId: number): { label: string; hint
   return { label: labels[pathname] ?? "Wiki", hint: null, notePath: null };
 }
 
+/** The page's context plus the task open in the task panel (`?taskId=`), if any. */
+function withTask(context: ReturnType<typeof pageContext>, location: Location): ReturnType<typeof pageContext> {
+  const taskId = Number(new URLSearchParams(location.search).get("taskId")) || null;
+  if (taskId === null) return context;
+  const task = `task #${taskId} (open in the task panel)`;
+  return { ...context, label: `${context.label} · Task #${taskId}`, hint: context.hint ? `${context.hint}, with ${task}` : task };
+}
+
 /** What the model sees of a turn: saved prompts expanded, plus what the user did with proposed edits. */
 function historyContent(entry: Entry): string {
   if (entry.role === "user") {
@@ -104,7 +112,21 @@ function historyContent(entry: Entry): string {
   return [entry.content, ...outcomes].join("\n\n");
 }
 
-export default function CopilotChat({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
+/**
+ * The chat, in the right-most column (see Layout); `active` is false while it is collapsed. While `pinned`, opening a
+ * task leaves the chat expanded.
+ */
+export default function CopilotChat({
+  active,
+  onCollapse,
+  pinned,
+  onPinnedChange,
+}: {
+  active: boolean;
+  onCollapse: () => void;
+  pinned: boolean;
+  onPinnedChange: (pinned: boolean) => void;
+}) {
   const [entries, setEntries] = useState<Entry[]>([]);
   const [input, setInput] = useState("");
   const [mode, setMode] = useState<AccessMode>(storedMode);
@@ -118,7 +140,7 @@ export default function CopilotChat({ open, onOpenChange }: { open: boolean; onO
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const location = useLocation();
   const { spaceId, space } = useSpace();
-  const context = pageContext(location, spaceId);
+  const context = withTask(pageContext(location, spaceId), location);
 
   // A conversation (and its proposed edits) belongs to one space: start over when it changes.
   useEffect(() => {
@@ -149,8 +171,8 @@ export default function CopilotChat({ open, onOpenChange }: { open: boolean; onO
     bottomRef.current?.scrollIntoView({ block: "end" });
   }, [entries, sending]);
   useEffect(() => {
-    if (open) inputRef.current?.focus();
-  }, [open]);
+    if (active) inputRef.current?.focus();
+  }, [active]);
 
   // The command menu is open while the input is a lone "/word" (no space yet).
   const menuItems = useMemo(() => {
@@ -278,25 +300,14 @@ export default function CopilotChat({ open, onOpenChange }: { open: boolean; onO
     }
   }
 
-  if (!open) {
-    return (
-      <aside
-        aria-label="Ask the knowledge base"
-        className="flex w-16 shrink-0 flex-col items-center border-l border-border-default bg-surface-panel py-3.5"
-      >
-        <IconButton label="Expand chat" onClick={() => onOpenChange(true)} direction="left" />
-      </aside>
-    );
-  }
-
   return (
-    <aside
-      aria-label="Ask the knowledge base"
-      className="flex w-[320px] shrink-0 flex-col border-l border-border-default bg-surface-panel"
-    >
+    <section aria-label="Ask the knowledge base" className="flex h-full min-h-0 flex-col">
       <div className="flex items-center justify-between pb-2.5 pl-5 pr-3 pt-3.5">
         <h2 className="text-base font-semibold">Ask the knowledge base</h2>
-        <IconButton label="Collapse chat" onClick={() => onOpenChange(false)} direction="right" />
+        <div className="flex items-center gap-1.5">
+          <PinButton pinned={pinned} onClick={() => onPinnedChange(!pinned)} />
+          <IconButton label="Collapse chat" onClick={onCollapse} direction="right" />
+        </div>
       </div>
 
       <div className="flex flex-col gap-2.5 px-5 pb-2.5">
@@ -339,7 +350,7 @@ export default function CopilotChat({ open, onOpenChange }: { open: boolean; onO
           <span className="chip">{MODE_CHIP[mode]}</span>
         </div>
         {entries.length === 0 && (
-          <p className="text-[13px] text-text-muted">
+          <p className="text-[15px] text-text-muted">
             Ask about your projects and notes, e.g. “What is overdue on C7801?”. Type <span className="font-mono">/</span>{" "}
             for your saved commands.
           </p>
@@ -390,8 +401,8 @@ export default function CopilotChat({ open, onOpenChange }: { open: boolean; onO
             </div>
           ),
         )}
-        {sending && <p className="text-[13px] text-text-muted">Thinking…</p>}
-        {error && <p className="text-[13px] text-accent">Could not get an answer ({error}).</p>}
+        {sending && <p className="text-[15px] text-text-muted">Thinking…</p>}
+        {error && <p className="text-[15px] text-accent">Could not get an answer ({error}).</p>}
         <div ref={bottomRef} />
       </div>
 
@@ -417,7 +428,7 @@ export default function CopilotChat({ open, onOpenChange }: { open: boolean; onO
           Send
         </button>
       </div>
-    </aside>
+    </section>
   );
 }
 
@@ -459,8 +470,8 @@ function CommandMenu({
           }`}
         >
           <span className="flex w-full items-baseline gap-2">
-            <span className="font-mono text-[13px] text-accent">{prompt.command}</span>
-            <span className="truncate text-[13px] text-text-primary">{prompt.description}</span>
+            <span className="font-mono text-[15px] text-accent">{prompt.command}</span>
+            <span className="truncate text-[15px] text-text-primary">{prompt.description}</span>
           </span>
           <span className="line-clamp-1 text-xs text-text-muted">{prompt.instruction}</span>
         </button>
@@ -510,9 +521,9 @@ function EditCard({ edit, onApprove, onReject }: { edit: Edit; onApprove: () => 
   const after = noteText(edit.content, edit.frontmatter);
 
   return (
-    <div className="flex flex-col gap-2 rounded-xl border border-border-light bg-surface-panel px-3.5 py-3 text-[13px] text-text-secondary">
+    <div className="flex flex-col gap-2 rounded-xl border border-border-light bg-surface-panel px-3.5 py-3 text-[15px] text-text-secondary">
       <div className="flex items-center justify-between gap-2">
-        <span className="font-mono text-[11px] text-text-muted">{isNew ? "NEW NOTE" : "NOTE EDIT"}</span>
+        <span className="font-mono text-[13px] text-text-muted">{isNew ? "NEW NOTE" : "NOTE EDIT"}</span>
         <span className="chip">
           <span className={`h-2 w-2 rounded-full ${EDIT_STATUS[state].dot}`} />
           {EDIT_STATUS[state].label}
@@ -616,5 +627,39 @@ function Diff({ before, after }: { before: string; after: string }) {
         ),
       )}
     </pre>
+  );
+}
+
+/** Toggles whether the chat stays expanded when a task opens. */
+function PinButton({ pinned, onClick }: { pinned: boolean; onClick: () => void }) {
+  const label = pinned ? "Unpin chat" : "Pin chat (keep open when a task opens)";
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={pinned}
+      aria-label={label}
+      title={label}
+      className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border ${
+        pinned
+          ? "border-accent/60 bg-surface-active text-accent"
+          : "border-border-light bg-surface-raised text-text-secondary hover:text-text-primary"
+      }`}
+    >
+      <svg
+        width="16"
+        height="16"
+        viewBox="0 0 24 24"
+        fill={pinned ? "currentColor" : "none"}
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        aria-hidden="true"
+      >
+        <path d="M12 17v5" />
+        <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" />
+      </svg>
+    </button>
   );
 }

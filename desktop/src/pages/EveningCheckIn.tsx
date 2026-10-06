@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { useSpace } from "../lib/space";
+import { useTitle } from "../lib/title";
 
 import { formatDay, ME, NEUTRAL_TAG, PROJECT_TAG, RANK_LABELS, Tag, type TriageItem } from "../components/TriageBoard";
 
@@ -44,6 +45,7 @@ export default function EveningCheckIn() {
   const [rows, setRows] = useState<Row[]>(() => [newRow()]);
   const [submit, setSubmit] = useState<Submit>({ state: "idle" });
   const { spaceId } = useSpace();
+  useTitle("Evening check-in");
 
   useEffect(() => {
     const controller = new AbortController();
@@ -123,8 +125,8 @@ export default function EveningCheckIn() {
         <div className="font-mono text-xs tracking-[0.06em] text-text-muted">
           {new Date().toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" }).toUpperCase()}
         </div>
-        <h1 className="mt-1 text-[28px] font-semibold">Evening check-in</h1>
-        <div className="mt-1 text-[13px] text-text-muted">
+        <h1 className="mt-1 text-[29px] font-semibold">Evening check-in</h1>
+        <div className="mt-1 text-[15px] text-text-muted">
           Tick what got done. The rest carries into tomorrow's ranking.
         </div>
       </header>

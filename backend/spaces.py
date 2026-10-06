@@ -103,6 +103,8 @@ def migrate(db: Session) -> None:
     - Moves the legacy notes folder (`COPILOT_NOTES_DIR`) to `data/spaces/1/content/`.
       Note paths relative to the root are unchanged, so their history still lines up.
     - Puts tasks without a space into the Default space.
+    - Moves the deprecated many-to-many task-note links into `Task.note_path` (a task keeps
+      its first link alphabetically if it had several).
     - Creates content/ and templates/ for every space.
     """
     set_source(db, MIGRATION_SOURCE)
@@ -128,9 +130,26 @@ def migrate(db: Session) -> None:
         .values(space_id=DEFAULT_SPACE_ID)
         .execution_options(synchronize_session=False)
     )
+    _migrate_note_links(db)
     db.commit()
     for space in db.scalars(select(Space)).all():
         ensure_space_dirs(space.id)
+
+
+def _migrate_note_links(db: Session) -> None:
+    links = db.scalars(select(TaskNoteLink).order_by(TaskNoteLink.task_id, TaskNoteLink.note_path)).all()
+    if not links:
+        return
+    # Soft-deleted tasks are migrated too.
+    tasks = db.scalars(
+        select(Task).where(Task.id.in_({link.task_id for link in links})).execution_options(include_deleted=True)
+    )
+    by_id = {task.id: task for task in tasks}
+    for link in links:
+        task = by_id.get(link.task_id)
+        if task is not None and task.note_path is None:
+            task.note_path = link.note_path
+        db.delete(link)
 
 
 # --- Spaces -------------------------------------------------------------------
@@ -225,15 +244,15 @@ def _folder_metas_under(db: Session, space_id: int, prefix: str) -> list[FolderM
     return [meta for meta in metas if _under(meta.path, prefix)]
 
 
-def _note_links_under(db: Session, space_id: int, prefix: str) -> list[TaskNoteLink]:
-    """Task-note links of the space to the note `prefix` or to notes in the folder `prefix`."""
-    links = db.scalars(
-        select(TaskNoteLink)
-        .join(Task, Task.id == TaskNoteLink.task_id)
-        .where(Task.space_id == space_id)
+def _tasks_linked_under(db: Session, space_id: int, prefix: str) -> list[Task]:
+    """Tasks of the space (soft-deleted ones included) linked to the note `prefix` or to a note
+    in the folder `prefix`."""
+    tasks = db.scalars(
+        select(Task)
+        .where(Task.space_id == space_id, Task.note_path.is_not(None))
         .execution_options(include_deleted=True)
     )
-    return [link for link in links if _under(link.note_path, prefix)]
+    return [task for task in tasks if _under(task.note_path, prefix)]
 
 
 def relocate(db: Session, space_id: int, old: str, new: str) -> None:
@@ -247,26 +266,22 @@ def relocate(db: Session, space_id: int, old: str, new: str) -> None:
     for meta in _folder_metas_under(db, space_id, old):
         meta.path = new + meta.path[len(old):]
 
-    links = _note_links_under(db, space_id, old)
-    taken = {(link.task_id, link.note_path) for link in _note_links_under(db, space_id, new)}
-    for link in links:
-        target = new + link.note_path[len(old):]
-        if (link.task_id, target) in taken:
-            db.delete(link)
-        else:
-            link.note_path = target
+    for task in _tasks_linked_under(db, space_id, old):
+        task.note_path = new + task.note_path[len(old):]
     db.commit()
 
 
 def forget(db: Session, space_id: int, path: str) -> None:
-    """After a note or folder was deleted, drop its folder metadata and its notes' task links.
+    """After a note or folder was deleted, drop its folder metadata and unlink its notes' tasks.
 
     The tasks and a project folder's project are kept; marking a folder of the same name as a
     Project again links it back to that project.
     """
     set_source(db, SPACES_SOURCE)
-    for row in [*_folder_metas_under(db, space_id, path), *_note_links_under(db, space_id, path)]:
-        db.delete(row)
+    for meta in _folder_metas_under(db, space_id, path):
+        db.delete(meta)
+    for task in _tasks_linked_under(db, space_id, path):
+        task.note_path = None
     db.commit()
 
 
