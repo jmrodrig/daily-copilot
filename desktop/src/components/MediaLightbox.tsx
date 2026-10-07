@@ -583,7 +583,8 @@ export default function MediaLightbox({
       if (tool === "comment") {
         // A click pins a comment, open to be written in; any other open one closes.
         commitText();
-        const comment: Comment = { id: crypto.randomUUID(), x: point.x, y: point.y, text: "", isExpanded: true, page };
+        const newId = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2);
+        const comment: Comment = { id: newId, x: point.x, y: point.y, text: "", isExpanded: true, page };
         setComments((all) => [
           ...all.filter((c) => !c.isExpanded || c.text.trim()).map((c) => ({ ...c, isExpanded: false })),
           comment,
