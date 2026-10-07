@@ -634,7 +634,7 @@ function SpaceSwitcher() {
 
 function navClass(isActive: boolean): string {
   return `flex min-h-7 w-full items-center rounded-md px-2 text-left text-[15px] ${
-    isActive ? "bg-surface-active font-medium text-text-primary" : "text-text-muted hover:bg-surface-hover"
+    isActive ? "bg-surface-active text-text-primary" : "text-text-muted hover:bg-surface-hover"
   }`;
 }
 
@@ -710,7 +710,7 @@ function FolderContents({ folder, ...props }: TreeProps & { folder: FolderNode }
               to={to}
               title={note.title}
               className={`flex min-h-7 min-w-0 flex-1 items-center rounded-md pl-1 pr-2 text-left text-[15px] ${
-                current === to ? "bg-surface-active font-medium text-text-primary" : "text-text-muted"
+                current === to ? "bg-surface-active text-text-primary" : "text-text-muted"
               }`}
             >
               <span className="truncate">{note.title}</span>
