@@ -41,7 +41,7 @@ export default {
         },
       },
       fontFamily: {
-        sans: ["var(--dc-font-mono)"],
+        sans: ["IBM Plex Sans", "sans-serif"],
         mono: ["var(--dc-font-mono)"],
         display: ["var(--dc-font-display)"],
       },
