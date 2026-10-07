@@ -294,7 +294,7 @@ export default function NotePage() {
           {note.state === "ok" && (
             <>
               {details && <div className={`${NOTE_COLUMN} flex flex-col gap-5`}>{details}</div>}
-              <article className="note-body markdown text-[14px] leading-relaxed text-text-secondary">
+              <article className="note-body markdown text-[16px] leading-relaxed text-text-secondary">
                 {/* Inline HTML carries text and cell colors, alignment and image and table sizes; anything else in it is stripped. */}
                 <Markdown
                   remarkPlugins={[remarkGfm]}
