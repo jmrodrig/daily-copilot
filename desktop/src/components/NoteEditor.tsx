@@ -128,7 +128,7 @@ export default function NoteEditor({
     content: value,
     contentType: "markdown",
     editorProps: {
-      attributes: { class: "note-body markdown min-h-64 text-[17px] leading-relaxed text-text-secondary focus:outline-none", spellcheck: "true" },
+      attributes: { class: "note-body markdown min-h-64 text-[16px] leading-relaxed text-text-secondary focus:outline-none", spellcheck: "true" },
       handleKeyDown: (_view, event) => {
         if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
           event.preventDefault();
