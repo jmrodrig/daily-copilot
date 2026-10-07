@@ -237,9 +237,14 @@ function TextField({
   }, [draft, multiline]);
 
   async function commit() {
-    if (draft.trim() === value.trim()) return;
-    if (required && !draft.trim()) return setDraft(value);
-    if (!(await onSave(draft))) setDraft(value);
+    const trimmed = draft.replace(/\s+/g, " ").trim();
+    if (trimmed === value.trim()) {
+      if (draft !== trimmed) setDraft(trimmed);
+      return;
+    }
+    if (required && !trimmed) return setDraft(value);
+    if (!(await onSave(trimmed))) setDraft(value);
+    else setDraft(trimmed);
   }
 
   const props = {

@@ -1,9 +1,10 @@
 import { mergeAttributes, Node, type JSONContent } from "@tiptap/core";
 import { NodeViewWrapper, ReactNodeViewRenderer, type NodeViewProps } from "@tiptap/react";
+import { useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { notePath } from "../lib/space";
-import { taskIdFromHref, useTaskPanel } from "../lib/tasks";
+import { taskIdFromHref, useTaskPanel, TASK_CHANGED, type TaskChange } from "../lib/tasks";
 
 /**
  * Inline reference pills, like Confluence's macros: a task, a note or a web page shown as an icon and its name.
@@ -97,13 +98,26 @@ export const ReferencePill = Node.create({
 });
 
 /** The pill in the editor: click selects it (to delete or move), double-click opens what it points to. */
-function PillView({ node, selected }: NodeViewProps) {
+function PillView({ node, selected, updateAttributes }: NodeViewProps) {
   const { kind, href, label } = node.attrs as RefPillAttrs;
   const navigate = useNavigate();
   const { openTask } = useTaskPanel();
 
+  const taskId = kind === "task" ? taskIdFromHref(href) : null;
+
+  useEffect(() => {
+    if (taskId === null) return;
+    const handle = (event: Event) => {
+      const change = (event as CustomEvent<TaskChange>).detail;
+      if (change.id === taskId && change.task && change.task.title !== label) {
+        updateAttributes({ label: change.task.title });
+      }
+    };
+    window.addEventListener(TASK_CHANGED, handle);
+    return () => window.removeEventListener(TASK_CHANGED, handle);
+  }, [taskId, label, updateAttributes]);
+
   function open() {
-    const taskId = kind === "task" ? taskIdFromHref(href) : null;
     if (taskId !== null) openTask(taskId);
     else if (kind === "url") window.open(href, "_blank", "noopener,noreferrer");
     else navigate(href);
