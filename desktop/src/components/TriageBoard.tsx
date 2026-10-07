@@ -12,7 +12,7 @@ export type TriageItem = {
   title: string;
   project: string | null;
   priority: "low" | "normal" | "high" | "urgent";
-  status: "backlog" | "todo" | "in_progress" | "blocked" | "done" | null;
+  status: "backlog" | "todo" | "in_progress" | "blocked" | "done" | "archived" | null;
   assignee: string | null;
   start_date: string | null;
   due_date: string | null;

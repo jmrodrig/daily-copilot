@@ -1011,6 +1011,7 @@ function ViewIcon({ viewType }: { viewType: ViewType }) {
     kanban: "M4 4h4v16H4zM10 4h4v10h-4zM16 4h4v13h-4z",
     backlog: "M4 6h16M4 12h16M4 18h16",
     gantt: "M4 6h9M8 12h10M6 18h7",
+    list: "M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01",
   };
   return (
     <svg

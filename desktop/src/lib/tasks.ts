@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
 
+import { sendJson } from "./api";
 import type { ViewFilters } from "./views";
 
 // Shapes of the task engine endpoints (see TaskItem, ProjectOption etc. in backend/schemas.py).
-export type TaskStatus = "backlog" | "todo" | "in_progress" | "blocked" | "done";
+export type TaskStatus = "backlog" | "todo" | "in_progress" | "blocked" | "done" | "archived";
 export type TaskPriority = "low" | "normal" | "high" | "urgent";
 
 export type TaskItem = {
@@ -27,17 +28,24 @@ export type TaskItem = {
   note_path: string | null;
   /** Oldest first. */
   comments: TaskComment[];
+  /** Values of the space's custom fields by field id (see CustomFieldDef in ./space). */
+  custom_fields: Record<string, CustomFieldValue>;
 };
+
+export type CustomFieldValue = string | number | boolean;
 
 /** Body of `POST /api/tasks`. */
 export type TaskCreate = Partial<Omit<TaskPatch, "project_id">> & { space_id: number; title: string; project_id?: number | null };
 
 export type ProjectOption = { id: number; code: string; name: string; folder_path: string | null };
 
-/** Fields of `PATCH /api/tasks/{id}`; the response is the plain task row. */
+/** Fields of `PATCH /api/tasks/{id}` and of a bulk update's `updates`; the PATCH response is the plain task row. */
 export type TaskPatch = Partial<
   Pick<TaskItem, "title" | "description" | "status" | "priority" | "assignee" | "project_id" | "start_date" | "deadline" | "tags" | "note_path">
->;
+> & {
+  /** Merged into the task's custom fields; `null` clears a field. */
+  custom_fields?: Record<string, CustomFieldValue | null>;
+};
 
 /** The Kanban columns, left to right. Blocked tasks sit in "In progress" with a tag. */
 export const BOARD_COLUMNS: { status: TaskStatus; label: string }[] = [
@@ -53,7 +61,29 @@ export const STATUS_LABELS: Record<TaskStatus, string> = {
   in_progress: "In progress",
   blocked: "Blocked",
   done: "Done",
+  archived: "Archived",
 };
+
+/** Every status, in workflow order. */
+export const STATUSES = Object.keys(STATUS_LABELS) as TaskStatus[];
+
+/** Status -> the statuses a task may move to next (see StatusFlow in backend/schemas.py). `null` allows every move. */
+export type StatusFlow = Partial<Record<TaskStatus, TaskStatus[]>>;
+
+/**
+ * The statuses a task in `current` may move to under a space's status flow, `current` included, in workflow order.
+ * A status the flow doesn't mention is unrestricted.
+ */
+export function allowedStatuses(flow: StatusFlow | null | undefined, current: TaskStatus): TaskStatus[] {
+  const targets = flow?.[current];
+  if (!targets) return STATUSES;
+  return STATUSES.filter((s) => s === current || targets.includes(s));
+}
+
+/** The text of the comment left when a status change is explained (see StatusChangeDialog). */
+export function statusChangeComment(from: TaskStatus, to: TaskStatus, comment: string): string {
+  return `Status: ${STATUS_LABELS[from]} → ${STATUS_LABELS[to]}\n\n${comment.trim()}`;
+}
 
 export function boardColumn(status: TaskStatus): TaskStatus {
   return status === "blocked" ? "in_progress" : status;
@@ -69,9 +99,13 @@ export function isOverdue(task: TaskItem): boolean {
   return Date.UTC(y, m - 1, d) / MS_PER_DAY < today;
 }
 
-/** Query string for `GET /api/tasks` and the task views: the space plus a view's Project/Assignee filters. */
-export function taskQuery(spaceId: number, filters: ViewFilters): string {
+/**
+ * Query string for `GET /api/tasks` and the task views: the space plus a view's Project/Assignee filters.
+ * Archived tasks are left out unless `includeArchived`.
+ */
+export function taskQuery(spaceId: number, filters: ViewFilters, includeArchived = false): string {
   const params = new URLSearchParams({ space_id: String(spaceId) });
+  if (includeArchived) params.set("include_archived", "true");
   if (filters.project_id !== null) params.set("project_id", String(filters.project_id));
   // An empty assignee asks for unassigned tasks.
   if (filters.assignee !== null) params.set("assignee", filters.assignee);
@@ -85,6 +119,13 @@ export type TaskComment = { id: string; author: string | null; text: string; cre
 /** Fired after a task changes, so the views and the task panel stay in step. `task` is the new copy, when the sender has it. */
 export const TASK_CHANGED = "copilot:task-changed";
 export type TaskChange = { id: number; source: "board" | "panel"; task?: TaskItem; deleted?: boolean };
+
+/** `POST /api/tasks/bulk-update`: the same change to several tasks (all or nothing); answers with the changed tasks. */
+export async function bulkUpdateTasks(taskIds: number[], updates: TaskPatch): Promise<TaskItem[]> {
+  const tasks = await sendJson<TaskItem[]>("POST", "/api/tasks/bulk-update", { task_ids: taskIds, updates });
+  tasks.forEach((task) => announceTaskChange({ id: task.id, task, source: "board" }));
+  return tasks;
+}
 
 export function announceTaskChange(change: TaskChange) {
   window.dispatchEvent(new CustomEvent<TaskChange>(TASK_CHANGED, { detail: change }));

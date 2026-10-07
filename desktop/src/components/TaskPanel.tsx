@@ -2,18 +2,21 @@ import { useEffect, useLayoutEffect, useRef, useState, type FormEvent, type Keyb
 import { Link } from "react-router-dom";
 
 import { getJson, message, sendJson } from "../lib/api";
-import { notePath } from "../lib/space";
+import { notePath, useSpace, type CustomFieldDef } from "../lib/space";
 import {
+  allowedStatuses,
   announceTaskChange,
   isOverdue,
   STATUS_LABELS,
   useTaskChanges,
+  type CustomFieldValue,
   type TaskComment,
   type TaskItem,
   type TaskPatch,
   type TaskPriority,
   type TaskStatus,
 } from "../lib/tasks";
+import { postStatusComment, useStatusChangePrompt } from "./StatusChangeDialog";
 import { ME, NEUTRAL_TAG, PROJECT_TAG, Tag, TagPills } from "./TriageBoard";
 
 type State = { state: "loading" } | { state: "ok"; task: TaskItem } | { state: "error"; message: string };
@@ -67,6 +70,18 @@ export default function TaskPanel({ taskId, onClose }: { taskId: number; onClose
 
   const patch = (body: TaskPatch) => save(() => sendJson("PATCH", `/api/tasks/${taskId}`, body), "save the task");
 
+  /** Asks for an optional comment explaining the change, then saves both (or nothing, if cancelled). */
+  const { ask, dialog } = useStatusChangePrompt();
+  async function changeStatus(task: TaskItem, to: TaskStatus) {
+    if (to === task.status) return true;
+    const answer = await ask(task, to);
+    if (!answer) return false;
+    return save(async () => {
+      await sendJson("PATCH", `/api/tasks/${task.id}`, { status: to });
+      if (answer.comment) await postStatusComment(task.id, task.status, to, answer.comment);
+    }, "change the status");
+  }
+
   async function remove(task: TaskItem) {
     if (!window.confirm(`Delete "${task.title}"? It stays in the version history.`)) return;
     try {
@@ -96,10 +111,18 @@ export default function TaskPanel({ taskId, onClose }: { taskId: number; onClose
         {state.state === "loading" && <p className="text-[15px] text-text-muted">Loading the task…</p>}
         {state.state === "error" && <p className="text-[15px] text-text-secondary">Could not load the task ({state.message}).</p>}
         {state.state === "ok" && (
-          <TaskFields key={state.task.id} task={state.task} onPatch={patch} onSave={save} onDelete={() => remove(state.task)} />
+          <TaskFields
+            key={state.task.id}
+            task={state.task}
+            onPatch={patch}
+            onStatus={(to) => changeStatus(state.task, to)}
+            onSave={save}
+            onDelete={() => remove(state.task)}
+          />
         )}
         {error && <p className="text-xs text-accent">{error}</p>}
       </div>
+      {dialog}
     </section>
   );
 }
@@ -107,16 +130,21 @@ export default function TaskPanel({ taskId, onClose }: { taskId: number; onClose
 function TaskFields({
   task,
   onPatch,
+  onStatus,
   onSave,
   onDelete,
 }: {
   task: TaskItem;
   onPatch: (patch: TaskPatch) => Promise<boolean>;
+  onStatus: (status: TaskStatus) => Promise<boolean>;
   onSave: (request: () => Promise<unknown>, what: string) => Promise<boolean>;
   onDelete: () => void;
 }) {
   const label = "flex flex-col gap-1 text-[13px] text-text-muted";
   const overdue = isOverdue(task);
+  const space = useSpace().spaces.find((s) => s.id === task.space_id);
+  const statuses = allowedStatuses(space?.status_flow, task.status);
+  const customFields = space?.custom_fields_schema ?? [];
   return (
     <>
       <div className="flex flex-col gap-2">
@@ -142,10 +170,15 @@ function TaskFields({
       <div className="grid grid-cols-2 gap-x-3 gap-y-2.5">
         <label className={label}>
           Status
-          <select value={task.status} onChange={(e) => onPatch({ status: e.target.value as TaskStatus })} className="field py-1.5 text-[15px]">
-            {Object.entries(STATUS_LABELS).map(([value, name]) => (
+          <select
+            value={task.status}
+            onChange={(e) => onStatus(e.target.value as TaskStatus)}
+            title={statuses.length < Object.keys(STATUS_LABELS).length ? "Limited by the space's status flow" : undefined}
+            className="field py-1.5 text-[15px]"
+          >
+            {statuses.map((value) => (
               <option key={value} value={value}>
-                {name}
+                {STATUS_LABELS[value]}
               </option>
             ))}
           </select>
@@ -188,6 +221,14 @@ function TaskFields({
             className="field py-1.5 text-[15px]"
           />
         </label>
+        {customFields.map((field) => (
+          <CustomField
+            key={field.id}
+            field={field}
+            value={task.custom_fields[field.id]}
+            onSave={(value) => onPatch({ custom_fields: { [field.id]: value } })}
+          />
+        ))}
       </div>
 
       <LinkedNote task={task} onPatch={onPatch} />
@@ -290,6 +331,102 @@ function TextField({
     />
   ) : (
     <input {...props} onChange={(e) => setDraft(e.target.value)} className={className} />
+  );
+}
+
+/** One of the space's custom fields (see Space preferences); an emptied field is cleared. */
+function CustomField({
+  field,
+  value,
+  onSave,
+}: {
+  field: CustomFieldDef;
+  value: CustomFieldValue | undefined;
+  onSave: (value: CustomFieldValue | null) => Promise<boolean>;
+}) {
+  const label = "flex flex-col gap-1 text-[13px] text-text-muted";
+  const input = "field py-1.5 text-[15px]";
+  switch (field.type) {
+    case "checkbox":
+      return (
+        <label className="flex items-center gap-2 self-end py-1.5 text-[13px] text-text-muted">
+          <input type="checkbox" checked={value === true} onChange={(e) => onSave(e.target.checked)} />
+          {field.name}
+        </label>
+      );
+    case "date":
+      return (
+        <label className={label}>
+          {field.name}
+          <input
+            type="date"
+            value={typeof value === "string" ? value : ""}
+            onChange={(e) => onSave(e.target.value || null)}
+            className={`${input} ${value ? "text-text-primary" : "text-text-muted"}`}
+          />
+        </label>
+      );
+    case "number":
+      return (
+        <label className={label}>
+          {field.name}
+          <NumberField ariaLabel={field.name} value={typeof value === "number" ? value : null} onSave={onSave} className={input} />
+        </label>
+      );
+    default:
+      return (
+        <label className={`${label} col-span-2`}>
+          {field.name}
+          <TextField
+            ariaLabel={field.name}
+            value={typeof value === "string" ? value : value === undefined ? "" : String(value)}
+            placeholder="—"
+            onSave={(text) => onSave(text.trim() || null)}
+            className={input}
+          />
+        </label>
+      );
+  }
+}
+
+/** A number saved on blur or Enter; an empty field saves null, and text that isn't a number puts the saved value back. */
+function NumberField({
+  value,
+  onSave,
+  ariaLabel,
+  className,
+}: {
+  value: number | null;
+  onSave: (value: number | null) => Promise<boolean>;
+  ariaLabel: string;
+  className: string;
+}) {
+  const shown = value === null ? "" : String(value);
+  const [draft, setDraft] = useState(shown);
+  useEffect(() => setDraft(shown), [shown]);
+
+  async function commit() {
+    const next = draft.trim() === "" ? null : Number(draft);
+    if (next !== null && !Number.isFinite(next)) return setDraft(shown);
+    if (next === value) return;
+    if (!(await onSave(next))) setDraft(shown);
+  }
+
+  return (
+    <input
+      type="number"
+      step="any"
+      aria-label={ariaLabel}
+      value={draft}
+      placeholder="—"
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") e.currentTarget.blur();
+        if (e.key === "Escape") setDraft(shown);
+      }}
+      className={className}
+    />
   );
 }
 

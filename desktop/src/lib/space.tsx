@@ -1,9 +1,18 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 
 import { errorDetail, getJson } from "./api";
+import type { StatusFlow } from "./tasks";
+
+export type CustomFieldType = "text" | "number" | "date" | "checkbox";
+
+/** One custom task field of a space; tasks keep its value under `id` (see CustomFieldDef in backend/schemas.py). */
+export type CustomFieldDef = { id: string; name: string; type: CustomFieldType };
 
 // GET /api/spaces (see Space in backend/schemas.py).
-export type Space = { id: number; name: string };
+export type Space = { id: number; name: string; status_flow: StatusFlow | null; custom_fields_schema: CustomFieldDef[] };
+
+/** Body of `PUT /api/spaces/{id}`: fields left out are kept. */
+export type SpaceUpdate = Partial<Pick<Space, "name" | "status_flow" | "custom_fields_schema">>;
 
 type SpaceState = {
   spaces: Space[];
@@ -12,8 +21,8 @@ type SpaceState = {
   space: Space | undefined;
   setSpaceId: (id: number) => void;
   createSpace: (name: string) => Promise<Space>;
-  /** Rename a space. */
-  updateSpace: (id: number, name: string) => Promise<Space>;
+  /** Rename a space and/or change its task preferences. */
+  updateSpace: (id: number, changes: SpaceUpdate) => Promise<Space>;
   /** Bumped after the content tree changes (new note, folder flags), so views can reload. */
   treeVersion: number;
   refreshTree: () => void;
@@ -68,11 +77,11 @@ export function SpaceProvider({ children }: { children: ReactNode }) {
     [setSpaceId],
   );
 
-  const updateSpace = useCallback(async (id: number, name: string) => {
+  const updateSpace = useCallback(async (id: number, changes: SpaceUpdate) => {
     const res = await fetch(`/api/spaces/${id}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name }),
+      body: JSON.stringify(changes),
     });
     if (!res.ok) throw new Error(await errorDetail(res));
     const space: Space = await res.json();

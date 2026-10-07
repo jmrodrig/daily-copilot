@@ -5,6 +5,7 @@ import AllTasks from "./pages/AllTasks";
 import Dashboard from "./pages/Dashboard";
 import EveningCheckIn from "./pages/EveningCheckIn";
 import NotePage from "./pages/NotePage";
+import People from "./pages/People";
 import Placeholder from "./pages/Placeholder";
 import ProjectPlan from "./pages/ProjectPlan";
 import Settings from "./pages/Settings";
@@ -27,7 +28,7 @@ export default function App() {
         <Route path="space-preferences" element={<SpacePreferences />} />
         <Route path="emails" element={<Placeholder title="Forwarded emails" />} />
         <Route path="graph" element={<Placeholder title="Notes graph" />} />
-        <Route path="people" element={<Placeholder title="People" />} />
+        <Route path="people" element={<People />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>

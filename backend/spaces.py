@@ -12,6 +12,7 @@ those flags live in the `folder_meta` table (see `models.FolderMeta`).
 import logging
 import shutil
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
@@ -169,13 +170,16 @@ def create_space(db: Session, name: str) -> Space:
     return space
 
 
-def update_space(db: Session, space_id: int, name: str) -> Space | None:
-    """Rename a space; `None` if it doesn't exist (or is deleted)."""
+def update_space(db: Session, space_id: int, **changes: Any) -> Space | None:
+    """Rename a space and/or set its `status_flow` and `custom_fields_schema` (plain JSON values);
+    `None` if it doesn't exist (or is deleted)."""
     space = get_space(db, space_id)
     if space is None:
         return None
     set_source(db, SPACES_SOURCE)
-    space.name = name
+    for key in ("name", "status_flow", "custom_fields_schema"):
+        if key in changes:
+            setattr(space, key, changes[key])
     db.commit()
     return space
 

@@ -26,6 +26,8 @@ class Status(str, Enum):
     IN_PROGRESS = "in_progress"
     BLOCKED = "blocked"
     DONE = "done"
+    # Put away: hidden from the task views and lists unless asked for (`include_archived`).
+    ARCHIVED = "archived"
 
 
 class Priority(str, Enum):
@@ -137,6 +139,7 @@ class Task(BaseModel):
     tags: list[str] = Field(default_factory=list)
     note_path: str | None = Field(default=None, description="The linked note, relative to content/")
     comments: list[TaskComment] = Field(default_factory=list, description="Oldest first")
+    custom_fields: dict[str, Any] = Field(default_factory=dict, description="Custom field id -> value")
     subtasks: list[Subtask] = Field(default_factory=list)
     created_at: datetime | None = None
     completed_at: datetime | None = None
@@ -150,6 +153,11 @@ class Task(BaseModel):
     @classmethod
     def _clean_comments(cls, value: Any) -> list[TaskComment]:
         return clean_comments(value)
+
+    @field_validator("custom_fields", mode="before")
+    @classmethod
+    def _none_is_empty(cls, value: Any) -> dict[str, Any]:
+        return value or {}
 
 
 class TaskUpdate(BaseModel):
@@ -165,6 +173,10 @@ class TaskUpdate(BaseModel):
     deadline: date | None = None
     tags: list[str] | None = Field(default=None, description="Replaces the task's tags; [] or null clears them")
     note_path: str | None = Field(default=None, description="Links the task to a note (relative to content/); null unlinks")
+    custom_fields: dict[str, Any] | None = Field(
+        default=None,
+        description="Merged into the task's custom fields (see `Space.custom_fields_schema`); a null value clears that field",
+    )
 
     @field_validator("assignee")
     @classmethod
@@ -176,7 +188,7 @@ class TaskUpdate(BaseModel):
     def _clean_tags(cls, value: list[str] | None) -> list[str]:
         return clean_tags(value)
 
-    @field_validator("status", "title", "description", "priority")
+    @field_validator("status", "title", "description", "priority", "custom_fields")
     @classmethod
     def _not_null(cls, value: Any) -> Any:
         if value is None:
@@ -199,15 +211,6 @@ class Link(BaseModel):
     successor_id: int
     type: LinkType = LinkType.FINISH_TO_START
     lag_days: float = 0
-
-
-class Person(BaseModel):
-    id: int | None = None
-    name: str = Field(min_length=1)
-    email: str | None = None
-    role: str | None = None
-    organisation: str | None = None
-    projects: list[str] = Field(default_factory=list, description="Project codes")
 
 
 class Capture(BaseModel):
@@ -577,9 +580,102 @@ class SpaceIn(BaseModel):
         return value.strip()
 
 
+class CustomFieldType(str, Enum):
+    TEXT = "text"
+    NUMBER = "number"
+    DATE = "date"
+    CHECKBOX = "checkbox"
+
+
+class CustomFieldDef(BaseModel):
+    """One custom task field of a space (`Space.custom_fields_schema`); tasks keep its value under `id`."""
+
+    id: str = Field(pattern=r"^[a-z0-9_-]{1,64}$", description="Stable key in `Task.custom_fields`")
+    name: str = Field(min_length=1, max_length=64)
+    type: CustomFieldType = CustomFieldType.TEXT
+
+    @field_validator("name")
+    @classmethod
+    def _strip_name(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("name must not be blank")
+        return value.strip()
+
+
+StatusFlow = dict[Status, list[Status]]
+
+
+def clean_status_flow(value: Any) -> StatusFlow | None:
+    """A stored status flow that parses, without duplicate targets; None or {} means every transition is allowed."""
+    if not isinstance(value, dict):
+        return None
+    flow: StatusFlow = {}
+    for source, targets in value.items():
+        try:
+            flow[Status(source)] = list(dict.fromkeys(Status(t) for t in targets or []))
+        except (TypeError, ValueError):
+            continue
+    return flow or None
+
+
+def clean_custom_fields_schema(value: Any) -> list[CustomFieldDef]:
+    """Stored custom field definitions that parse; None means none."""
+    fields = []
+    for raw in value or []:
+        try:
+            fields.append(CustomFieldDef.model_validate(raw))
+        except ValueError:
+            continue
+    return fields
+
+
+class SpaceUpdate(BaseModel):
+    """`PUT /api/spaces/{id}`: rename a space and/or set its task preferences. Unsent fields are kept."""
+
+    name: str | None = Field(default=None, min_length=1, max_length=64)
+    status_flow: StatusFlow | None = Field(
+        default=None,
+        description="Status -> the statuses a task may move to next; a status left out (or a null/empty flow) is unrestricted",
+    )
+    custom_fields_schema: list[CustomFieldDef] | None = Field(default=None, description="Replaces the space's custom fields")
+
+    @field_validator("name")
+    @classmethod
+    def _strip_name(cls, value: str | None) -> str:
+        if value is None or not value.strip():
+            raise ValueError("name must not be blank")
+        return value.strip()
+
+    @field_validator("status_flow")
+    @classmethod
+    def _dedupe_targets(cls, value: StatusFlow | None) -> StatusFlow | None:
+        return clean_status_flow(value)
+
+    @field_validator("custom_fields_schema")
+    @classmethod
+    def _unique_ids(cls, value: list[CustomFieldDef] | None) -> list[CustomFieldDef]:
+        value = value or []
+        ids = [field.id for field in value]
+        if len(ids) != len(set(ids)):
+            raise ValueError("custom field ids must be unique")
+        return value
+
+
 class Space(SpaceIn):
     id: int
+    status_flow: StatusFlow | None = Field(default=None, description="See `SpaceUpdate.status_flow`")
+    custom_fields_schema: list[CustomFieldDef] = Field(default_factory=list)
     created_at: datetime | None = None
+
+    @field_validator("status_flow", mode="before")
+    @classmethod
+    def _clean_flow(cls, value: Any) -> StatusFlow | None:
+        return clean_status_flow(value)
+
+    @field_validator("custom_fields_schema", mode="before")
+    @classmethod
+    def _clean_fields(cls, value: Any) -> list[CustomFieldDef]:
+        return clean_custom_fields_schema(value)
 
 
 class FolderNode(BaseModel):
@@ -699,6 +795,7 @@ class TaskCreate(BaseModel):
     assignee: str | None = Field(default=None, max_length=64)
     tags: list[str] = Field(default_factory=list)
     note_path: str | None = Field(default=None, description="The note to link, relative to content/")
+    custom_fields: dict[str, Any] = Field(default_factory=dict, description="Custom field id -> value")
 
     @field_validator("title")
     @classmethod
@@ -738,12 +835,26 @@ class TaskItem(BaseModel):
     tags: list[str] = Field(default_factory=list)
     note_path: str | None = None
     comments: list[TaskComment] = Field(default_factory=list, description="Oldest first")
+    custom_fields: dict[str, Any] = Field(default_factory=dict, description="Custom field id -> value")
+
+
+class TaskBulkUpdate(BaseModel):
+    """`POST /api/tasks/bulk-update`: apply the same change to several tasks at once (all or nothing)."""
+
+    task_ids: list[int] = Field(min_length=1, max_length=1000)
+    updates: TaskUpdate
+
+    @field_validator("task_ids")
+    @classmethod
+    def _dedupe(cls, value: list[int]) -> list[int]:
+        return list(dict.fromkeys(value))
 
 
 class ViewType(str, Enum):
     KANBAN = "kanban"
     BACKLOG = "backlog"
     GANTT = "gantt"
+    LIST = "list"
 
 
 class TaskViewFilters(BaseModel):
@@ -765,7 +876,7 @@ class TaskViewFilters(BaseModel):
 
 
 class TaskViewIn(BaseModel):
-    """`POST /api/views`: a named Kanban, Backlog or Gantt view of a space's tasks."""
+    """`POST /api/views`: a named Kanban, Backlog, Gantt or List view of a space's tasks."""
 
     space_id: int
     name: str = Field(min_length=1, max_length=64)
@@ -795,5 +906,50 @@ class TaskViewUpdate(BaseModel):
 
 
 class TaskView(TaskViewIn):
+    id: int
+    created_at: datetime | None = None
+
+
+# --- People -----------------------------------------------------------------------
+
+
+class PersonIn(BaseModel):
+    """`POST /api/people` and `PUT /api/people/{id}`: a contact in a space's People directory."""
+
+    space_id: int
+    name: str = Field(min_length=1, max_length=128)
+    email: str | None = Field(default=None, max_length=254)
+    company: str | None = Field(default=None, max_length=128)
+    is_external: bool = Field(default=False, description="Outside the organisation, e.g. a client or supplier")
+    avatar_url: str | None = Field(default=None, max_length=2048, description="None shows the person's initials")
+
+    @field_validator("name")
+    @classmethod
+    def _strip_name(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("name must not be blank")
+        return value.strip()
+
+    @field_validator("email", "company", "avatar_url")
+    @classmethod
+    def _blank_is_none(cls, value: str | None) -> str | None:
+        return (value.strip() or None) if value is not None else None
+
+    @field_validator("email")
+    @classmethod
+    def _looks_like_email(cls, value: str | None) -> str | None:
+        if value is not None and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", value):
+            raise ValueError("email must look like name@example.com")
+        return value
+
+    @field_validator("avatar_url")
+    @classmethod
+    def _http_url(cls, value: str | None) -> str | None:
+        if value is not None and not re.match(r"https?://", value, re.IGNORECASE):
+            raise ValueError("avatar_url must start with http:// or https://")
+        return value
+
+
+class Person(PersonIn):
     id: int
     created_at: datetime | None = None

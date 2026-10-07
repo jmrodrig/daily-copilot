@@ -124,13 +124,13 @@ TOOLS: dict[str, dict[str, Any]] = {
     },
     "list_tasks": {
         "description": "List project tasks from the database with status, assignee, start date, deadline, "
-        "completion and an `overdue` flag. Finished tasks are left out unless `include_done` is true.",
+        "completion and an `overdue` flag. Finished and archived tasks are left out unless `include_done` is true.",
         "parameters": {
             "type": "object",
             "properties": {
                 "project": {"type": "string", "description": "Optional project code or project folder, e.g. C7801"},
                 "overdue_only": {"type": "boolean", "description": "Only tasks past their deadline"},
-                "include_done": {"type": "boolean", "description": "Also list finished tasks"},
+                "include_done": {"type": "boolean", "description": "Also list finished and archived tasks"},
             },
         },
     },
@@ -263,8 +263,9 @@ def list_tasks(
     for task, code in rows:
         percent = task.completion_percent
         done = task.status == Status.DONE or percent >= 100
-        overdue = not done and task.deadline is not None and task.deadline < today
-        if (done and not include_done) or (overdue_only and not overdue):
+        archived = task.status == Status.ARCHIVED
+        overdue = not done and not archived and task.deadline is not None and task.deadline < today
+        if ((done or archived) and not include_done) or (overdue_only and not overdue):
             continue
         tasks.append(
             {

@@ -3,7 +3,7 @@ import { test, expect, type Page } from '@playwright/test';
 const TASK = {
   id: 7, space_id: 1, project_id: 1, project_code: 'C7801', title: 'Order the steel', description: 'Grade S355', status: 'todo',
   priority: 'normal', assignee: null, start_date: '2026-10-01', deadline: '2026-10-20', completion_percent: 0, is_gantt_task: false,
-  is_milestone: false, tags: [], note_path: null, comments: [] as Record<string, unknown>[],
+  is_milestone: false, tags: [], note_path: null, comments: [] as Record<string, unknown>[], custom_fields: {},
 };
 
 /** Mock the task APIs around one task; returns the PATCH and comment bodies sent. */
@@ -28,6 +28,9 @@ async function setup(page: Page, path: string) {
   });
   await page.route('**/api/projects*', (route) => route.fulfill({ json: [{ id: 1, code: 'C7801', name: 'Bridge', folder_path: 'C7801' }] }));
   await page.route('**/api/spaces/1/tags', (route) => route.fulfill({ json: [] }));
+  await page.route('**/api/spaces', (route) =>
+    route.fulfill({ json: [{ id: 1, name: 'Default', status_flow: null, custom_fields_schema: [] }] }),
+  );
   await page.route('**/api/notes?*', (route) => route.fulfill({ json: [] }));
   await page.goto(`http://localhost:5173${path}`);
   return { patches, comments };
@@ -58,6 +61,7 @@ test('clicking a Kanban card opens it above the chat; description and comments s
 test('changing a card status from its select does not open the task', async ({ page }) => {
   const { patches } = await setup(page, '/tasks/kanban');
   await page.getByLabel('Status of Order the steel').selectOption('done');
+  await page.getByRole('dialog', { name: 'Change status' }).getByRole('button', { name: 'Skip comment' }).click();
   await expect.poll(() => patches.at(-1)).toEqual({ status: 'done' });
   await expect(page).not.toHaveURL(/taskId=/);
 });

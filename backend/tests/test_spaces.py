@@ -71,7 +71,13 @@ def test_migrate_never_merges_into_existing_content(data_dirs):
 
 
 def test_spaces_list_and_create(client):
-    assert client.get("/api/spaces").json()[0] | {"created_at": None} == {"id": 1, "name": "Default", "created_at": None}
+    assert client.get("/api/spaces").json()[0] | {"created_at": None} == {
+        "id": 1,
+        "name": "Default",
+        "status_flow": None,
+        "custom_fields_schema": [],
+        "created_at": None,
+    }
 
     response = client.post("/api/spaces", json={"name": "  Private "})
 
@@ -566,6 +572,8 @@ def test_task_crud_filters_and_links(client):
         "is_milestone": False,
         "tags": ["weld", "client"],
         "note_path": "C7801/Keel.md",
+        "comments": [],
+        "custom_fields": {},
     }
     client.post("/api/tasks", json={"space_id": 1, "title": "Unassigned", "status": "todo", "tags": ["Admin"]})
     client.post("/api/tasks", json={"space_id": other, "title": "Private task", "tags": ["secret"]})

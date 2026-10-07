@@ -1,12 +1,12 @@
 // Shapes of the saved task view endpoints (see TaskView and TaskViewFilters in backend/schemas.py).
-export type ViewType = "kanban" | "backlog" | "gantt";
+export type ViewType = "kanban" | "backlog" | "gantt" | "list";
 
 /** `null` means no filter; an empty assignee means unassigned tasks. */
 export type ViewFilters = { project_id: number | null; assignee: string | null; tag: string | null };
 
 export type TaskView = { id: number; space_id: number; name: string; view_type: ViewType; filters: ViewFilters };
 
-export const VIEW_TYPES: Record<ViewType, string> = { kanban: "Kanban", backlog: "Backlog", gantt: "Gantt" };
+export const VIEW_TYPES: Record<ViewType, string> = { kanban: "Kanban", backlog: "Backlog", gantt: "Gantt", list: "List" };
 
 export const NO_FILTERS: ViewFilters = { project_id: null, assignee: null, tag: null };
 

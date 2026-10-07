@@ -20,7 +20,7 @@ import database
 import spaces
 from database import get_db, init_db
 from history import set_source, soft_delete, to_jsonable, utcnow
-from models import FolderMeta, Project, SavedPrompt, Space, Task, TaskView, TimeLog
+from models import FolderMeta, Person, Project, SavedPrompt, Space, Task, TaskView, TimeLog
 import schemas
 from schemas import (
     AccessMode,
@@ -55,6 +55,7 @@ from schemas import (
     Priority,
     ProjectOption,
     Status,
+    TaskBulkUpdate,
     TaskCommentIn,
     TaskCreate,
     TaskItem,
@@ -165,7 +166,10 @@ def gantt(space_id: int = spaces.DEFAULT_SPACE_ID, db: Session = Depends(get_db)
     projects = _space_projects(db, _space_id_or_404(db, space_id))
     tasks = db.scalars(
         select(Task).where(
-            Task.is_gantt_task.is_(True), Task.project_id.in_([p.id for p in projects]), _in_space(space_id)
+            Task.is_gantt_task.is_(True),
+            Task.project_id.in_([p.id for p in projects]),
+            _in_space(space_id),
+            Task.status != Status.ARCHIVED,
         )
     ).all()
     by_project: dict[int, list[Task]] = {p.id: [] for p in projects}
@@ -228,7 +232,7 @@ def _triage_tasks(db: Session, today: date, space_id: int) -> list[tuple[tuple, 
             Project.active.is_(True),
             _in_space(space_id),
             Task.is_gantt_task.is_(True),
-            Task.status != Status.DONE,
+            Task.status.not_in([Status.DONE, Status.ARCHIVED]),
             Task.start_date.is_not(None),
             Task.start_date <= today + timedelta(days=TRIAGE_LOOKAHEAD_DAYS),
         )
@@ -343,25 +347,91 @@ def _check_project(db: Session, project_id: int | None) -> None:
             raise HTTPException(status_code=400, detail=f"Unknown project id: {project_id}")
 
 
-@app.patch("/api/tasks/{task_id}")
-def update_task(task_id: int, request: TaskUpdate, db: Session = Depends(get_db)) -> schemas.Task:
-    """Change a task: claim or unclaim it (`assignee`), move it on the board (`status`), or edit its
-    title, dates, project or linked note (`note_path`; null unlinks). Unsent fields are left alone."""
-    task = _get_task(db, task_id)
-    changes = request.model_dump(exclude_unset=True)
+def _custom_value(field: schemas.CustomFieldDef, value: Any) -> Any:
+    """`value` as stored for a custom field of `field.type`; None clears the field."""
+    kind = schemas.CustomFieldType
+    if value is None:
+        return None
+    if field.type is kind.TEXT and isinstance(value, str):
+        return value.strip()[:10_000] or None
+    if field.type is kind.NUMBER and isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value
+    if field.type is kind.CHECKBOX and isinstance(value, bool):
+        return value
+    if field.type is kind.DATE and isinstance(value, str):
+        if not value.strip():
+            return None
+        try:
+            return date.fromisoformat(value.strip()).isoformat()
+        except ValueError:
+            pass
+    raise HTTPException(status_code=400, detail=f"Invalid value for the {field.type.value} field {field.name!r}: {value!r}")
+
+
+def _custom_fields(db: Session, space_id: int | None, current: dict | None, values: dict[str, Any]) -> dict[str, Any]:
+    """`current` custom field values with `values` merged in (a None value clears a field), checked against the
+    space's `custom_fields_schema`."""
+    space = db.get(Space, space_id or spaces.DEFAULT_SPACE_ID)
+    fields = {f.id: f for f in schemas.clean_custom_fields_schema(space.custom_fields_schema if space else None)}
+    merged = dict(current or {})
+    for key, value in values.items():
+        if key not in fields:
+            raise HTTPException(status_code=400, detail=f"Unknown custom field: {key}")
+        value = _custom_value(fields[key], value)
+        if value is None:
+            merged.pop(key, None)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _check_task_update(db: Session, task: Task, changes: dict[str, Any]) -> dict[str, Any]:
+    """`changes` (a `TaskUpdate` dump) checked and resolved for `task`, ready for `_apply_task_update`."""
+    changes = dict(changes)
     if "project_id" in changes:
         _check_project(db, changes["project_id"])
     if "note_path" in changes:
         changes["note_path"] = _link_path(spaces.content_dir(task.space_id or spaces.DEFAULT_SPACE_ID), changes["note_path"])
-    set_source(db, TASK_UPDATE_SOURCE)
-    for key in ("assignee", "title", "description", "priority", "project_id", "start_date", "deadline", "tags", "note_path"):
+    if "custom_fields" in changes:
+        changes["custom_fields"] = _custom_fields(db, task.space_id, task.custom_fields, changes["custom_fields"])
+    return changes
+
+
+def _apply_task_update(task: Task, changes: dict[str, Any]) -> None:
+    keys = ("assignee", "title", "description", "priority", "project_id", "start_date", "deadline", "tags", "note_path", "custom_fields")
+    for key in keys:
         if key in changes:
             setattr(task, key, changes[key])
     if "status" in changes and changes["status"] != task.status:
         task.status = changes["status"]
         task.completed_at = utcnow() if task.status == Status.DONE else None
+
+
+@app.patch("/api/tasks/{task_id}")
+def update_task(task_id: int, request: TaskUpdate, db: Session = Depends(get_db)) -> schemas.Task:
+    """Change a task: claim or unclaim it (`assignee`), move it on the board (`status`), or edit its
+    title, dates, project, linked note (`note_path`; null unlinks) or custom fields (merged; a null
+    value clears one). Unsent fields are left alone."""
+    task = _get_task(db, task_id)
+    changes = _check_task_update(db, task, request.model_dump(exclude_unset=True))
+    set_source(db, TASK_UPDATE_SOURCE)
+    _apply_task_update(task, changes)
     db.commit()
     return schemas.Task.model_validate(task, from_attributes=True)
+
+
+@app.post("/api/tasks/bulk-update")
+def bulk_update_tasks(request: TaskBulkUpdate, db: Session = Depends(get_db)) -> list[TaskItem]:
+    """Apply the same change (a `PATCH /api/tasks/{id}` body) to several tasks, e.g. from the List view.
+    Every task is checked before any is changed, so either all of them change or none does."""
+    tasks = [_get_task(db, task_id) for task_id in request.task_ids]
+    raw = request.updates.model_dump(exclude_unset=True)
+    resolved = [(task, _check_task_update(db, task, raw)) for task in tasks]
+    set_source(db, TASK_UPDATE_SOURCE)
+    for task, changes in resolved:
+        _apply_task_update(task, changes)
+    db.commit()
+    return _task_items(db, tasks)
 
 
 CHECKIN_SOURCE = "evening_checkin"
@@ -699,9 +769,9 @@ def create_space(request: schemas.SpaceIn, db: Session = Depends(get_db)) -> sch
 
 
 @app.put("/api/spaces/{space_id}")
-def update_space(space_id: int, request: schemas.SpaceIn, db: Session = Depends(get_db)) -> schemas.Space:
-    """Rename a space."""
-    space = spaces.update_space(db, space_id, request.name)
+def update_space(space_id: int, request: schemas.SpaceUpdate, db: Session = Depends(get_db)) -> schemas.Space:
+    """Rename a space and/or set its status flow and custom task fields; fields left out are kept."""
+    space = spaces.update_space(db, space_id, **request.model_dump(mode="json", exclude_unset=True))
     if space is None:
         raise HTTPException(status_code=404, detail=f"Unknown space id: {space_id}")
     return schemas.Space.model_validate(space, from_attributes=True)
@@ -1007,6 +1077,7 @@ def _task_items(db: Session, tasks: list[Task]) -> list[TaskItem]:
             tags=schemas.clean_tags(t.tags),
             note_path=t.note_path,
             comments=schemas.clean_comments(t.comments),
+            custom_fields=t.custom_fields or {},
         )
         for t in tasks
     ]
@@ -1034,12 +1105,14 @@ def list_tasks(
     status: Status | None = None,
     note_path: str | None = None,
     tag: str | None = None,
+    include_archived: bool = False,
     db: Session = Depends(get_db),
 ) -> list[TaskItem]:
-    """The tasks of a space for the Kanban, Backlog and Gantt views, earliest due date first.
+    """The tasks of a space for the Kanban, Backlog, Gantt and List views, earliest due date first.
 
     Filters: `project_id`, `status`, `note_path` (tasks linked to that note), `tag` (tasks with
-    that tag), and `assignee` (an empty `assignee=` means unassigned).
+    that tag), and `assignee` (an empty `assignee=` means unassigned). Archived tasks are left out
+    unless `include_archived` is set or `status=archived` asks for them.
     """
     query = select(Task).where(_in_space(_space_id_or_404(db, space_id)))
     if project_id is not None:
@@ -1048,6 +1121,8 @@ def list_tasks(
         query = query.where(Task.assignee.is_(None) if not assignee.strip() else Task.assignee == assignee.strip())
     if status is not None:
         query = query.where(Task.status == status)
+    elif not include_archived:
+        query = query.where(Task.status != Status.ARCHIVED)
     if note_path is not None:
         query = query.where(Task.note_path == note_path)
     query = query.order_by(Task.deadline.is_(None), Task.deadline, Task.start_date.is_(None), Task.start_date, Task.id)
@@ -1072,8 +1147,14 @@ def create_task(request: TaskCreate, db: Session = Depends(get_db)) -> TaskItem:
     root = spaces.content_dir(_space_id_or_404(db, request.space_id))
     _check_project(db, request.project_id)
     note_path = _link_path(root, request.note_path)
+    custom_fields = _custom_fields(db, request.space_id, {}, request.custom_fields)
     set_source(db, DESKTOP_SOURCE)
-    task = Task(**request.model_dump(exclude={"note_path"}), note_path=note_path, is_gantt_task=False)
+    task = Task(
+        **request.model_dump(exclude={"note_path", "custom_fields"}),
+        note_path=note_path,
+        custom_fields=custom_fields,
+        is_gantt_task=False,
+    )
     if task.status == Status.DONE:
         task.completed_at = utcnow()
     db.add(task)
@@ -1227,6 +1308,63 @@ def delete_view(view_id: int, db: Session = Depends(get_db)) -> None:
     view = _get_view(db, view_id)
     set_source(db, VIEWS_SOURCE)
     soft_delete(db, view)
+    db.commit()
+
+
+# --- People -----------------------------------------------------------------------
+
+PEOPLE_SOURCE = "desktop"
+
+
+def _get_person(db: Session, person_id: int) -> Person:
+    person = db.get(Person, person_id)
+    if person is None or person.deleted_at is not None:
+        raise HTTPException(status_code=404, detail=f"Unknown person id: {person_id}")
+    return person
+
+
+@app.get("/api/people")
+def list_people(space_id: int = spaces.DEFAULT_SPACE_ID, db: Session = Depends(get_db)) -> list[schemas.Person]:
+    """The People directory of a space, by name."""
+    query = select(Person).where(Person.space_id == _space_id_or_404(db, space_id))
+    people = sorted(db.scalars(query), key=lambda p: (p.name.lower(), p.id))
+    return [schemas.Person.model_validate(p, from_attributes=True) for p in people]
+
+
+@app.post("/api/people", status_code=201)
+def create_person(request: schemas.PersonIn, db: Session = Depends(get_db)) -> schemas.Person:
+    _space_id_or_404(db, request.space_id)
+    set_source(db, PEOPLE_SOURCE)
+    person = Person(**request.model_dump())
+    db.add(person)
+    db.commit()
+    return schemas.Person.model_validate(person, from_attributes=True)
+
+
+@app.get("/api/people/{person_id}")
+def get_person(person_id: int, db: Session = Depends(get_db)) -> schemas.Person:
+    return schemas.Person.model_validate(_get_person(db, person_id), from_attributes=True)
+
+
+@app.put("/api/people/{person_id}")
+def update_person(person_id: int, request: schemas.PersonIn, db: Session = Depends(get_db)) -> schemas.Person:
+    """Replace a person's details. A person can't move to another space."""
+    person = _get_person(db, person_id)
+    if request.space_id != person.space_id:
+        raise HTTPException(status_code=400, detail="A person can't move to another space")
+    set_source(db, PEOPLE_SOURCE)
+    for key, value in request.model_dump(exclude={"space_id"}).items():
+        setattr(person, key, value)
+    db.commit()
+    return schemas.Person.model_validate(person, from_attributes=True)
+
+
+@app.delete("/api/people/{person_id}", status_code=204)
+def delete_person(person_id: int, db: Session = Depends(get_db)) -> None:
+    """Soft-delete a person (they stay in `history`)."""
+    person = _get_person(db, person_id)
+    set_source(db, PEOPLE_SOURCE)
+    soft_delete(db, person)
     db.commit()
 
 

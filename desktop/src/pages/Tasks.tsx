@@ -3,10 +3,12 @@ import { NavLink, Navigate, useNavigate, useParams, useSearchParams } from "reac
 
 import GanttChart, { type GanttProject } from "../components/GanttChart";
 import PageHeader from "../components/PageHeader";
+import { postStatusComment, useStatusChangePrompt } from "../components/StatusChangeDialog";
 import { formatDay, ME, NEUTRAL_TAG, NoteLink, PROJECT_TAG, Tag, TagPills } from "../components/TriageBoard";
 import { getJson, message, sendJson } from "../lib/api";
 import { useSpace } from "../lib/space";
 import {
+  allowedStatuses,
   announceTaskChange,
   BOARD_COLUMNS,
   boardColumn,
@@ -16,10 +18,12 @@ import {
   useTaskChanges,
   useTaskPanel,
   type ProjectOption,
+  type StatusFlow,
   type TaskItem,
   type TaskPatch,
   type TaskStatus,
 } from "../lib/tasks";
+import TaskListView from "./TaskListView";
 import {
   NO_FILTERS,
   sameFilters,
@@ -35,7 +39,11 @@ const SUBTITLES: Record<ViewType, string> = {
   kanban: "Tasks from the task database. Drag cards between columns to change their status; click one for its details.",
   backlog: "Every task, earliest due date first. Click a task to open its details, description and comments.",
   gantt: "Tasks with start and due dates, grouped by project.",
+  list: "A simple list of tasks. Tick tasks to change their status, assignee or archive them all at once.",
 };
+
+/** Changes a task's status, asking first for an optional comment explaining it. */
+type OnStatus = (task: TaskItem, status: TaskStatus) => void;
 
 type State = { state: "loading" } | { state: "ok"; tasks: TaskItem[] } | { state: "error"; message: string };
 
@@ -225,9 +233,15 @@ function TaskBoard({
   const [tags, setTags] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [reload, setReload] = useState(0);
+  // Archived tasks are put away: only the Backlog and List views offer to show them.
+  const [showArchived, setShowArchived] = useState(false);
+  const canShowArchived = viewType === "backlog" || viewType === "list";
+  const includeArchived = canShowArchived && showArchived;
 
-  const query = taskQuery(spaceId, filters);
-  const spaceName = spaces.find((s) => s.id === spaceId)?.name ?? "";
+  const query = taskQuery(spaceId, filters, includeArchived);
+  const space = spaces.find((s) => s.id === spaceId);
+  const spaceName = space?.name ?? "";
+  const flow = space?.status_flow ?? null;
 
   useEffect(() => {
     const controller = new AbortController();
@@ -256,21 +270,42 @@ function TaskBoard({
     return () => controller.abort();
   }, [spaceId, reload]);
 
-  /** Optimistic update: show the change at once, roll back if the server refuses it. */
-  const patchTask = useCallback(async (task: TaskItem, patch: TaskPatch) => {
+  /** Optimistic update: show the change at once, roll back if the server refuses it. A status change's `comment`
+   * is added to the task's discussion once the change is saved. */
+  const patchTask = useCallback(async (task: TaskItem, patch: Omit<TaskPatch, "custom_fields">, comment?: string | null) => {
     const apply = (next: TaskItem) =>
       setTasks((prev) => (prev.state === "ok" ? { ...prev, tasks: prev.tasks.map((t) => (t.id === next.id ? next : t)) } : prev));
     apply({ ...task, ...patch });
     setError(null);
     try {
       await sendJson("PATCH", `/api/tasks/${task.id}`, patch);
-      announceTaskChange({ id: task.id, source: "board" });
-      if ("project_id" in patch) setReload((n) => n + 1); // refresh the project code
     } catch (err: unknown) {
       apply(task);
       setError(`Could not update "${task.title}": ${message(err)}`);
+      return;
     }
+    try {
+      if (comment && patch.status) await postStatusComment(task.id, task.status, patch.status, comment);
+    } catch (err: unknown) {
+      setError(`Changed the status of "${task.title}" but could not add the comment: ${message(err)}`);
+    }
+    announceTaskChange({ id: task.id, source: "board" });
+    if ("project_id" in patch) setReload((n) => n + 1); // refresh the project code
   }, []);
+
+  const { ask, dialog } = useStatusChangePrompt();
+  const changeStatus: OnStatus = useCallback(
+    async (task, status) => {
+      if (status === task.status) return;
+      if (!allowedStatuses(flow, task.status).includes(status)) {
+        setError(`The space's status flow doesn't allow "${task.title}" to move from ${STATUS_LABELS[task.status]} to ${STATUS_LABELS[status]}.`);
+        return;
+      }
+      const answer = await ask(task, status);
+      if (answer) await patchTask(task, { status }, answer.comment);
+    },
+    [flow, ask, patchTask],
+  );
 
   // Edited in the task panel: show its copy (the next load re-applies the filters).
   useTaskChanges("board", ({ id, task, deleted }) =>
@@ -295,6 +330,9 @@ function TaskBoard({
       : [...projects, { id: filters.project_id, code: `#${filters.project_id}`, name: `#${filters.project_id}`, folder_path: null }];
   // Likewise a tag that no task carries any more.
   const tagChoices = filters.tag === null || tags.includes(filters.tag) ? tags : [...tags, filters.tag];
+  // A task archived since the last load (e.g. in the task panel) leaves at once.
+  const visible =
+    tasks.state === "ok" ? (includeArchived ? tasks.tasks : tasks.tasks.filter((t) => t.status !== "archived")) : null;
 
   return (
     <div className="flex flex-col gap-5 px-9 py-7">
@@ -355,6 +393,12 @@ function TaskBoard({
               ))}
             </select>
           </label>
+          {canShowArchived && (
+            <label className="flex items-center gap-1.5">
+              <input type="checkbox" checked={showArchived} onChange={(e) => setShowArchived(e.target.checked)} />
+              Show archived
+            </label>
+          )}
         </div>
       </div>
 
@@ -371,11 +415,20 @@ function TaskBoard({
       {error && <p className="text-[15px] text-accent">{error}</p>}
       {tasks.state === "loading" && <p className="text-[15px] text-text-muted">Loading tasks…</p>}
       {tasks.state === "error" && <p className="text-[15px] text-text-secondary">Could not load the tasks ({tasks.message}).</p>}
-      {tasks.state === "ok" && viewType === "kanban" && <Kanban tasks={tasks.tasks} onPatch={patchTask} />}
-      {tasks.state === "ok" && viewType === "backlog" && (
-        <Backlog tasks={tasks.tasks} projects={projects} onPatch={patchTask} />
+      {visible && viewType === "kanban" && <Kanban tasks={visible} flow={flow} onStatus={changeStatus} />}
+      {visible && viewType === "backlog" && (
+        <Backlog tasks={visible} projects={projects} flow={flow} onPatch={patchTask} onStatus={changeStatus} />
       )}
-      {tasks.state === "ok" && viewType === "gantt" && <TaskGantt tasks={tasks.tasks} projects={projects} />}
+      {visible && viewType === "gantt" && <TaskGantt tasks={visible} projects={projects} />}
+      {visible && viewType === "list" && (
+        <TaskListView
+          tasks={visible}
+          flow={flow}
+          customFields={space?.custom_fields_schema ?? []}
+          onUpdated={() => setReload((n) => n + 1)}
+        />
+      )}
+      {dialog}
     </div>
   );
 }
@@ -472,7 +525,9 @@ function NewTaskForm({
 
 const DRAG_TYPE = "application/x-copilot-task";
 
-function Kanban({ tasks, onPatch }: { tasks: TaskItem[]; onPatch: (task: TaskItem, patch: TaskPatch) => void }) {
+type OnPatch = (task: TaskItem, patch: Omit<TaskPatch, "custom_fields">) => void;
+
+function Kanban({ tasks, flow, onStatus }: { tasks: TaskItem[]; flow: StatusFlow | null; onStatus: OnStatus }) {
   const [over, setOver] = useState<TaskStatus | null>(null);
   const byId = useMemo(() => new Map(tasks.map((t) => [t.id, t])), [tasks]);
 
@@ -480,7 +535,7 @@ function Kanban({ tasks, onPatch }: { tasks: TaskItem[]; onPatch: (task: TaskIte
     event.preventDefault();
     setOver(null);
     const task = byId.get(Number(event.dataTransfer.getData(DRAG_TYPE)));
-    if (task && boardColumn(task.status) !== status) onPatch(task, { status });
+    if (task && boardColumn(task.status) !== status) onStatus(task, status);
   }
 
   return (
@@ -509,7 +564,7 @@ function Kanban({ tasks, onPatch }: { tasks: TaskItem[]; onPatch: (task: TaskIte
             </h3>
             <ul className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-2 pb-2">
               {column.map((task) => (
-                <KanbanCard key={task.id} task={task} onPatch={onPatch} />
+                <KanbanCard key={task.id} task={task} flow={flow} onStatus={onStatus} />
               ))}
             </ul>
           </section>
@@ -519,7 +574,7 @@ function Kanban({ tasks, onPatch }: { tasks: TaskItem[]; onPatch: (task: TaskIte
   );
 }
 
-function KanbanCard({ task, onPatch }: { task: TaskItem; onPatch: (task: TaskItem, patch: TaskPatch) => void }) {
+function KanbanCard({ task, flow, onStatus }: { task: TaskItem; flow: StatusFlow | null; onStatus: OnStatus }) {
   const overdue = isOverdue(task);
   const { taskId, openTask } = useTaskPanel();
   const active = taskId === task.id;
@@ -566,12 +621,12 @@ function KanbanCard({ task, onPatch }: { task: TaskItem; onPatch: (task: TaskIte
           value={task.status}
           // Changing the status shouldn't also open the card.
           onClick={(e) => e.stopPropagation()}
-          onChange={(e) => onPatch(task, { status: e.target.value as TaskStatus })}
+          onChange={(e) => onStatus(task, e.target.value as TaskStatus)}
           className="min-w-0 max-w-[104px] rounded border border-border-default bg-surface-panel px-1 py-0.5 text-[13px] text-text-muted"
         >
-          {Object.entries(STATUS_LABELS).map(([value, label]) => (
+          {allowedStatuses(flow, task.status).map((value) => (
             <option key={value} value={value}>
-              {label}
+              {STATUS_LABELS[value]}
             </option>
           ))}
         </select>
@@ -586,11 +641,15 @@ function KanbanCard({ task, onPatch }: { task: TaskItem; onPatch: (task: TaskIte
 function Backlog({
   tasks,
   projects,
+  flow,
   onPatch,
+  onStatus,
 }: {
   tasks: TaskItem[];
   projects: ProjectOption[];
-  onPatch: (task: TaskItem, patch: TaskPatch) => void;
+  flow: StatusFlow | null;
+  onPatch: OnPatch;
+  onStatus: OnStatus;
 }) {
   // A task's pill in a note links here with `?taskId=<id>`: show that task even if it's done.
   const { taskId, openTask } = useTaskPanel();
@@ -626,7 +685,9 @@ function Backlog({
                   projects={projects}
                   active={taskId === task.id}
                   onOpen={() => openTask(task.id)}
+                  flow={flow}
                   onPatch={onPatch}
+                  onStatus={onStatus}
                 />
               ))}
             </tbody>
@@ -642,13 +703,17 @@ function BacklogRow({
   projects,
   active,
   onOpen,
+  flow,
   onPatch,
+  onStatus,
 }: {
   task: TaskItem;
   projects: ProjectOption[];
   active: boolean;
   onOpen: () => void;
-  onPatch: (task: TaskItem, patch: TaskPatch) => void;
+  flow: StatusFlow | null;
+  onPatch: OnPatch;
+  onStatus: OnStatus;
 }) {
   const overdue = isOverdue(task);
   const cell = "rounded border border-transparent bg-transparent px-1 py-0.5 text-[15px] hover:border-border-default focus:border-accent/70 focus:outline-none";
@@ -659,7 +724,7 @@ function BacklogRow({
       : projects;
 
   return (
-    <tr className={`${task.status === "done" ? "text-text-muted" : "text-text-secondary"} ${active ? "bg-surface-active" : ""}`}>
+    <tr className={`${task.status === "done" || task.status === "archived" ? "text-text-muted" : "text-text-secondary"} ${active ? "bg-surface-active" : ""}`}>
       <td className="px-4 py-1.5">
         <div className="flex min-w-0 items-center gap-2">
           <button
@@ -671,6 +736,7 @@ function BacklogRow({
           >
             <span className={`truncate hover:underline ${task.status === "done" ? "line-through" : "text-text-primary"}`}>{task.title}</span>
             {task.is_gantt_task && <Tag className={NEUTRAL_TAG}>gantt</Tag>}
+            {task.status === "archived" && <Tag className={NEUTRAL_TAG}>archived</Tag>}
             <TagPills tags={task.tags} />
           </button>
           {/* Outside the button: a link can't sit inside a button. */}
@@ -699,12 +765,12 @@ function BacklogRow({
         <select
           aria-label={`Status of ${task.title}`}
           value={task.status}
-          onChange={(e) => onPatch(task, { status: e.target.value as TaskStatus })}
+          onChange={(e) => onStatus(task, e.target.value as TaskStatus)}
           className={`${cell} w-full`}
         >
-          {Object.entries(STATUS_LABELS).map(([value, label]) => (
+          {allowedStatuses(flow, task.status).map((value) => (
             <option key={value} value={value}>
-              {label}
+              {STATUS_LABELS[value]}
             </option>
           ))}
         </select>
@@ -728,7 +794,7 @@ function AssigneeInput({
 }: {
   task: TaskItem;
   className: string;
-  onPatch: (task: TaskItem, patch: TaskPatch) => void;
+  onPatch: OnPatch;
 }) {
   const [value, setValue] = useState(task.assignee ?? "");
   useEffect(() => setValue(task.assignee ?? ""), [task.assignee]);

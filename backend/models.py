@@ -55,6 +55,10 @@ class Space(Versioned, Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(64))
+    # Status -> the statuses a task may move to next (`schemas.StatusFlow`); None or {} allows every move.
+    status_flow: Mapped[dict | None] = mapped_column(JSON, default=None)
+    # The space's custom task fields: `schemas.CustomFieldDef` dicts. None only for rows from before them.
+    custom_fields_schema: Mapped[list[dict] | None] = mapped_column(JSON, default=list)
     created_at: Mapped[dt.datetime] = mapped_column(server_default=func.now())
 
     def __repr__(self) -> str:
@@ -128,6 +132,9 @@ class Task(Versioned, Base):
     # Discussion on the task, oldest first: `schemas.TaskComment` dicts. None only for rows from before
     # the task panel. Replace the list rather than mutating it, so the change is detected and versioned.
     comments: Mapped[list[dict] | None] = mapped_column(JSON, default=list)
+    # Values of the space's custom fields by field id (see `Space.custom_fields_schema`). None only for rows
+    # from before custom fields. Like `comments`, replace the dict rather than mutating it.
+    custom_fields: Mapped[dict | None] = mapped_column(JSON, default=dict)
     # The note the task was created from or belongs to, relative to the space's `content/`.
     # A task links to at most one note; a note can have many tasks.
     note_path: Mapped[str | None] = mapped_column(default=None, index=True)
@@ -249,6 +256,24 @@ class TaskView(Versioned, Base):
 
     def __repr__(self) -> str:
         return f"TaskView(id={self.id!r}, name={self.name!r}, view_type={self.view_type!r})"
+
+
+class Person(Versioned, Base):
+    """A contact in a space's People directory: a colleague, or an external client or supplier."""
+
+    __tablename__ = "people"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    space_id: Mapped[int] = mapped_column(ForeignKey("spaces.id"), index=True)
+    name: Mapped[str] = mapped_column(String(128))
+    email: Mapped[str | None] = mapped_column(String(254), default=None)
+    company: Mapped[str | None] = mapped_column(String(128), default=None)
+    is_external: Mapped[bool] = mapped_column(default=False)
+    avatar_url: Mapped[str | None] = mapped_column(default=None)
+    created_at: Mapped[dt.datetime] = mapped_column(server_default=func.now())
+
+    def __repr__(self) -> str:
+        return f"Person(id={self.id!r}, name={self.name!r})"
 
 
 class HistoryRecord(Base):
