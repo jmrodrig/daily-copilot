@@ -419,7 +419,7 @@ export default function CopilotChat({
             onKeyDown={handleKeyDown}
             rows={multiline ? 3 : 1}
             placeholder="Ask, or type / for commands"
-            className={`block min-h-11 w-full resize-none rounded-[10px] ${multiline ? "" : "overflow-hidden"} border border-border-light bg-surface-raised px-3 py-[11px] text-sm leading-5 placeholder:text-[#8797A1] focus:border-accent/70 focus:outline-none`}
+            className={`block min-h-11 w-full resize-none rounded-[10px] ${multiline ? "" : "overflow-hidden"} border border-border-light bg-surface-raised px-3 py-[11px] text-sm leading-5 placeholder:text-text-muted focus:border-accent/70 focus:outline-none`}
             aria-autocomplete="list"
             aria-expanded={menuItems.length > 0}
           />
@@ -466,7 +466,7 @@ function CommandMenu({
           onClick={() => onPick(prompt)}
           onMouseEnter={() => onHover(i)}
           className={`flex w-full flex-col items-start gap-0.5 rounded-md px-3 py-2 text-left ${
-            i === highlighted ? "bg-[#2A3842]" : ""
+            i === highlighted ? "bg-surface-active" : ""
           }`}
         >
           <span className="flex w-full items-baseline gap-2">
@@ -480,7 +480,7 @@ function CommandMenu({
       <Link
         to="/settings"
         onMouseDown={(e) => e.preventDefault()}
-        className="block rounded-md px-3 py-1.5 text-xs text-text-muted hover:bg-[#2A3842] hover:text-text-primary"
+        className="block rounded-md px-3 py-1.5 text-xs text-text-muted hover:bg-surface-active hover:text-text-primary"
       >
         Manage commands…
       </Link>
