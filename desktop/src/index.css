@@ -130,7 +130,7 @@ body {
   @apply flex items-start gap-2;
 }
 .note-body ul[data-type="taskList"] li > label {
-  @apply mt-1 shrink-0 select-none;
+  @apply mt-[2px] shrink-0 select-none;
 }
 .note-body ul[data-type="taskList"] li > div {
   @apply min-w-0 flex-1;
