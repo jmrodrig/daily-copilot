@@ -10,14 +10,15 @@ type Point = { x: number; y: number };
 type Tool = "draw" | "pan" | "select" | "erase" | "lasso-erase" | "line" | "arrow" | "rect" | "circle" | "text" | "comment";
 type Eraser = "erase" | "lasso-erase";
 /** A markup stroke, in image pixels; each point carries its line width, which follows the pen's pressure. A freehand
- * one ("draw", "erase", which rubs out the ink under it, or "lasso-erase", which rubs out all the ink inside the loop
- * it traces) has a point for each the pointer passed; a shape has two, where its drag started and where it is (or
- * ended); a text has one, its top left, whose width is its font size, and is turned by `angle` (in radians) about it. */
-type Stroke = { type: Exclude<Tool, "pan" | "select" | "comment">; color: string; points: (Point & { width: number })[]; text?: string; angle?: number };
+ * one ("draw") has a point for each the pointer passed; a shape has two, where its drag started and where it is (or
+ * ended); a text has one, its top left, whose width is its font size, and is turned by `angle` (in radians) about it.
+ * The erasers leave no strokes: they delete the ones they touch (or loop around). */
+type Stroke = { type: Exclude<Tool, "pan" | "select" | "comment" | Eraser>; color: string; points: (Point & { width: number })[]; text?: string; angle?: number };
 /** A sticky-note comment pinned to a point on the image or a PDF's page (counted from 0), in its pixels. */
 type Comment = Point & { id: string; text: string; isExpanded: boolean; page: number };
-/** `GET`/`PUT /api/notes/image/{name}/markup` (MediaMarkup in backend/schemas.py): the sidecar beside the file. */
-type MediaMarkup = { strokes: (Stroke & { page?: number })[]; comments: Comment[] };
+/** `GET`/`PUT /api/notes/image/{name}/markup` (MediaMarkup in backend/schemas.py): the sidecar beside the file. An
+ * older one may still hold eraser strokes, which are dropped when it's read (see `strokesByPage`). */
+export type MediaMarkup = { strokes: ((Stroke | (Omit<Stroke, "type"> & { type: Eraser })) & { page?: number })[]; comments: Comment[] };
 /** A text being typed: where it goes, in image pixels, its font size, in them too, its ink and what's typed so far. */
 type TextEntry = Point & { size: number; color: string; value: string };
 /** A box, in image pixels. */
@@ -78,7 +79,7 @@ const HANDLE_CURSORS: Record<Handle, string> = {
 export const isPdfUrl = (url: string) => /\.pdf$/i.test(new URL(url, window.location.href).pathname);
 
 /** A stored file's markup sidecar's URL (in the same space), or null for a file that isn't stored in one. */
-function markupUrlOf(src: string): string | null {
+export function markupUrlOf(src: string): string | null {
   const url = new URL(src, window.location.href);
   if (url.origin !== window.location.origin || !/^\/api\/notes\/image\/[^/]+$/.test(url.pathname)) return null;
   return `${url.pathname}/markup${url.search}`;
@@ -100,10 +101,14 @@ function snapshot(byPage: Map<number, Stroke[]>, comments: Comment[]): MediaMark
   };
 }
 
-/** A sidecar's strokes, by the page they're on. */
-function strokesByPage(markup: MediaMarkup): Map<number, Stroke[]> {
+/** A sidecar's strokes, by the page they're on. An older sidecar's eraser strokes (which once masked the ink under
+ * them) are dropped: erasing now deletes strokes instead. */
+export function strokesByPage(markup: MediaMarkup): Map<number, Stroke[]> {
   const byPage = new Map<number, Stroke[]>();
-  for (const { page = 0, ...stroke } of markup.strokes) byPage.set(page, [...(byPage.get(page) ?? []), stroke]);
+  for (const { page = 0, ...stroke } of markup.strokes) {
+    if (isEraser(stroke.type)) continue;
+    byPage.set(page, [...(byPage.get(page) ?? []), stroke as Stroke]);
+  }
   return byPage;
 }
 
@@ -169,6 +174,8 @@ export default function MediaLightbox({
   const pointers = useRef(new Map<number, Point>());
   // The stroke being drawn, and the pointer drawing it.
   const drawing = useRef<{ pointerId: number; stroke: Stroke } | null>(null);
+  // The stroke eraser's drag: the pointer, and how near it a stroke must pass to be deleted, in image pixels.
+  const erasing = useRef<{ pointerId: number; reach: number } | null>(null);
   // The text being typed, if one is; the ref is cleared as soon as it's finished, so it's only finished once.
   const [textEntry, setTextEntry] = useState<TextEntry | null>(null);
   const textEntryRef = useRef(textEntry);
@@ -176,13 +183,13 @@ export default function MediaLightbox({
   const textInputRef = useRef<HTMLInputElement>(null);
   // The tool Shift swapped for the eraser, while it's held.
   const shiftFrom = useRef<Tool | null>(null);
-  // The strokes the select tool picked (those of them still in `strokes`), the lasso picking them as it's drawn, the
-  // drag transforming them, and the handle the pointer is over.
+  // The strokes the select tool picked (those of them still in `strokes`), the lasso picking them (or, for the lasso
+  // eraser, deleting them) as it's drawn, the drag transforming them, and the handle the pointer is over.
   const [selected, setSelected] = useState<Set<Stroke>>(() => new Set());
   const selection = strokes.filter((s) => selected.has(s));
   const selectionRef = useRef(selection);
   selectionRef.current = selection;
-  const selecting = useRef<{ pointerId: number; points: Point[] } | null>(null);
+  const selecting = useRef<{ pointerId: number; points: Point[]; erase: boolean } | null>(null);
   const transforming = useRef<Transform | null>(null);
   const [hover, setHover] = useState<Handle | null>(null);
 
@@ -513,7 +520,7 @@ export default function MediaLightbox({
   useLayoutEffect(redraw, [strokes, selected, size, markup, canvasWidth, canvasHeight, view.zoom]);
 
   /** Redraw the canvas whole, with the stroke being drawn too: a pinch can zoom mid-stroke, and a shape's drag moves
-   * its end. A lasso being drawn shows as its outline, and erases (or selects) once it's done. The selection shows
+   * its end. A lasso being drawn shows as its outline, and deletes (or selects) once it's done. The selection shows
    * as its box, with its handles: turned with it while it's being turned. */
   function redraw() {
     const canvas = canvasRef.current;
@@ -523,9 +530,7 @@ export default function MediaLightbox({
     context.clearRect(0, 0, canvas.width, canvas.height);
     context.scale(canvas.width / size.width, canvas.height / size.height);
     const current = drawing.current?.stroke;
-    const lasso = current?.type === "lasso-erase";
-    drawStrokes(context, current && !lasso ? [...strokes, current] : strokes);
-    if (current && lasso) drawLassoOutline(context, current.points, view.zoom);
+    drawStrokes(context, current ? [...strokes, current] : strokes);
     if (selecting.current) drawLassoOutline(context, selecting.current.points, view.zoom);
     const transform = transforming.current;
     if (transform?.handle === "rotate") drawSelection(context, transform.box, view.zoom, transform.angle);
@@ -556,9 +561,17 @@ export default function MediaLightbox({
   }
 
   /** A stroke's width in image pixels: the line size on screen at the current zoom, thickened by a pen's pressure
-   * for the pen and the stroke eraser (a shape's line, and a lasso's, is even). */
+   * for the pen (a shape's line is even). */
   const lineWidth = (pointerType: string, pressure: number) =>
-    (lineSize / view.zoom) * (pointerType === "pen" && (tool === "draw" || tool === "erase") ? 0.5 + (pressure || 0.5) : 1);
+    (lineSize / view.zoom) * (pointerType === "pen" && tool === "draw" ? 0.5 + (pressure || 0.5) : 1);
+
+  /** Delete the strokes whose ink passes within the stroke eraser's reach of a point. */
+  function eraseAt(point: Point, reach: number) {
+    setStrokes((all) => {
+      const kept = all.filter((s) => !touches(s, point, reach));
+      return kept.length === all.length ? all : kept;
+    });
+  }
 
   function pointerDown(e: ReactPointerEvent) {
     if (e.button !== 0 && e.pointerType === "mouse") return;
@@ -566,7 +579,19 @@ export default function MediaLightbox({
     e.currentTarget.setPointerCapture(e.pointerId);
     if (draws(e)) {
       const point = imagePoint(e);
-      if (!point || drawing.current || selecting.current || transforming.current || tool === "pan") return;
+      if (!point || drawing.current || erasing.current || selecting.current || transforming.current || tool === "pan") return;
+      if (tool === "erase") {
+        // Deletes every stroke it touches, here and along its drag.
+        const reach = Math.max(lineSize, ERASER_MIN_REACH) / view.zoom;
+        erasing.current = { pointerId: e.pointerId, reach };
+        eraseAt(point, reach);
+        return;
+      }
+      if (tool === "lasso-erase") {
+        // Deletes the strokes wholly inside the loop it draws, once it's done.
+        selecting.current = { pointerId: e.pointerId, points: [point], erase: true };
+        return;
+      }
       if (tool === "select") {
         // On the selection, or a handle of it, transforms it; anywhere else drops it, and starts a lasso for another.
         const box = selection.length ? selectionBox(selection) : null;
@@ -577,7 +602,7 @@ export default function MediaLightbox({
         }
         setSelected(new Set());
         setHover(null);
-        selecting.current = { pointerId: e.pointerId, points: [point] };
+        selecting.current = { pointerId: e.pointerId, points: [point], erase: false };
         return;
       }
       if (tool === "comment") {
@@ -600,8 +625,8 @@ export default function MediaLightbox({
       const width = lineWidth(e.pointerType, e.pressure);
       const stroke: Stroke = { type: tool, color: ink, points: [{ ...point, width }] };
       drawing.current = { pointerId: e.pointerId, stroke };
-      // A shape shows once it's dragged, and a lasso once it's drawn out.
-      if (!isShape(tool) && tool !== "lasso-erase") drawOnCanvas((context) => drawDot(context, stroke));
+      // A shape shows once it's dragged.
+      if (!isShape(tool)) drawOnCanvas((context) => drawDot(context, stroke));
       return;
     }
     pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
@@ -621,15 +646,21 @@ export default function MediaLightbox({
       }
       // A pen reports more points than it fires events for; they're all drawn, for a smooth line.
       const events = e.nativeEvent.getCoalescedEvents?.() ?? [];
-      const lasso = stroke.type === "lasso-erase";
       for (const event of events.length ? events : [e.nativeEvent]) {
         const point = imagePoint(event);
         if (!point) continue;
         stroke.points.push({ ...point, width: lineWidth(e.pointerType, event.pressure) });
-        if (!lasso) drawOnCanvas((context) => drawSegment(context, stroke, stroke.points.length - 1));
+        drawOnCanvas((context) => drawSegment(context, stroke, stroke.points.length - 1));
       }
-      // A lasso's outline is dashed, so it's redrawn whole rather than a segment at a time.
-      if (lasso) redraw();
+      return;
+    }
+    const eraser = erasing.current;
+    if (eraser?.pointerId === e.pointerId) {
+      const events = e.nativeEvent.getCoalescedEvents?.() ?? [];
+      for (const event of events.length ? events : [e.nativeEvent]) {
+        const point = imagePoint(event);
+        if (point) eraseAt(point, eraser.reach);
+      }
       return;
     }
     const transform = transforming.current;
@@ -691,21 +722,27 @@ export default function MediaLightbox({
       setSelected((picked) => new Set(picked));
       return;
     }
+    if (erasing.current?.pointerId === e.pointerId) {
+      erasing.current = null;
+      return;
+    }
     const lassoing = selecting.current;
     if (lassoing?.pointerId === e.pointerId) {
       selecting.current = null;
-      // A lasso picks the strokes it mostly encloses; one that encloses nothing (a click) just clears its outline.
+      // A lasso picks (or the lasso eraser deletes) the strokes it wholly encloses; one that encloses nothing (a
+      // click) just clears its outline.
       if (lassoing.points.length < 3) return redraw();
-      setSelected(new Set(strokes.filter((s) => lassoed(s, lassoing.points))));
+      const inside = new Set(strokes.filter((s) => lassoed(s, lassoing.points)));
+      if (!lassoing.erase) setSelected(inside);
+      else if (inside.size) setStrokes((all) => all.filter((s) => !inside.has(s)));
+      else redraw();
       return;
     }
     const current = drawing.current;
     if (current?.pointerId !== e.pointerId) return;
     drawing.current = null;
-    // A shape that was never dragged isn't one, nor is a lasso that encloses nothing (which still needs its
-    // outline cleared).
+    // A shape that was never dragged isn't one.
     if (isShape(current.stroke.type) && current.stroke.points.length < 2) return;
-    if (current.stroke.type === "lasso-erase" && current.stroke.points.length < 3) return redraw();
     setStrokes((s) => [...s, current.stroke]);
   }
 
@@ -810,10 +847,10 @@ export default function MediaLightbox({
               aria-pressed={ink === c.value}
               onClick={() => {
                 setInk(c.value);
-                // Ink is for drawing: picking one recolours the selection (but not its erasers), or else swaps Move,
-                // Select or an eraser for the pen, but keeps a shape or text.
+                // Ink is for drawing: picking one recolours the selection, or else swaps Move, Select or an eraser
+                // for the pen, but keeps a shape or text.
                 if (tool === "select" && selection.length) {
-                  replaceStrokes(new Map(selection.filter((s) => !isEraser(s.type)).map((s) => [s, { ...s, color: c.value }])));
+                  replaceStrokes(new Map(selection.map((s) => [s, { ...s, color: c.value }])));
                 } else if (tool === "pan" || tool === "select" || isEraser(tool)) setTool("draw");
               }}
               className={`h-6 w-6 rounded-full border-2 ${ink === c.value ? "border-text-primary" : "border-transparent"}`}
@@ -996,14 +1033,14 @@ const ERASERS: { tool: Eraser; name: string; label: string; icon: string }[] = [
   {
     tool: "lasso-erase",
     name: "Lasso eraser",
-    label: "Lasso eraser: loop around ink to rub it out",
+    label: "Lasso eraser: loop around ink to delete it",
     // A lasso's loop, its rope running down to an eraser's block.
     icon: "M7 2c2.8 0 5 1.3 5 3s-2.2 3-5 3-5-1.3-5-3 2.2-3 5-3z M5.4 7.8c-.6 1.2-.2 2.6 1.2 3.2.9.4 1.9.7 2.7 1.5 M8.6 13.2l3.6-3.6a.7.7 0 0 1 1 0l1.2 1.2a.7.7 0 0 1 0 1L12 14.2H9.6z M10.4 11.4l2.2 2.2",
   },
   {
     tool: "erase",
     name: "Stroke eraser",
-    label: "Stroke eraser: a stylus or the mouse rubs out ink",
+    label: "Stroke eraser: a stylus or the mouse deletes the ink it touches",
     icon: "M6 13.5h7.5 M2.8 9.7l6.5-6.5a1 1 0 0 1 1.4 0l2.6 2.6a1 1 0 0 1 0 1.4L7.6 13H5.1z M6 6.5l4 4",
   },
 ];
@@ -1031,10 +1068,9 @@ const TOOLS: { tool: Tool; label: string; icon: string; dashed?: boolean }[] = [
 ];
 
 /** Draw whole strokes, in image pixels. */
-function drawStrokes(context: CanvasRenderingContext2D, strokes: Stroke[]) {
+export function drawStrokes(context: CanvasRenderingContext2D, strokes: Stroke[]) {
   for (const stroke of strokes) {
     if (isShape(stroke.type)) drawShape(context, stroke);
-    else if (stroke.type === "lasso-erase") drawLasso(context, stroke);
     else if (stroke.type === "text") drawText(context, stroke);
     else {
       for (let i = 1; i < stroke.points.length; i++) drawSegment(context, stroke, i);
@@ -1043,10 +1079,8 @@ function drawStrokes(context: CanvasRenderingContext2D, strokes: Stroke[]) {
   }
 }
 
-/** Set the context up to draw a stroke: in its ink, or, for the eraser's, rubbing ink out. Reset after with
- * `globalCompositeOperation = "source-over"`. */
+/** Set the context up to draw a stroke, in its ink. */
 function inkFor(context: CanvasRenderingContext2D, stroke: Stroke) {
-  context.globalCompositeOperation = isEraser(stroke.type) ? "destination-out" : "source-over";
   context.strokeStyle = stroke.color;
   context.fillStyle = stroke.color;
   context.lineCap = "round";
@@ -1063,7 +1097,6 @@ function drawSegment(context: CanvasRenderingContext2D, stroke: Stroke, i: numbe
   context.moveTo(from.x, from.y);
   context.lineTo(to.x, to.y);
   context.stroke();
-  context.globalCompositeOperation = "source-over";
 }
 
 /** Draw a stroke's first point: a tap leaves a dot. */
@@ -1073,7 +1106,6 @@ function drawDot(context: CanvasRenderingContext2D, stroke: Stroke) {
   context.beginPath();
   context.arc(x, y, width / 2, 0, Math.PI * 2);
   context.fill();
-  context.globalCompositeOperation = "source-over";
 }
 
 /** Trace a lasso's loop, closed. */
@@ -1081,17 +1113,6 @@ function traceLasso(context: CanvasRenderingContext2D, points: Point[]) {
   context.beginPath();
   points.forEach(({ x, y }, i) => (i ? context.lineTo(x, y) : context.moveTo(x, y)));
   context.closePath();
-}
-
-/** Rub out the ink inside a lasso's loop, and under its line, so the loop's edge goes cleanly too. */
-function drawLasso(context: CanvasRenderingContext2D, stroke: Stroke) {
-  if (stroke.points.length < 3) return;
-  inkFor(context, stroke);
-  context.lineWidth = stroke.points[0].width;
-  traceLasso(context, stroke.points);
-  context.fill();
-  context.stroke();
-  context.globalCompositeOperation = "source-over";
 }
 
 /** Stroke the path traced dashed black on white, so it shows on any ink or image, and thin at any `zoom`. */
@@ -1151,7 +1172,6 @@ function drawText(context: CanvasRenderingContext2D, stroke: Stroke) {
   context.textBaseline = "top";
   context.fillText(stroke.text ?? "", 0, 0);
   context.restore();
-  context.globalCompositeOperation = "source-over";
 }
 
 /** A text's width, in the pixels its size is in. */
@@ -1228,10 +1248,35 @@ function insideLoop({ x, y }: Point, loop: Point[]): boolean {
   return inside;
 }
 
-/** Whether a lasso's loop picks a stroke: whether it encloses at least half of its outline. */
+/** Whether a lasso's loop picks a stroke: whether it encloses all of its outline (an ellipse's checked all round),
+ * so one it only crosses, or mostly encloses, is left out. */
 function lassoed(stroke: Stroke, loop: Point[]): boolean {
-  const points = outline(stroke);
-  return points.filter((p) => insideLoop(p, loop)).length * 2 >= points.length;
+  return outline(stroke, 48).every((p) => insideLoop(p, loop));
+}
+
+/** The least the stroke eraser reaches from the pointer, in screen pixels, so the thinnest line size still hits ink. */
+const ERASER_MIN_REACH = 6;
+
+/** How far a point is from the segment between `a` and `b`. */
+function segmentDistance(p: Point, a: Point, b: Point): number {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const length = dx * dx + dy * dy;
+  const t = length ? Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / length)) : 0;
+  return distance(p, { x: a.x + t * dx, y: a.y + t * dy });
+}
+
+/** Whether a stroke's ink is within `reach` of a point: a text's anywhere over its box, any other's along its line
+ * (a rectangle's or ellipse's closed), widened by half its width. */
+function touches(stroke: Stroke, point: Point, reach: number): boolean {
+  const points = outline(stroke, 48);
+  const closed = stroke.type === "text" || stroke.type === "rect" || stroke.type === "circle";
+  if (stroke.type === "text" && insideLoop(point, points)) return true;
+  const near = reach + (stroke.type === "text" ? 0 : Math.max(...stroke.points.map((p) => p.width)) / 2);
+  if (points.length === 1) return distance(point, points[0]) <= near;
+  const segments = closed ? points.length : points.length - 1;
+  for (let i = 0; i < segments; i++) if (segmentDistance(point, points[i], points[(i + 1) % points.length]) <= near) return true;
+  return false;
 }
 
 /** The box around strokes' ink. */
@@ -1367,7 +1412,7 @@ function Segment({
  * and zooms, but scaled back to stay the same size on screen. Collapsed, it's an icon, which a click opens to a
  * sticky note: written in and saved (which collapses it again) while `editable`, else just read.
  */
-function CommentPin({
+export function CommentPin({
   comment,
   zoom,
   editable,
@@ -1456,6 +1501,102 @@ function CommentPin({
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * A stored image's markup, shown over it where it sits in a note: its strokes on a canvas, and its comments' pins,
+ * which open to be read. Laid over the top of the image's (positioned) box at its width, scaled down from the image's
+ * pixels; it doesn't take the pointer, but its pins do. Loaded again whenever `version` changes, as it does once the
+ * lightbox, which may have changed it, closes.
+ */
+export function MarkupOverlay({ src, version = 0 }: { src: string; version?: number }) {
+  const boxRef = useRef<HTMLSpanElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const markupUrl = markupUrlOf(src);
+  // The image's strokes and comments (its page 0's), its size in its pixels, and its width on screen.
+  const [markup, setMarkup] = useState<{ strokes: Stroke[]; comments: Comment[] } | null>(null);
+  const [size, setSize] = useState<{ width: number; height: number } | null>(null);
+  const [shown, setShown] = useState(0);
+  // The comment opened to be read.
+  const [open, setOpen] = useState<string | null>(null);
+  const empty = !markup || (!markup.strokes.length && !markup.comments.length);
+
+  useEffect(() => {
+    if (!markupUrl) return;
+    const controller = new AbortController();
+    getJson<MediaMarkup>(markupUrl, controller.signal).then(
+      (sidecar) =>
+        setMarkup({ strokes: strokesByPage(sidecar).get(0) ?? [], comments: sidecar.comments.filter((c) => (c.page ?? 0) === 0) }),
+      // The note still shows the image without it.
+      () => !controller.signal.aborted && setMarkup(null),
+    );
+    return () => controller.abort();
+  }, [markupUrl, version]);
+
+  // The image's own size, which the markup's pixels are in: only wanted once there's markup to show.
+  useEffect(() => {
+    if (empty || size) return;
+    let cancelled = false;
+    const image = new Image();
+    image.onload = () => !cancelled && setSize({ width: image.naturalWidth, height: image.naturalHeight });
+    image.src = src;
+    return () => {
+      cancelled = true;
+    };
+  }, [src, empty, size]);
+
+  // Its width on screen follows the image's (a resize, a narrower window).
+  useEffect(() => {
+    const box = boxRef.current;
+    if (!box) return;
+    const observer = new ResizeObserver(() => setShown(box.clientWidth));
+    observer.observe(box);
+    setShown(box.clientWidth);
+    return () => observer.disconnect();
+  }, [empty, size]);
+
+  const scale = size && shown ? shown / size.width : 0;
+
+  useLayoutEffect(() => {
+    const canvas = canvasRef.current;
+    const context = canvas?.getContext("2d");
+    if (!canvas || !context || !size || !scale || !markup) return;
+    const pixels = Math.min(window.devicePixelRatio * scale, MAX_CANVAS_SIDE / Math.max(size.width, size.height));
+    canvas.width = Math.max(1, Math.round(size.width * pixels));
+    canvas.height = Math.max(1, Math.round(size.height * pixels));
+    context.resetTransform();
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    context.scale(canvas.width / size.width, canvas.height / size.height);
+    drawStrokes(context, markup.strokes);
+  }, [markup, size, scale]);
+
+  if (!markupUrl || empty || !size || !markup) return null;
+  return (
+    <span
+      ref={boxRef}
+      aria-hidden={!markup.comments.length}
+      className="pointer-events-none absolute left-0 top-0 z-[1] block w-full"
+      style={{ aspectRatio: `${size.width} / ${size.height}` }}
+    >
+      <canvas ref={canvasRef} className="absolute inset-0 h-full w-full" />
+      {scale > 0 && (
+        <span className="absolute left-0 top-0 block" style={{ width: size.width, height: size.height, transform: `scale(${scale})`, transformOrigin: "0 0" }}>
+          {markup.comments.map((c) => (
+            <span key={c.id} className="pointer-events-auto">
+              <CommentPin
+                comment={{ ...c, isExpanded: open === c.id }}
+                zoom={scale}
+                editable={false}
+                onToggle={() => setOpen((id) => (id === c.id ? null : c.id))}
+                onSave={() => setOpen(null)}
+                onDelete={() => setOpen(null)}
+              />
+            </span>
+          ))}
+        </span>
+      )}
+    </span>
   );
 }
 

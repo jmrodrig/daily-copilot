@@ -24,7 +24,7 @@ import { useEffect, useLayoutEffect, useRef, useState, useMemo, useCallback, typ
 
 import { errorDetail, message } from "../lib/api";
 import type { TaskItem as TaskRow } from "../lib/tasks";
-import MediaLightbox, { ExpandButton, isPdfUrl } from "./MediaLightbox";
+import MediaLightbox, { ExpandButton, isPdfUrl, MarkupOverlay } from "./MediaLightbox";
 import { LinkPanel, panelPosition, TaskPanel, type PanelDraft } from "./refPanels";
 import { pillContent, ReferencePill, taskHref, type RefPillAttrs } from "./referencePill";
 import { SlashCommand, SlashMenu, type SlashItem, type SlashMenuState } from "./slashCommand";
@@ -495,6 +495,8 @@ function ImageView({ node, selected, editor, updateAttributes }: NodeViewProps) 
   const columnRef = useRef<HTMLSpanElement>(null);
   const imageRef = useRef<HTMLSpanElement>(null);
   const [expanded, setExpanded] = useState(false);
+  // Counted up as the lightbox closes, so the markup over the image is loaded again (it may have been changed there).
+  const [opened, setOpened] = useState(0);
   const shown = dragWidth ?? width;
 
   function startResize(event: ReactPointerEvent, side: -1 | 1) {
@@ -543,6 +545,7 @@ function ImageView({ node, selected, editor, updateAttributes }: NodeViewProps) 
           onDoubleClick={() => setExpanded(true)}
           className={selected ? "outline outline-2 outline-accent" : undefined}
         />
+        <MarkupOverlay src={src} version={opened} />
         {dragWidth === null && <ExpandButton onClick={() => setExpanded(true)} />}
         {selected && editor.isEditable && (
           <>
@@ -553,7 +556,16 @@ function ImageView({ node, selected, editor, updateAttributes }: NodeViewProps) 
         {dragWidth !== null && <span className="media-width-label">{widthLabel(dragWidth)}</span>}
       </span>
       {expanded && (
-        <MediaLightbox src={src} alt={alt} title={title} onClose={() => setExpanded(false)} editable={editor.isEditable} />
+        <MediaLightbox
+          src={src}
+          alt={alt}
+          title={title}
+          onClose={() => {
+            setExpanded(false);
+            setOpened((n) => n + 1);
+          }}
+          editable={editor.isEditable}
+        />
       )}
     </NodeViewWrapper>
   );

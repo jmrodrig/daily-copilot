@@ -10,7 +10,7 @@ import { getJson, message, sendJson } from "../lib/api";
 import { useSpace } from "../lib/space";
 import { useTitle } from "../lib/title";
 import { isOverdue, STATUS_LABELS, taskIdFromHref, useTaskChanges, useTaskPanel, type TaskItem } from "../lib/tasks";
-import MediaLightbox, { ExpandButton, isPdfUrl } from "../components/MediaLightbox";
+import MediaLightbox, { ExpandButton, isPdfUrl, MarkupOverlay } from "../components/MediaLightbox";
 import NoteEditor from "../components/NoteEditor";
 import { PillIcon, refKind } from "../components/referencePill";
 import { NOTE_COLUMN, NOTE_HTML_SCHEMA, layoutMedia, liftCellColors } from "../components/noteFormatting";
@@ -387,16 +387,29 @@ function NoteTags({ tags, onChange, disabled }: { tags: string[]; onChange: (tag
 
 /**
  * A published note's image, in a box laid out as the image would be (taking its `note-media` class and width) with
- * an expand button on hover. Clicking it opens it fullscreen, read-only.
+ * its markup over it and an expand button on hover. Clicking it opens it fullscreen, read-only.
  */
 function NoteImage({ node: _node, className, style, src, alt, title, ...props }: ComponentProps<"img"> & { node?: unknown }) {
   const [expanded, setExpanded] = useState(false);
+  // Counted up as the lightbox closes, so the markup's loaded again.
+  const [opened, setOpened] = useState(0);
   if (!src) return <img alt={alt} title={title} {...props} />;
   return (
     <span className={`note-figure group ${className ?? ""}`} style={style}>
       <img src={src} alt={alt ?? ""} title={title} {...props} onClick={() => setExpanded(true)} className="cursor-zoom-in" />
+      <MarkupOverlay src={src} version={opened} />
       <ExpandButton onClick={() => setExpanded(true)} />
-      {expanded && <MediaLightbox src={src} alt={alt} title={title} onClose={() => setExpanded(false)} />}
+      {expanded && (
+        <MediaLightbox
+          src={src}
+          alt={alt}
+          title={title}
+          onClose={() => {
+            setExpanded(false);
+            setOpened((n) => n + 1);
+          }}
+        />
+      )}
     </span>
   );
 }
