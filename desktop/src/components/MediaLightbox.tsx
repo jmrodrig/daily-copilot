@@ -60,9 +60,9 @@ const INKS = [
 /** Line widths, in screen pixels at the zoom a stroke is drawn at. */
 const SIZES = [2, 4, 8];
 /** A text's font size, in screen pixels at the zoom it's placed at, for each line width. */
-const textSize = (lineSize: number) => 8 + lineSize * 4;
+const textSize = (lineSize: number) => 8 + lineSize * 3;
 /** A text's font, at a size in pixels. */
-const textFont = (size: number) => `600 ${size}px system-ui, sans-serif`;
+const textFont = (size: number) => `600 ${size}px "IBM Plex Sans", sans-serif`;
 /** The markup canvas's limits, in device pixels: a larger one fails to allocate (and draws nothing) or eats memory. */
 const MAX_CANVAS_SIDE = 16384;
 const MAX_CANVAS_AREA = 4096 * 4096;
