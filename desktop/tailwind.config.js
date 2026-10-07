@@ -25,7 +25,7 @@ export default {
         text: {
           primary: brand("fg"),
           secondary: brand("muted"),
-          muted: brand("stone-400"),
+          muted: brand("stone-500"),
           onAccent: brand("ink"),
         },
         accent: {
