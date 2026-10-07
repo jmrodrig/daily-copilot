@@ -291,7 +291,7 @@ body {
 /* Task, note and URL references (referencePill): inline pills like Confluence macros, an icon and the name. Each kind
    has its own icon color; in the editor a pill is one unit, selected by a click and opened by a double-click. */
 .note-body .reference-pill {
-  @apply mx-0.5 inline-flex  items-center gap-1  rounded border border-border-default bg-surface-raised px-1.5 align-baseline text-[0.92em] font-medium leading-[1.55] text-text-primary no-underline;
+  @apply mx-0.5 inline-flex  items-center gap-1  rounded border border-border-default bg-surface-raised px-1.5 align-middle text-[0.92em] font-medium leading-[1.55] text-text-primary no-underline;
   cursor: pointer;
   user-select: none;
 }
