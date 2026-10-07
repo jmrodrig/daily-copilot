@@ -1,6 +1,7 @@
 import type { PDFDocumentLoadingTask, PDFDocumentProxy, RenderTask } from "pdfjs-dist";
 import { useEffect, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
+import { getStroke } from "perfect-freehand";
 
 import { getJson, message, sendJson } from "../lib/api";
 
@@ -9,11 +10,20 @@ type View = { zoom: number; x: number; y: number };
 type Point = { x: number; y: number };
 type Tool = "draw" | "pan" | "select" | "erase" | "lasso-erase" | "line" | "arrow" | "rect" | "circle" | "text" | "comment";
 type Eraser = "erase" | "lasso-erase";
-/** A markup stroke, in image pixels; each point carries its line width, which follows the pen's pressure. A freehand
- * one ("draw") has a point for each the pointer passed; a shape has two, where its drag started and where it is (or
- * ended); a text has one, its top left, whose width is its font size, and is turned by `angle` (in radians) about it.
+/** A markup stroke, in image pixels; each point carries its line width. A freehand one ("draw") has a point for each
+ * the pointer passed; a shape has two, where its drag started and where it is (or ended); a text has one, its top
+ * left, whose width is its font size, and is turned by `angle` (in radians) about it. A freehand stroke with a `taper`
+ * is drawn as perfect-freehand's outline, thinned by a pen's pressure (kept on each point) or by the pointer's speed;
+ * one without (an older one, or a turned rectangle or ellipse) as a line whose width follows its points'.
  * The erasers leave no strokes: they delete the ones they touch (or loop around). */
-type Stroke = { type: Exclude<Tool, "pan" | "select" | "comment" | Eraser>; color: string; points: (Point & { width: number })[]; text?: string; angle?: number };
+type Stroke = {
+  type: Exclude<Tool, "pan" | "select" | "comment" | Eraser>;
+  color: string;
+  points: (Point & { width: number; pressure?: number })[];
+  text?: string;
+  angle?: number;
+  taper?: "pen" | "speed";
+};
 /** A sticky-note comment pinned to a point on the image or a PDF's page (counted from 0), in its pixels. */
 type Comment = Point & { id: string; text: string; isExpanded: boolean; page: number };
 /** `GET`/`PUT /api/notes/image/{name}/markup` (MediaMarkup in backend/schemas.py): the sidecar beside the file. An
@@ -537,18 +547,6 @@ export default function MediaLightbox({
     else if (selection.length) drawSelection(context, selectionBox(selection), view.zoom, 0);
   }
 
-  /** Draw on the canvas straight away, in image pixels. */
-  function drawOnCanvas(draw: (context: CanvasRenderingContext2D) => void) {
-    const canvas = canvasRef.current;
-    const context = canvas?.getContext("2d");
-    if (!canvas || !context || !size) return;
-    context.save();
-    context.resetTransform();
-    context.scale(canvas.width / size.width, canvas.height / size.height);
-    draw(context);
-    context.restore();
-  }
-
   /** Whether a pointer draws: in markup, a pen or the mouse with any tool but Move. Touch always pans. */
   const draws = (e: ReactPointerEvent) => editing && tool !== "pan" && (e.pointerType === "pen" || e.pointerType === "mouse");
 
@@ -560,10 +558,13 @@ export default function MediaLightbox({
     return { x: ((e.clientX - rect.left) / rect.width) * size.width, y: ((e.clientY - rect.top) / rect.height) * size.height };
   }
 
-  /** A stroke's width in image pixels: the line size on screen at the current zoom, thickened by a pen's pressure
-   * for the pen (a shape's line is even). */
-  const lineWidth = (pointerType: string, pressure: number) =>
-    (lineSize / view.zoom) * (pointerType === "pen" && tool === "draw" ? 0.5 + (pressure || 0.5) : 1);
+  /** A stroke's width in image pixels: the line size on screen at the current zoom. A freehand stroke's thins from
+   * it with the pen's pressure or the pointer's speed (see `drawFreehand`). */
+  const lineWidth = lineSize / view.zoom;
+
+  /** A freehand stroke's point at a pointer event: with its pressure, for a pen. */
+  const freehandPoint = (point: Point, pointerType: string, pressure: number) =>
+    pointerType === "pen" ? { ...point, width: lineWidth, pressure } : { ...point, width: lineWidth };
 
   /** Delete the strokes whose ink passes within the stroke eraser's reach of a point. */
   function eraseAt(point: Point, reach: number) {
@@ -622,11 +623,12 @@ export default function MediaLightbox({
         else setTextEntry({ ...point, size: textSize(lineSize) / view.zoom, color: ink, value: "" });
         return;
       }
-      const width = lineWidth(e.pointerType, e.pressure);
-      const stroke: Stroke = { type: tool, color: ink, points: [{ ...point, width }] };
+      const stroke: Stroke = isShape(tool)
+        ? { type: tool, color: ink, points: [{ ...point, width: lineWidth }] }
+        : { type: tool, color: ink, points: [freehandPoint(point, e.pointerType, e.pressure)], taper: e.pointerType === "pen" ? "pen" : "speed" };
       drawing.current = { pointerId: e.pointerId, stroke };
       // A shape shows once it's dragged.
-      if (!isShape(tool)) drawOnCanvas((context) => drawDot(context, stroke));
+      if (!isShape(tool)) redraw();
       return;
     }
     pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
@@ -644,14 +646,14 @@ export default function MediaLightbox({
         redraw();
         return;
       }
-      // A pen reports more points than it fires events for; they're all drawn, for a smooth line.
+      // A pen reports more points than it fires events for; they're all kept, for a smooth line. Its outline is
+      // worked out afresh from them all, so the canvas is redrawn.
       const events = e.nativeEvent.getCoalescedEvents?.() ?? [];
       for (const event of events.length ? events : [e.nativeEvent]) {
         const point = imagePoint(event);
-        if (!point) continue;
-        stroke.points.push({ ...point, width: lineWidth(e.pointerType, event.pressure) });
-        drawOnCanvas((context) => drawSegment(context, stroke, stroke.points.length - 1));
+        if (point) stroke.points.push(freehandPoint(point, e.pointerType, event.pressure));
       }
+      redraw();
       return;
     }
     const eraser = erasing.current;
@@ -1072,6 +1074,7 @@ export function drawStrokes(context: CanvasRenderingContext2D, strokes: Stroke[]
   for (const stroke of strokes) {
     if (isShape(stroke.type)) drawShape(context, stroke);
     else if (stroke.type === "text") drawText(context, stroke);
+    else if (stroke.taper) drawFreehand(context, stroke);
     else {
       for (let i = 1; i < stroke.points.length; i++) drawSegment(context, stroke, i);
       if (stroke.points.length === 1) drawDot(context, stroke);
@@ -1097,6 +1100,21 @@ function drawSegment(context: CanvasRenderingContext2D, stroke: Stroke, i: numbe
   context.moveTo(from.x, from.y);
   context.lineTo(to.x, to.y);
   context.stroke();
+}
+
+/** Draw a tapered freehand stroke as the polygon perfect-freehand outlines around its points, filled. */
+function drawFreehand(context: CanvasRenderingContext2D, stroke: Stroke) {
+  const pen = stroke.taper === "pen";
+  const outline = getStroke(
+    stroke.points.map((p) => [p.x, p.y, p.pressure ?? 0.5]),
+    { size: stroke.points[0].width, thinning: 0.5, smoothing: 0.5, streamline: 0.5, simulatePressure: !pen },
+  );
+  if (!outline.length) return;
+  inkFor(context, stroke);
+  context.beginPath();
+  outline.forEach(([x, y], i) => (i ? context.lineTo(x, y) : context.moveTo(x, y)));
+  context.closePath();
+  context.fill();
 }
 
 /** Draw a stroke's first point: a tap leaves a dot. */
