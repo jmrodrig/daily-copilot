@@ -103,8 +103,14 @@ body {
 .note-body p {
   @apply my-3;
 }
-.note-body li > p {
+.note-body li p {
   @apply my-1;
+}
+.note-body li p:first-child {
+  @apply mt-0;
+}
+.note-body li p:last-child {
+  @apply mb-0;
 }
 .note-body table {
   @apply w-full text-[15px];
@@ -124,7 +130,7 @@ body {
   @apply flex items-start gap-2;
 }
 .note-body ul[data-type="taskList"] li > label {
-  @apply mt-[3px] shrink-0 select-none;
+  @apply mt-1 shrink-0 select-none;
 }
 .note-body ul[data-type="taskList"] li > div {
   @apply min-w-0 flex-1;
