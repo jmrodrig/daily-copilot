@@ -44,6 +44,7 @@ const NAV_ITEMS = [
   { to: "/emails", label: "Forwarded emails", end: false },
   { to: "/graph", label: "Notes graph", end: false },
   { to: "/people", label: "People", end: false },
+  { to: "/space-preferences", label: "Space Preferences", end: false },
 ];
 
 const EXPANDED_KEY = "copilot.treeExpanded";
@@ -483,14 +484,11 @@ export default function Sidebar({ onCollapse }: { onCollapse: () => void }) {
           </div>
           <div className="truncate font-mono text-[13px] text-text-muted">{window.location.host}</div>
         </div>
-        <NavLink
-          to="/settings"
-          className={({ isActive }) =>
-            `rounded-md px-2 py-1 text-xs ${isActive ? "bg-surface-active text-text-primary" : "text-text-muted hover:bg-surface-hover"}`
-          }
-        >
-          Settings
-        </NavLink>
+        <div className="flex shrink-0 flex-col items-end gap-0.5">
+          <NavLink to="/settings" className={({ isActive }) => footerLinkClass(isActive)}>
+            Settings
+          </NavLink>
+        </div>
       </div>
 
       {menu && (
@@ -630,6 +628,10 @@ function SpaceSwitcher() {
       )}
     </div>
   );
+}
+
+function footerLinkClass(isActive: boolean): string {
+  return `rounded-md px-2 py-1 text-xs ${isActive ? "bg-surface-active text-text-primary" : "text-text-muted hover:bg-surface-hover"}`;
 }
 
 function navClass(isActive: boolean): string {

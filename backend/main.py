@@ -698,6 +698,15 @@ def create_space(request: schemas.SpaceIn, db: Session = Depends(get_db)) -> sch
     return schemas.Space.model_validate(space, from_attributes=True)
 
 
+@app.put("/api/spaces/{space_id}")
+def update_space(space_id: int, request: schemas.SpaceIn, db: Session = Depends(get_db)) -> schemas.Space:
+    """Rename a space."""
+    space = spaces.update_space(db, space_id, request.name)
+    if space is None:
+        raise HTTPException(status_code=404, detail=f"Unknown space id: {space_id}")
+    return schemas.Space.model_validate(space, from_attributes=True)
+
+
 @app.get("/api/tree")
 def tree(space_id: int = spaces.DEFAULT_SPACE_ID, db: Session = Depends(get_db)) -> TreeResponse:
     """A space's content/ folder tree (with Project / Reference Data flags) and its templates."""

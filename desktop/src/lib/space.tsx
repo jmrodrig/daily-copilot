@@ -12,6 +12,8 @@ type SpaceState = {
   space: Space | undefined;
   setSpaceId: (id: number) => void;
   createSpace: (name: string) => Promise<Space>;
+  /** Rename a space. */
+  updateSpace: (id: number, name: string) => Promise<Space>;
   /** Bumped after the content tree changes (new note, folder flags), so views can reload. */
   treeVersion: number;
   refreshTree: () => void;
@@ -66,6 +68,18 @@ export function SpaceProvider({ children }: { children: ReactNode }) {
     [setSpaceId],
   );
 
+  const updateSpace = useCallback(async (id: number, name: string) => {
+    const res = await fetch(`/api/spaces/${id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    if (!res.ok) throw new Error(await errorDetail(res));
+    const space: Space = await res.json();
+    setSpaces((prev) => prev.map((s) => (s.id === space.id ? space : s)));
+    return space;
+  }, []);
+
   const refreshTree = useCallback(() => setTreeVersion((v) => v + 1), []);
 
   const value = useMemo(
@@ -75,10 +89,11 @@ export function SpaceProvider({ children }: { children: ReactNode }) {
       space: spaces.find((s) => s.id === spaceId),
       setSpaceId,
       createSpace,
+      updateSpace,
       treeVersion,
       refreshTree,
     }),
-    [spaces, spaceId, setSpaceId, createSpace, treeVersion, refreshTree],
+    [spaces, spaceId, setSpaceId, createSpace, updateSpace, treeVersion, refreshTree],
   );
   return <SpaceContext.Provider value={value}>{children}</SpaceContext.Provider>;
 }

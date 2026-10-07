@@ -169,6 +169,17 @@ def create_space(db: Session, name: str) -> Space:
     return space
 
 
+def update_space(db: Session, space_id: int, name: str) -> Space | None:
+    """Rename a space; `None` if it doesn't exist (or is deleted)."""
+    space = get_space(db, space_id)
+    if space is None:
+        return None
+    set_source(db, SPACES_SOURCE)
+    space.name = name
+    db.commit()
+    return space
+
+
 # --- Folder metadata ----------------------------------------------------------
 
 

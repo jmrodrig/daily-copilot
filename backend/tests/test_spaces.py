@@ -85,6 +85,16 @@ def test_spaces_list_and_create(client):
     assert client.get("/api/tree", params={"space_id": 99}).status_code == 404
 
 
+def test_rename_space(client):
+    response = client.put("/api/spaces/1", json={"name": "  Work "})
+
+    assert response.status_code == 200
+    assert response.json()["name"] == "Work"
+    assert client.get("/api/spaces").json()[0]["name"] == "Work"
+    assert client.put("/api/spaces/1", json={"name": " "}).status_code == 422
+    assert client.put("/api/spaces/99", json={"name": "Nope"}).status_code == 404
+
+
 def test_tree_nests_folders_and_flags(client):
     write(1, "Yachts/C7801/Design/Keel.md", "---\ntitle: Keel design\n---\nBody")
     write(1, "Yachts/C7801/plan.md", "# Build plan\n")
