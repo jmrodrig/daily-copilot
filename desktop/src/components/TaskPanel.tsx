@@ -19,6 +19,8 @@ import { ME, NEUTRAL_TAG, PROJECT_TAG, Tag, TagPills } from "./TriageBoard";
 type State = { state: "loading" } | { state: "ok"; task: TaskItem } | { state: "error"; message: string };
 
 const PRIORITIES: TaskPriority[] = ["low", "normal", "high", "urgent"];
+// Text fields save on their own once typing pauses for this long, so the task's pills follow along.
+const AUTO_SAVE_DELAY = 500;
 
 /** The task open in the right-hand panel (`?taskId=`): its fields, description and comments, all editable. */
 export default function TaskPanel({ taskId, onClose }: { taskId: number; onClose: () => void }) {
@@ -205,7 +207,7 @@ function TaskFields({
 }
 
 /**
- * A single-value field saved on blur or Enter; Escape puts the saved value back.
+ * A single-value field saved shortly after typing stops, and on blur or Enter; Escape puts the saved value back.
  * `multiline` wraps long text in a textarea that grows to fit (Enter still saves rather than adding a line).
  */
 function TextField({
@@ -226,7 +228,12 @@ function TextField({
   className: string;
 }) {
   const [draft, setDraft] = useState(value);
-  useEffect(() => setDraft(value), [value]);
+  // The value an auto-save sent: when it comes back as `value`, the draft (maybe typed further since) is kept.
+  const sentRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (value !== sentRef.current) setDraft(value);
+    sentRef.current = null;
+  }, [value]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   useLayoutEffect(() => {
@@ -246,6 +253,17 @@ function TextField({
     if (!(await onSave(trimmed))) setDraft(value);
     else setDraft(trimmed);
   }
+
+  // Auto-save leaves the draft as typed (a trailing space is the start of the next word); blur tidies it.
+  useEffect(() => {
+    const trimmed = draft.replace(/\s+/g, " ").trim();
+    if (trimmed === value.trim() || (required && !trimmed)) return;
+    const timer = window.setTimeout(async () => {
+      sentRef.current = trimmed;
+      if (!(await onSave(trimmed))) sentRef.current = null;
+    }, AUTO_SAVE_DELAY);
+    return () => window.clearTimeout(timer);
+  }, [draft, value]);
 
   const props = {
     "aria-label": ariaLabel,
@@ -275,19 +293,31 @@ function TextField({
   );
 }
 
-/** Plain text, saved when the field loses focus (or on Ctrl+Enter). */
+/** Plain text, saved shortly after typing stops, and when the field loses focus (or on Ctrl+Enter). */
 function DescriptionField({ task, onPatch }: { task: TaskItem; onPatch: (patch: TaskPatch) => Promise<boolean> }) {
   const [draft, setDraft] = useState(task.description);
   const [saving, setSaving] = useState(false);
-  useEffect(() => setDraft(task.description), [task.description]);
+  // As in TextField: an auto-save coming back doesn't overwrite what was typed since.
+  const sentRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (task.description !== sentRef.current) setDraft(task.description);
+    sentRef.current = null;
+  }, [task.description]);
   const dirty = draft !== task.description;
 
-  async function commit() {
+  async function commit(auto = false) {
     if (!dirty) return;
+    if (auto) sentRef.current = draft;
     setSaving(true);
-    await onPatch({ description: draft });
+    if (!(await onPatch({ description: draft }))) sentRef.current = null;
     setSaving(false);
   }
+
+  useEffect(() => {
+    if (!dirty) return;
+    const timer = window.setTimeout(() => void commit(true), AUTO_SAVE_DELAY);
+    return () => window.clearTimeout(timer);
+  }, [draft, task.description]);
 
   return (
     <>
@@ -295,7 +325,7 @@ function DescriptionField({ task, onPatch }: { task: TaskItem; onPatch: (patch: 
         aria-label="Description"
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
-        onBlur={commit}
+        onBlur={() => commit()}
         onKeyDown={(e) => {
           if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) e.currentTarget.blur();
           if (e.key === "Escape") setDraft(task.description);
@@ -304,7 +334,7 @@ function DescriptionField({ task, onPatch }: { task: TaskItem; onPatch: (patch: 
         placeholder="Add a description…"
         className="field resize-y py-2 text-[15px] leading-5"
       />
-      <span className="h-4 text-[13px] text-text-muted">{saving ? "Saving…" : dirty ? "Unsaved · saves when you click away" : ""}</span>
+      <span className="h-4 text-[13px] text-text-muted">{saving ? "Saving…" : dirty ? "Unsaved" : ""}</span>
     </>
   );
 }
