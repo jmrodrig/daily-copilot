@@ -9,7 +9,7 @@ from datetime import date, datetime
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class AccessMode(str, Enum):
@@ -585,6 +585,8 @@ class CustomFieldType(str, Enum):
     NUMBER = "number"
     DATE = "date"
     CHECKBOX = "checkbox"
+    # One of the field's `options`.
+    DROPDOWN = "dropdown"
 
 
 class CustomFieldDef(BaseModel):
@@ -593,6 +595,9 @@ class CustomFieldDef(BaseModel):
     id: str = Field(pattern=r"^[a-z0-9_-]{1,64}$", description="Stable key in `Task.custom_fields`")
     name: str = Field(min_length=1, max_length=64)
     type: CustomFieldType = CustomFieldType.TEXT
+    options: list[str] = Field(
+        default_factory=list, max_length=100, description="The choices of a dropdown field, in order; [] for other types"
+    )
 
     @field_validator("name")
     @classmethod
@@ -601,19 +606,41 @@ class CustomFieldDef(BaseModel):
             raise ValueError("name must not be blank")
         return value.strip()
 
+    @field_validator("options")
+    @classmethod
+    def _clean_options(cls, value: list[str]) -> list[str]:
+        options = list(dict.fromkeys(o.strip() for o in value if o.strip()))
+        if any(len(o) > 128 for o in options):
+            raise ValueError("options must be at most 128 characters")
+        return options
 
-StatusFlow = dict[Status, list[Status]]
+    @model_validator(mode="after")
+    def _options_for_dropdowns(self) -> "CustomFieldDef":
+        if self.type is not CustomFieldType.DROPDOWN:
+            self.options = []
+        elif not self.options:
+            raise ValueError("a dropdown field needs at least one option")
+        return self
+
+
+# Status -> the statuses a task may move to next -> whether that move asks for a comment.
+StatusFlow = dict[Status, dict[Status, bool]]
 
 
 def clean_status_flow(value: Any) -> StatusFlow | None:
-    """A stored status flow that parses, without duplicate targets; None or {} means every transition is allowed."""
+    """A stored status flow that parses; None or {} means every transition is allowed without a comment.
+
+    Flows from before the comment flag hold a list of targets per status: those moves don't ask for a comment.
+    """
     if not isinstance(value, dict):
         return None
     flow: StatusFlow = {}
     for source, targets in value.items():
         try:
-            flow[Status(source)] = list(dict.fromkeys(Status(t) for t in targets or []))
-        except (TypeError, ValueError):
+            if isinstance(targets, list):
+                targets = dict.fromkeys(targets, False)
+            flow[Status(source)] = {Status(t): bool(comment) for t, comment in (targets or {}).items()}
+        except (AttributeError, TypeError, ValueError):
             continue
     return flow or None
 
@@ -635,7 +662,8 @@ class SpaceUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=64)
     status_flow: StatusFlow | None = Field(
         default=None,
-        description="Status -> the statuses a task may move to next; a status left out (or a null/empty flow) is unrestricted",
+        description="Status -> the statuses a task may move to next -> whether that move asks for a comment; "
+        "a status left out (or a null/empty flow) may move anywhere without a comment",
     )
     custom_fields_schema: list[CustomFieldDef] | None = Field(default=None, description="Replaces the space's custom fields")
 
@@ -648,8 +676,8 @@ class SpaceUpdate(BaseModel):
 
     @field_validator("status_flow")
     @classmethod
-    def _dedupe_targets(cls, value: StatusFlow | None) -> StatusFlow | None:
-        return clean_status_flow(value)
+    def _empty_is_none(cls, value: StatusFlow | None) -> StatusFlow | None:
+        return value or None
 
     @field_validator("custom_fields_schema")
     @classmethod
@@ -917,11 +945,13 @@ class PersonIn(BaseModel):
     """`POST /api/people` and `PUT /api/people/{id}`: a contact in a space's People directory."""
 
     space_id: int
-    name: str = Field(min_length=1, max_length=128)
+    # At most a task's `assignee`, so anyone in the directory can be assigned a task.
+    name: str = Field(min_length=1, max_length=64)
     email: str | None = Field(default=None, max_length=254)
     company: str | None = Field(default=None, max_length=128)
     is_external: bool = Field(default=False, description="Outside the organisation, e.g. a client or supplier")
     avatar_url: str | None = Field(default=None, max_length=2048, description="None shows the person's initials")
+    is_me: bool = Field(default=False, description="The app's user; marking someone unmarks the rest of the space")
 
     @field_validator("name")
     @classmethod
@@ -952,4 +982,5 @@ class PersonIn(BaseModel):
 
 class Person(PersonIn):
     id: int
+    name: str  # people saved before the 64-character limit keep their longer names
     created_at: datetime | None = None

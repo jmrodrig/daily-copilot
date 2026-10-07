@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type FormEvent, type Keyb
 import { Link } from "react-router-dom";
 
 import { getJson, message, sendJson } from "../lib/api";
+import { AssigneeSelect, usePeople } from "../lib/people";
 import { notePath, useSpace, type CustomFieldDef } from "../lib/space";
 import {
   allowedStatuses,
@@ -70,11 +71,12 @@ export default function TaskPanel({ taskId, onClose }: { taskId: number; onClose
 
   const patch = (body: TaskPatch) => save(() => sendJson("PATCH", `/api/tasks/${taskId}`, body), "save the task");
 
-  /** Asks for an optional comment explaining the change, then saves both (or nothing, if cancelled). */
+  /** Asks for a comment explaining the change if the status flow wants one, then saves both (or nothing, if cancelled). */
+  const { spaces } = useSpace();
   const { ask, dialog } = useStatusChangePrompt();
   async function changeStatus(task: TaskItem, to: TaskStatus) {
     if (to === task.status) return true;
-    const answer = await ask(task, to);
+    const answer = await ask(task, to, spaces.find((s) => s.id === task.space_id)?.status_flow);
     if (!answer) return false;
     return save(async () => {
       await sendJson("PATCH", `/api/tasks/${task.id}`, { status: to });
@@ -145,6 +147,7 @@ function TaskFields({
   const space = useSpace().spaces.find((s) => s.id === task.space_id);
   const statuses = allowedStatuses(space?.status_flow, task.status);
   const customFields = space?.custom_fields_schema ?? [];
+  const people = usePeople(task.space_id);
   return (
     <>
       <div className="flex flex-col gap-2">
@@ -213,11 +216,10 @@ function TaskFields({
         </label>
         <label className={`${label} col-span-2`}>
           Assignee
-          <TextField
-            ariaLabel="Assignee"
-            value={task.assignee ?? ""}
-            placeholder="Unassigned"
-            onSave={(value) => onPatch({ assignee: value.trim() || null })}
+          <AssigneeSelect
+            value={task.assignee}
+            people={people}
+            onChange={(assignee) => onPatch({ assignee })}
             className="field py-1.5 text-[15px]"
           />
         </label>
@@ -366,6 +368,28 @@ function CustomField({
           />
         </label>
       );
+    case "dropdown": {
+      const current = typeof value === "string" ? value : "";
+      return (
+        <label className={label}>
+          {field.name}
+          <select
+            value={current}
+            onChange={(e) => onSave(e.target.value || null)}
+            className={`${input} ${current ? "text-text-primary" : "text-text-muted"}`}
+          >
+            <option value="">—</option>
+            {field.options.map((option) => (
+              <option key={option} value={option}>
+                {option}
+              </option>
+            ))}
+            {/* A value whose option was since removed from the field stays shown until changed. */}
+            {current && !field.options.includes(current) && <option value={current}>{current}</option>}
+          </select>
+        </label>
+      );
+    }
     case "number":
       return (
         <label className={label}>

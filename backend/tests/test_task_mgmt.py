@@ -76,10 +76,11 @@ def test_space_preferences_round_trip(client):
     response = client.put(
         "/api/spaces/1",
         json={
-            "status_flow": {"todo": ["in_progress", "in_progress", "archived"], "done": []},
+            "status_flow": {"todo": {"in_progress": False, "archived": True}, "done": {}},
             "custom_fields_schema": [
-                {"id": "hull", "name": " Hull no. ", "type": "text"},
+                {"id": "hull", "name": " Hull no. ", "type": "text", "options": ["ignored"]},
                 {"id": "weight", "name": "Weight", "type": "number"},
+                {"id": "yard", "name": "Yard", "type": "dropdown", "options": [" North ", "South", "North", ""]},
             ],
         },
     )
@@ -87,12 +88,14 @@ def test_space_preferences_round_trip(client):
     assert response.status_code == 200, response.text
     space = response.json()
     assert space["name"] == "Default"  # unsent fields are kept
-    assert space["status_flow"] == {"todo": ["in_progress", "archived"], "done": []}
+    flow = {"todo": {"in_progress": False, "archived": True}, "done": {}}
+    assert space["status_flow"] == flow
     assert space["custom_fields_schema"] == [
-        {"id": "hull", "name": "Hull no.", "type": "text"},
-        {"id": "weight", "name": "Weight", "type": "number"},
+        {"id": "hull", "name": "Hull no.", "type": "text", "options": []},
+        {"id": "weight", "name": "Weight", "type": "number", "options": []},
+        {"id": "yard", "name": "Yard", "type": "dropdown", "options": ["North", "South"]},
     ]
-    assert client.get("/api/spaces").json()[0]["status_flow"] == {"todo": ["in_progress", "archived"], "done": []}
+    assert client.get("/api/spaces").json()[0]["status_flow"] == flow
 
     # Renaming keeps the preferences; a null flow allows every move again.
     assert client.put("/api/spaces/1", json={"name": "Work"}).json()["custom_fields_schema"][0]["id"] == "hull"
@@ -104,12 +107,16 @@ def test_space_preferences_round_trip(client):
     "payload",
     [
         {"name": None},
-        {"status_flow": {"todo": ["nope"]}},
-        {"status_flow": {"nope": ["todo"]}},
+        {"status_flow": {"todo": {"nope": False}}},
+        {"status_flow": {"nope": {"todo": False}}},
+        {"status_flow": {"todo": {"done": "maybe"}}},
         {"custom_fields_schema": [{"id": "Has Spaces", "name": "x"}]},
         {"custom_fields_schema": [{"id": "a", "name": "A"}, {"id": "a", "name": "B"}]},
         {"custom_fields_schema": [{"id": "a", "name": "A", "type": "colour"}]},
         {"custom_fields_schema": [{"id": "a", "name": " "}]},
+        {"custom_fields_schema": [{"id": "a", "name": "A", "type": "dropdown"}]},
+        {"custom_fields_schema": [{"id": "a", "name": "A", "type": "dropdown", "options": [" "]}]},
+        {"custom_fields_schema": [{"id": "a", "name": "A", "type": "dropdown", "options": ["x" * 129]}]},
     ],
 )
 def test_space_preferences_validation(client, payload):
@@ -117,9 +124,14 @@ def test_space_preferences_validation(client, payload):
 
 
 def test_stored_status_flow_is_cleaned():
-    flow = clean_status_flow({"todo": ["in_progress", "nope"], "done": [], "bad": ["todo"]})
-    assert flow == {Status.DONE: []}  # a list with an unknown status is dropped whole
-    assert clean_status_flow({"todo": ["in_progress"]}) == {Status.TODO: [Status.IN_PROGRESS]}
+    flow = clean_status_flow({"todo": {"in_progress": True, "nope": False}, "done": {}, "bad": {"todo": True}})
+    assert flow == {Status.DONE: {}}  # targets with an unknown status are dropped whole
+    assert clean_status_flow({"todo": {"in_progress": True}}) == {Status.TODO: {Status.IN_PROGRESS: True}}
+    # Flows saved before the comment flag: lists of allowed moves, none of which ask for a comment.
+    assert clean_status_flow({"todo": ["in_progress", "in_progress"], "done": []}) == {
+        Status.TODO: {Status.IN_PROGRESS: False},
+        Status.DONE: {},
+    }
     assert clean_status_flow(None) is None
     assert clean_status_flow({}) is None
 
@@ -137,6 +149,7 @@ def custom_fields(client):
                 {"id": "weight", "name": "Weight", "type": "number"},
                 {"id": "survey", "name": "Survey", "type": "date"},
                 {"id": "signed", "name": "Signed off", "type": "checkbox"},
+                {"id": "yard", "name": "Yard", "type": "dropdown", "options": ["North", "South"]},
             ]
         },
     )
@@ -156,6 +169,13 @@ def test_custom_fields_are_merged_and_cleared(client, custom_fields):
     assert client.get(f"/api/tasks/{task['id']}").json()["custom_fields"] == {"weight": 4.5, "signed": True}
 
 
+def test_dropdown_field_takes_one_of_its_options(client, custom_fields):
+    task = new_task(client, "Keel", custom_fields={"yard": " South "})
+    assert task["custom_fields"] == {"yard": "South"}
+    assert client.patch(f"/api/tasks/{task['id']}", json={"custom_fields": {"yard": "East"}}).status_code == 400
+    assert client.patch(f"/api/tasks/{task['id']}", json={"custom_fields": {"yard": ""}}).json()["custom_fields"] == {}
+
+
 @pytest.mark.parametrize(
     "values",
     [
@@ -165,6 +185,8 @@ def test_custom_fields_are_merged_and_cleared(client, custom_fields):
         {"survey": "next week"},
         {"signed": "yes"},
         {"hull": 12},
+        {"yard": "East"},
+        {"yard": 1},
     ],
 )
 def test_custom_field_values_are_checked(client, custom_fields, values):
@@ -229,6 +251,7 @@ def test_people_crud(client):
         "company": None,
         "is_external": False,
         "avatar_url": None,
+        "is_me": False,
         "created_at": None,
     }
     client.post("/api/people", json={"space_id": 1, "name": "alan Client", "company": "Acme", "is_external": True})
@@ -256,6 +279,7 @@ def test_people_crud(client):
     "payload, status",
     [
         ({"space_id": 1, "name": " "}, 422),
+        ({"space_id": 1, "name": "x" * 65}, 422),  # longer than a task's assignee
         ({"space_id": 1, "name": "X", "email": "not-an-email"}, 422),
         ({"space_id": 1, "name": "X", "avatar_url": "javascript:alert(1)"}, 422),
         ({"space_id": 99, "name": "X"}, 404),
@@ -263,3 +287,22 @@ def test_people_crud(client):
 )
 def test_create_person_validation(client, payload, status):
     assert client.post("/api/people", json=payload).status_code == status
+
+
+def test_only_one_person_per_space_is_me(client):
+    other = client.post("/api/spaces", json={"name": "Private"}).json()["id"]
+    zoe = client.post("/api/people", json={"space_id": 1, "name": "Zoe", "is_me": True}).json()
+    elsewhere = client.post("/api/people", json={"space_id": other, "name": "Elsewhere", "is_me": True}).json()
+    sam = client.post("/api/people", json={"space_id": 1, "name": "Sam"}).json()
+
+    def me(space_id):
+        return [p["name"] for p in client.get("/api/people", params={"space_id": space_id}).json() if p["is_me"]]
+
+    assert (me(1), me(other)) == (["Zoe"], ["Elsewhere"])
+    client.put(f"/api/people/{sam['id']}", json={"space_id": 1, "name": "Sam", "is_me": True})
+    assert (me(1), me(other)) == (["Sam"], ["Elsewhere"])  # other spaces keep their "me"
+    client.post("/api/people", json={"space_id": 1, "name": "Ana", "is_me": True})
+    assert me(1) == ["Ana"]
+    client.put(f"/api/people/{elsewhere['id']}", json={"space_id": other, "name": "Elsewhere"})
+    assert me(other) == []
+    assert client.get(f"/api/people/{zoe['id']}").json()["is_me"] is False

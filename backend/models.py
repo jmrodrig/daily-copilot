@@ -11,7 +11,7 @@ import datetime as dt
 import enum
 import re
 
-from sqlalchemy import JSON, Enum, ForeignKey, String, UniqueConstraint, func
+from sqlalchemy import JSON, Enum, ForeignKey, String, UniqueConstraint, false, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from database import Base
@@ -55,7 +55,8 @@ class Space(Versioned, Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(64))
-    # Status -> the statuses a task may move to next (`schemas.StatusFlow`); None or {} allows every move.
+    # Status -> the statuses a task may move to next -> whether that move asks for a comment (`schemas.StatusFlow`);
+    # None or {} allows every move without asking. Rows from before the comment flag hold plain lists of statuses.
     status_flow: Mapped[dict | None] = mapped_column(JSON, default=None)
     # The space's custom task fields: `schemas.CustomFieldDef` dicts. None only for rows from before them.
     custom_fields_schema: Mapped[list[dict] | None] = mapped_column(JSON, default=list)
@@ -270,6 +271,8 @@ class Person(Versioned, Base):
     company: Mapped[str | None] = mapped_column(String(128), default=None)
     is_external: Mapped[bool] = mapped_column(default=False)
     avatar_url: Mapped[str | None] = mapped_column(default=None)
+    # The app's user: at most one person per space is "me" (see `main._only_me`).
+    is_me: Mapped[bool] = mapped_column(default=False, server_default=false())
     created_at: Mapped[dt.datetime] = mapped_column(server_default=func.now())
 
     def __repr__(self) -> str:

@@ -1,7 +1,7 @@
 import { useCallback, useRef, useState, type FormEvent, type ReactNode } from "react";
 
 import { sendJson } from "../lib/api";
-import { STATUS_LABELS, statusChangeComment, type TaskStatus } from "../lib/tasks";
+import { commentRequested, STATUS_LABELS, statusChangeComment, type StatusFlow, type TaskStatus } from "../lib/tasks";
 import { ME } from "./TriageBoard";
 
 /** What the user chose in the dialog: `null` when they cancelled, else the optional comment. */
@@ -10,19 +10,21 @@ export type StatusChangeAnswer = { comment: string | null } | null;
 type Pending = { title: string; from: TaskStatus; to: TaskStatus; resolve: (answer: StatusChangeAnswer) => void };
 
 /**
- * Asks for an optional comment whenever a task's status changes (Jira-style). Render `dialog` somewhere in the
- * component and `await ask(...)` before saving the change.
+ * Asks for a comment when a task's status changes and the space's status flow marks that move as asking for one
+ * (Jira-style); other moves answer straight away without a comment. Render `dialog` somewhere in the component and
+ * `await ask(...)` before saving the change.
  */
 export function useStatusChangePrompt(): {
-  ask: (task: { title: string; status: TaskStatus }, to: TaskStatus) => Promise<StatusChangeAnswer>;
+  ask: (task: { title: string; status: TaskStatus }, to: TaskStatus, flow: StatusFlow | null | undefined) => Promise<StatusChangeAnswer>;
   dialog: ReactNode;
 } {
   const [pending, setPending] = useState<Pending | null>(null);
   const pendingRef = useRef<Pending | null>(null);
 
   const ask = useCallback(
-    (task: { title: string; status: TaskStatus }, to: TaskStatus) =>
+    (task: { title: string; status: TaskStatus }, to: TaskStatus, flow: StatusFlow | null | undefined) =>
       new Promise<StatusChangeAnswer>((resolve) => {
+        if (!commentRequested(flow, task.status, to)) return resolve({ comment: null });
         pendingRef.current?.resolve(null); // a second change replaces an unanswered one
         const next = { title: task.title, from: task.status, to, resolve };
         pendingRef.current = next;

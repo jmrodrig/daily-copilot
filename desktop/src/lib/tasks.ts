@@ -49,8 +49,8 @@ export type TaskPatch = Partial<
 
 /** The Kanban columns, left to right. Blocked tasks sit in "In progress" with a tag. */
 export const BOARD_COLUMNS: { status: TaskStatus; label: string }[] = [
-  { status: "backlog", label: "Backlog" },
   { status: "todo", label: "To do" },
+  { status: "blocked", label: "Blocked" },
   { status: "in_progress", label: "In progress" },
   { status: "done", label: "Done" },
 ];
@@ -67,8 +67,11 @@ export const STATUS_LABELS: Record<TaskStatus, string> = {
 /** Every status, in workflow order. */
 export const STATUSES = Object.keys(STATUS_LABELS) as TaskStatus[];
 
-/** Status -> the statuses a task may move to next (see StatusFlow in backend/schemas.py). `null` allows every move. */
-export type StatusFlow = Partial<Record<TaskStatus, TaskStatus[]>>;
+/**
+ * Status -> the statuses a task may move to next -> whether that move asks for a comment (see StatusFlow in
+ * backend/schemas.py). `null` allows every move without asking.
+ */
+export type StatusFlow = Partial<Record<TaskStatus, Partial<Record<TaskStatus, boolean>>>>;
 
 /**
  * The statuses a task in `current` may move to under a space's status flow, `current` included, in workflow order.
@@ -77,7 +80,12 @@ export type StatusFlow = Partial<Record<TaskStatus, TaskStatus[]>>;
 export function allowedStatuses(flow: StatusFlow | null | undefined, current: TaskStatus): TaskStatus[] {
   const targets = flow?.[current];
   if (!targets) return STATUSES;
-  return STATUSES.filter((s) => s === current || targets.includes(s));
+  return STATUSES.filter((s) => s === current || s in targets);
+}
+
+/** Whether the space's status flow asks for a comment when a task moves from `from` to `to`. */
+export function commentRequested(flow: StatusFlow | null | undefined, from: TaskStatus, to: TaskStatus): boolean {
+  return from !== to && flow?.[from]?.[to] === true;
 }
 
 /** The text of the comment left when a status change is explained (see StatusChangeDialog). */
@@ -86,7 +94,7 @@ export function statusChangeComment(from: TaskStatus, to: TaskStatus, comment: s
 }
 
 export function boardColumn(status: TaskStatus): TaskStatus {
-  return status === "blocked" ? "in_progress" : status;
+  return status;
 }
 
 const MS_PER_DAY = 86_400_000;

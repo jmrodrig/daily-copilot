@@ -3,10 +3,13 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState, t
 import { errorDetail, getJson } from "./api";
 import type { StatusFlow } from "./tasks";
 
-export type CustomFieldType = "text" | "number" | "date" | "checkbox";
+export type CustomFieldType = "text" | "number" | "date" | "checkbox" | "dropdown";
 
-/** One custom task field of a space; tasks keep its value under `id` (see CustomFieldDef in backend/schemas.py). */
-export type CustomFieldDef = { id: string; name: string; type: CustomFieldType };
+/**
+ * One custom task field of a space; tasks keep its value under `id` (see CustomFieldDef in backend/schemas.py).
+ * `options` are a dropdown's choices, in order; empty for the other types.
+ */
+export type CustomFieldDef = { id: string; name: string; type: CustomFieldType; options: string[] };
 
 // GET /api/spaces (see Space in backend/schemas.py).
 export type Space = { id: number; name: string; status_flow: StatusFlow | null; custom_fields_schema: CustomFieldDef[] };

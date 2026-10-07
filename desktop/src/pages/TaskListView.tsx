@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { formatDay, NEUTRAL_TAG, NoteLink, Tag, TagPills } from "../components/TriageBoard";
 import { message } from "../lib/api";
-import type { CustomFieldDef } from "../lib/space";
+import { byName, personLabel, PersonBadge, usePeople, type Person } from "../lib/people";
+import { useSpace, type CustomFieldDef } from "../lib/space";
 import {
   allowedStatuses,
   bulkUpdateTasks,
@@ -58,6 +59,8 @@ export default function TaskListView({
   onUpdated: () => void;
 }) {
   const { taskId, openTask } = useTaskPanel();
+  const people = usePeople(useSpace().spaceId);
+  const me = people.find((p) => p.is_me)?.name;
   const [filter, setFilter] = useState("");
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [busy, setBusy] = useState(false);
@@ -113,6 +116,22 @@ export default function TaskListView({
     }
   }
 
+  /** Change one task's dropdown field from its cell (`null` clears it). */
+  async function setField(task: TaskItem, field: CustomFieldDef, value: string | null) {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      await bulkUpdateTasks([task.id], { custom_fields: { [field.id]: value } });
+      onUpdated();
+    } catch (err: unknown) {
+      setError(`Could not change ${field.name} of "${task.title}": ${message(err)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <div className="flex flex-col gap-2">
       <div className="flex flex-wrap items-center gap-2">
@@ -134,7 +153,9 @@ export default function TaskListView({
         )}
       </div>
 
-      {chosen.length > 0 && <BulkToolbar tasks={chosen} flow={flow} busy={busy} onApply={apply} onClear={() => setSelected(new Set())} />}
+      {chosen.length > 0 && (
+        <BulkToolbar tasks={chosen} flow={flow} people={people} busy={busy} onApply={apply} onClear={() => setSelected(new Set())} />
+      )}
       {error && <p className="text-[15px] text-accent">{error}</p>}
 
       {shown.length === 0 ? (
@@ -195,13 +216,29 @@ export default function TaskListView({
                         STATUS_LABELS[task.status]
                       )}
                     </td>
-                    <td className="truncate px-2 py-1.5">{task.assignee ?? "—"}</td>
+                    <td className="truncate px-2 py-1.5">
+                      {(() => {
+                        if (!task.assignee) return "—";
+                        const person = people.find((p) => p.name === task.assignee);
+                        if (person) return <PersonBadge person={person} />;
+                        return task.assignee === me ? personLabel({ name: task.assignee, is_me: true }) : task.assignee;
+                      })()}
+                    </td>
                     <td className={`px-2 py-1.5 font-mono text-xs ${overdue ? "text-accent" : "text-text-muted"}`}>
                       {task.deadline ? formatDay(task.deadline) : "—"}
                     </td>
                     {customFields.map((field) => (
                       <td key={field.id} className="whitespace-nowrap px-2 py-1.5 text-text-muted">
-                        {formatValue(field, task.custom_fields[field.id])}
+                        {field.type === "dropdown" ? (
+                          <DropdownCell
+                            field={field}
+                            task={task}
+                            disabled={busy}
+                            onChange={(value) => setField(task, field, value)}
+                          />
+                        ) : (
+                          formatValue(field, task.custom_fields[field.id])
+                        )}
                       </td>
                     ))}
                   </tr>
@@ -215,6 +252,39 @@ export default function TaskListView({
   );
 }
 
+/** A dropdown custom field, changed right in the table. A value whose option was removed stays shown until changed. */
+function DropdownCell({
+  field,
+  task,
+  disabled,
+  onChange,
+}: {
+  field: CustomFieldDef;
+  task: TaskItem;
+  disabled: boolean;
+  onChange: (value: string | null) => void;
+}) {
+  const value = task.custom_fields[field.id];
+  const current = typeof value === "string" ? value : "";
+  return (
+    <select
+      aria-label={`${field.name} of ${task.title}`}
+      value={current}
+      disabled={disabled}
+      onChange={(e) => onChange(e.target.value || null)}
+      className={`field w-auto py-0.5 text-[13px] ${current ? "text-text-primary" : "text-text-muted"}`}
+    >
+      <option value="">—</option>
+      {field.options.map((option) => (
+        <option key={option} value={option}>
+          {option}
+        </option>
+      ))}
+      {current && !field.options.includes(current) && <option value={current}>{current}</option>}
+    </select>
+  );
+}
+
 function SelectAll({ checked, indeterminate, onChange }: { checked: boolean; indeterminate: boolean; onChange: () => void }) {
   const ref = useRef<HTMLInputElement>(null);
   useEffect(() => {
@@ -223,30 +293,28 @@ function SelectAll({ checked, indeterminate, onChange }: { checked: boolean; ind
   return <input ref={ref} type="checkbox" aria-label="Select all shown tasks" checked={checked} onChange={onChange} />;
 }
 
+// The bulk assignee picker's "Nobody" choice: a value no person's name can be (names are trimmed).
+const UNASSIGN = " unassign";
+
 /** Actions for the ticked tasks. Only statuses the space's status flow allows for every one of them are offered. */
 function BulkToolbar({
   tasks,
   flow,
+  people,
   busy,
   onApply,
   onClear,
 }: {
   tasks: TaskItem[];
   flow: StatusFlow | null;
+  people: Person[];
   busy: boolean;
   onApply: (updates: TaskPatch, what: string) => void;
   onClear: () => void;
 }) {
-  const [assignee, setAssignee] = useState("");
   const statuses = STATUSES.filter((s) => tasks.every((t) => allowedStatuses(flow, t.status).includes(s)));
   const canArchive = statuses.includes("archived") && tasks.some((t) => t.status !== "archived");
-
-  function assign(event: FormEvent) {
-    event.preventDefault();
-    const name = assignee.trim();
-    onApply({ assignee: name || null }, name ? `Assigned to ${name}` : "Unassigned");
-    setAssignee("");
-  }
+  const assignees = [...people].sort((a, b) => Number(b.is_me) - Number(a.is_me) || byName(a, b));
 
   return (
     <div
@@ -272,18 +340,26 @@ function BulkToolbar({
           </option>
         ))}
       </select>
-      <form onSubmit={assign} className="flex items-center gap-1.5">
-        <input
-          aria-label="Assign the selected tasks to"
-          value={assignee}
-          onChange={(e) => setAssignee(e.target.value)}
-          placeholder="Assign to… (empty: nobody)"
-          className="field w-48 py-1 text-[13px]"
-        />
-        <button type="submit" className="btn min-h-7 px-2.5 text-xs" disabled={busy}>
-          Assign
-        </button>
-      </form>
+      <select
+        aria-label="Assign the selected tasks to"
+        value=""
+        disabled={busy}
+        onChange={(e) => {
+          const choice = e.target.value;
+          if (choice === UNASSIGN) onApply({ assignee: null }, "Unassigned");
+          else if (choice) onApply({ assignee: choice }, `Assigned to ${choice}`);
+        }}
+        title={people.length ? undefined : "Add people on the People page to assign tasks to them"}
+        className="field w-auto py-1 text-[13px]"
+      >
+        <option value="">Assign to…</option>
+        {assignees.map((person) => (
+          <option key={person.id} value={person.name}>
+            {personLabel(person)}
+          </option>
+        ))}
+        <option value={UNASSIGN}>Nobody (unassign)</option>
+      </select>
       <button
         type="button"
         className="btn min-h-7 px-2.5 text-xs"

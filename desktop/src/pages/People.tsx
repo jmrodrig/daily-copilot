@@ -2,18 +2,8 @@ import { useEffect, useState, type FormEvent } from "react";
 
 import PageHeader from "../components/PageHeader";
 import { getJson, message, sendJson } from "../lib/api";
+import { announcePeopleChange, ASSIGNEE_MAX, Avatar, byName, initials, type Person } from "../lib/people";
 import { useSpace } from "../lib/space";
-
-// Shape of GET /api/people (see Person in backend/schemas.py).
-type Person = {
-  id: number;
-  space_id: number;
-  name: string;
-  email: string | null;
-  company: string | null;
-  is_external: boolean;
-  avatar_url: string | null;
-};
 
 type PersonDraft = Pick<Person, "name" | "is_external"> & { email: string; company: string; avatar_url: string };
 
@@ -21,19 +11,6 @@ const EMPTY_DRAFT: PersonDraft = { name: "", email: "", company: "", is_external
 
 type State = { state: "loading" } | { state: "ok"; people: Person[] } | { state: "error"; message: string };
 type Show = "all" | "internal" | "external";
-
-/** Up to two initials: the first letters of the first and last words of the name. */
-function initials(name: string): string {
-  const words = name.trim().split(/\s+/).filter(Boolean);
-  if (words.length === 0) return "?";
-  const first = [...words[0]][0] ?? "";
-  const last = words.length > 1 ? ([...words[words.length - 1]][0] ?? "") : "";
-  return (first + last).toUpperCase();
-}
-
-function byName(a: Person, b: Person) {
-  return a.name.localeCompare(b.name, undefined, { sensitivity: "base" }) || a.id - b.id;
-}
 
 /** The space's People directory: colleagues and external contacts (clients, suppliers). */
 export default function People() {
@@ -55,11 +32,26 @@ export default function People() {
     return () => controller.abort();
   }, [spaceId]);
 
-  /** Put a created or edited person in the list, keeping it sorted by name. */
+  /** Put a created or edited person in the list, keeping it sorted by name. Only one person can be "me". */
   function store(person: Person) {
-    setPeople((prev) =>
-      prev.state === "ok" ? { state: "ok", people: [...prev.people.filter((p) => p.id !== person.id), person].sort(byName) } : prev,
-    );
+    setPeople((prev) => {
+      if (prev.state !== "ok") return prev;
+      const others = prev.people.filter((p) => p.id !== person.id).map((p) => (person.is_me && p.is_me ? { ...p, is_me: false } : p));
+      return { state: "ok", people: [...others, person].sort(byName) };
+    });
+    announcePeopleChange();
+  }
+
+  /** Mark (or unmark) a person as the app's user. */
+  async function setMe(person: Person, isMe: boolean) {
+    setError(null);
+    const { space_id, name, email, company, is_external, avatar_url } = person;
+    const body = { space_id, name, email, company, is_external, avatar_url, is_me: isMe };
+    try {
+      store(await sendJson<Person>("PUT", `/api/people/${person.id}`, body));
+    } catch (err: unknown) {
+      setError(`Could not update ${person.name}: ${message(err)}`);
+    }
   }
 
   async function remove(person: Person) {
@@ -69,6 +61,7 @@ export default function People() {
       await sendJson("DELETE", `/api/people/${person.id}`);
       setPeople((prev) => (prev.state === "ok" ? { state: "ok", people: prev.people.filter((p) => p.id !== person.id) } : prev));
       if (editing?.id === person.id) setEditing(null);
+      announcePeopleChange();
     } catch (err: unknown) {
       setError(`Could not remove ${person.name}: ${message(err)}`);
     }
@@ -120,7 +113,13 @@ export default function People() {
                   />
                 </li>
               ) : (
-                <PersonCard key={person.id} person={person} onEdit={() => setEditing(person)} onRemove={() => remove(person)} />
+                <PersonCard
+                  key={person.id}
+                  person={person}
+                  onEdit={() => setEditing(person)}
+                  onRemove={() => remove(person)}
+                  onMe={(isMe) => setMe(person, isMe)}
+                />
               ),
             )}
           </ul>
@@ -129,32 +128,31 @@ export default function People() {
   );
 }
 
-function Avatar({ person }: { person: Pick<Person, "name" | "avatar_url" | "is_external"> }) {
-  const [broken, setBroken] = useState(false);
-  useEffect(() => setBroken(false), [person.avatar_url]);
-  const size = "h-11 w-11 shrink-0 rounded-full";
-  if (person.avatar_url && !broken) {
-    return <img src={person.avatar_url} alt="" onError={() => setBroken(true)} className={`${size} border border-border-default object-cover`} />;
-  }
+function PersonCard({
+  person,
+  onEdit,
+  onRemove,
+  onMe,
+}: {
+  person: Person;
+  onEdit: () => void;
+  onRemove: () => void;
+  onMe: (isMe: boolean) => void;
+}) {
   return (
-    <span
-      aria-hidden
-      className={`${size} flex items-center justify-center border font-mono text-[15px] font-semibold ${
-        person.is_external ? "border-accent/50 bg-accent/[0.12] text-accent-soft" : "border-border-strong bg-surface-panel text-text-secondary"
-      }`}
+    <li
+      aria-label={person.is_me ? `${person.name} (Me)` : person.name}
+      className={`group flex gap-3 rounded-lg border bg-surface-raised p-3 ${person.is_me ? "border-accent/70" : "border-border-default"}`}
     >
-      {initials(person.name)}
-    </span>
-  );
-}
-
-function PersonCard({ person, onEdit, onRemove }: { person: Person; onEdit: () => void; onRemove: () => void }) {
-  return (
-    <li className="group flex gap-3 rounded-lg border border-border-default bg-surface-raised p-3">
       <Avatar person={person} />
       <div className="flex min-w-0 flex-1 flex-col gap-0.5">
         <div className="flex items-center gap-2">
           <span className="truncate text-[15px] font-semibold text-text-primary">{person.name}</span>
+          {person.is_me && (
+            <span className="shrink-0 rounded border border-accent/60 bg-accent/15 px-1.5 py-px font-mono text-[12px] uppercase leading-4 text-accent">
+              ★ Me
+            </span>
+          )}
           <span
             className={`shrink-0 rounded border px-1.5 py-px font-mono text-[12px] uppercase leading-4 ${
               person.is_external ? "border-accent/60 text-accent" : "border-project-neutral/60 text-text-muted"
@@ -177,6 +175,14 @@ function PersonCard({ person, onEdit, onRemove }: { person: Person; onEdit: () =
           </button>
           <button type="button" className="hover:text-accent" onClick={onRemove}>
             Remove
+          </button>
+          <button
+            type="button"
+            className="hover:text-text-primary"
+            title={person.is_me ? undefined : "Mark this person as you: assignee pickers show them as (Me)"}
+            onClick={() => onMe(!person.is_me)}
+          >
+            {person.is_me ? "This isn't me" : "This is me"}
           </button>
         </span>
       </div>
@@ -217,6 +223,7 @@ function PersonForm({
       company: draft.company.trim() || null,
       is_external: draft.is_external,
       avatar_url: draft.avatar_url.trim() || null,
+      is_me: person?.is_me ?? false, // a PUT replaces every detail: keep who is "me"
     };
     try {
       const saved = person
@@ -247,7 +254,7 @@ function PersonForm({
           value={draft.name}
           onChange={(e) => set({ name: e.target.value })}
           placeholder="Full name"
-          maxLength={128}
+          maxLength={ASSIGNEE_MAX}
           className="field py-1.5"
         />
       </label>

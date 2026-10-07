@@ -118,18 +118,36 @@ function useSaver<T>(onSave: (value: T) => Promise<unknown>) {
 
 // --- Status flow --------------------------------------------------------------------
 
-type Matrix = Record<TaskStatus, TaskStatus[]>;
+/** A move in the matrix: forbidden, allowed, or allowed but asking for a comment (see StatusChangeDialog). */
+type Move = "blocked" | "allowed" | "comment";
+type Matrix = Record<TaskStatus, Partial<Record<TaskStatus, Move>>>;
+
+const NEXT_MOVE: Record<Move, Move> = { blocked: "allowed", allowed: "comment", comment: "blocked" };
+const MOVE_LABELS: Record<Move, string> = { blocked: "not allowed", allowed: "allowed", comment: "allowed, asks for a comment" };
 
 function matrixOf(flow: StatusFlow | null): Matrix {
-  return Object.fromEntries(STATUSES.map((from) => [from, flow?.[from] ?? STATUSES.filter((to) => to !== from)])) as Matrix;
+  return Object.fromEntries(
+    STATUSES.map((from) => {
+      const targets = flow?.[from];
+      const moves = STATUSES.filter((to) => to !== from).map((to) => {
+        const move: Move = !targets ? "allowed" : !(to in targets) ? "blocked" : targets[to] ? "comment" : "allowed";
+        return [to, move];
+      });
+      return [from, Object.fromEntries(moves)];
+    }),
+  ) as Matrix;
 }
 
-/** The flow to store: a status that may move anywhere is left out (unrestricted); `null` when nothing is restricted. */
+/**
+ * The flow to store: a status that may move anywhere without a comment is left out (unrestricted); `null` when
+ * nothing is restricted or asks for a comment.
+ */
 function flowOf(matrix: Matrix): StatusFlow | null {
   const flow: StatusFlow = {};
   for (const from of STATUSES) {
-    const targets = STATUSES.filter((to) => to !== from && matrix[from].includes(to));
-    if (targets.length < STATUSES.length - 1) flow[from] = targets;
+    const moves = STATUSES.filter((to) => to !== from).map((to) => [to, matrix[from][to] ?? "allowed"] as const);
+    if (moves.every(([, move]) => move === "allowed")) continue;
+    flow[from] = Object.fromEntries(moves.filter(([, move]) => move !== "blocked").map(([to, move]) => [to, move === "comment"]));
   }
   return Object.keys(flow).length ? flow : null;
 }
@@ -139,12 +157,9 @@ function StatusFlowEditor({ space, onSave }: { space: Space; onSave: (flow: Stat
   const { save, saving, status, touched } = useSaver(onSave);
   const dirty = JSON.stringify(flowOf(matrix)) !== JSON.stringify(flowOf(matrixOf(space.status_flow)));
 
-  function toggle(from: TaskStatus, to: TaskStatus) {
+  function cycle(from: TaskStatus, to: TaskStatus) {
     touched();
-    setMatrix((prev) => ({
-      ...prev,
-      [from]: prev[from].includes(to) ? prev[from].filter((s) => s !== to) : [...prev[from], to],
-    }));
+    setMatrix((prev) => ({ ...prev, [from]: { ...prev[from], [to]: NEXT_MOVE[prev[from][to] ?? "allowed"] } }));
   }
 
   return (
@@ -152,8 +167,9 @@ function StatusFlowEditor({ space, onSave }: { space: Space; onSave: (flow: Stat
       <div>
         <h2 className="text-base font-semibold">Status flow</h2>
         <p className="mt-1 text-[15px] text-text-muted">
-          Which statuses a task may move to from each status. Untick a box to forbid that move; status pickers then only
-          offer the allowed ones. Everything ticked means no restrictions.
+          Which statuses a task may move to from each status. Click a cell to cycle it: allowed (✓), allowed but asking
+          for a comment (✓ 💬), not allowed (blank). Status pickers only offer the allowed moves, and only moves marked 💬
+          ask for a comment.
         </p>
       </div>
       <div className="overflow-x-auto">
@@ -174,20 +190,36 @@ function StatusFlowEditor({ space, onSave }: { space: Space; onSave: (flow: Stat
                 <th scope="row" className="whitespace-nowrap px-2 py-1.5 text-left font-medium text-text-secondary">
                   {STATUS_LABELS[from]}
                 </th>
-                {STATUSES.map((to) => (
-                  <td key={to} className="px-2 py-1.5 text-center">
-                    {from === to ? (
-                      <span className="text-text-muted">—</span>
-                    ) : (
-                      <input
-                        type="checkbox"
-                        aria-label={`Allow ${STATUS_LABELS[from]} → ${STATUS_LABELS[to]}`}
-                        checked={matrix[from].includes(to)}
-                        onChange={() => toggle(from, to)}
-                      />
-                    )}
-                  </td>
-                ))}
+                {STATUSES.map((to) => {
+                  if (from === to) {
+                    return (
+                      <td key={to} className="px-2 py-1.5 text-center">
+                        <span className="text-text-muted">—</span>
+                      </td>
+                    );
+                  }
+                  const move = matrix[from][to] ?? "allowed";
+                  const label = `${STATUS_LABELS[from]} → ${STATUS_LABELS[to]}: ${MOVE_LABELS[move]}`;
+                  return (
+                    <td key={to} className="px-1 py-1 text-center">
+                      <button
+                        type="button"
+                        aria-label={label}
+                        title={`${label} (click to change)`}
+                        data-move={move}
+                        onClick={() => cycle(from, to)}
+                        className={`inline-flex h-7 min-w-11 items-center justify-center gap-0.5 rounded-md border px-1.5 ${
+                          move === "blocked"
+                            ? "border-border-default text-text-muted hover:border-border-strong"
+                            : "border-accent/50 bg-accent/10 text-text-primary hover:border-accent"
+                        }`}
+                      >
+                        {move !== "blocked" && <span aria-hidden>✓</span>}
+                        {move === "comment" && <span aria-hidden>💬</span>}
+                      </button>
+                    </td>
+                  );
+                })}
               </tr>
             ))}
           </tbody>
@@ -215,7 +247,18 @@ function StatusFlowEditor({ space, onSave }: { space: Space; onSave: (flow: Stat
 
 // --- Custom fields ------------------------------------------------------------------
 
-const FIELD_TYPES: Record<CustomFieldType, string> = { text: "Text", number: "Number", date: "Date", checkbox: "Checkbox" };
+const FIELD_TYPES: Record<CustomFieldType, string> = {
+  text: "Text",
+  number: "Number",
+  date: "Date",
+  checkbox: "Checkbox",
+  dropdown: "Dropdown",
+};
+
+/** A dropdown's options typed as comma-separated values, trimmed and without blanks or repeats. */
+function parseOptions(text: string): string[] {
+  return [...new Set(text.split(",").map((o) => o.trim()).filter(Boolean))];
+}
 
 /** A stable id for a new field: its name as a slug, numbered if taken. */
 function fieldId(name: string, taken: Set<string>): string {
@@ -232,25 +275,46 @@ function fieldId(name: string, taken: Set<string>): string {
   return id;
 }
 
+function optionTextsOf(fields: CustomFieldDef[]): Record<string, string> {
+  return Object.fromEntries(fields.map((f) => [f.id, f.options.join(", ")]));
+}
+
 function CustomFieldsEditor({ space, onSave }: { space: Space; onSave: (fields: CustomFieldDef[]) => Promise<unknown> }) {
   const [fields, setFields] = useState(space.custom_fields_schema);
   const [name, setName] = useState("");
   const [type, setType] = useState<CustomFieldType>("text");
+  const [options, setOptions] = useState("");
+  // Each dropdown's options as typed (comma-separated), so a trailing comma or space survives while typing.
+  const [optionTexts, setOptionTexts] = useState<Record<string, string>>(() => optionTextsOf(space.custom_fields_schema));
   const { save, saving, status, touched } = useSaver(onSave);
   const dirty = JSON.stringify(fields) !== JSON.stringify(space.custom_fields_schema);
-  const valid = fields.every((f) => f.name.trim());
+  const valid = fields.every((f) => f.name.trim() && (f.type !== "dropdown" || f.options.length > 0));
+  const canAdd = name.trim() !== "" && (type !== "dropdown" || parseOptions(options).length > 0);
 
   function add(event: FormEvent) {
     event.preventDefault();
-    if (!name.trim()) return;
+    if (!canAdd) return;
     touched();
-    setFields((prev) => [...prev, { id: fieldId(name, new Set(prev.map((f) => f.id))), name: name.trim(), type }]);
+    const id = fieldId(name, new Set(fields.map((f) => f.id)));
+    const choices = type === "dropdown" ? parseOptions(options) : [];
+    setFields((prev) => [...prev, { id, name: name.trim(), type, options: choices }]);
+    setOptionTexts((prev) => ({ ...prev, [id]: choices.join(", ") }));
     setName("");
+    setOptions("");
   }
 
   function update(id: string, change: Partial<CustomFieldDef>) {
     touched();
     setFields((prev) => prev.map((f) => (f.id === id ? { ...f, ...change } : f)));
+  }
+
+  function changeType(field: CustomFieldDef, next: CustomFieldType) {
+    update(field.id, { type: next, options: next === "dropdown" ? parseOptions(optionTexts[field.id] ?? "") : [] });
+  }
+
+  function changeOptions(field: CustomFieldDef, text: string) {
+    setOptionTexts((prev) => ({ ...prev, [field.id]: text }));
+    update(field.id, { options: parseOptions(text) });
   }
 
   function remove(field: CustomFieldDef) {
@@ -273,52 +337,74 @@ function CustomFieldsEditor({ space, onSave }: { space: Space; onSave: (fields: 
           {fields.map((field) => {
             const saved = space.custom_fields_schema.some((f) => f.id === field.id);
             return (
-              <li key={field.id} className="flex items-center gap-2">
-                <input
-                  aria-label={`Name of ${field.name || "field"}`}
-                  value={field.name}
-                  onChange={(e) => update(field.id, { name: e.target.value })}
-                  maxLength={64}
-                  className="field flex-1 py-1.5"
-                />
-                <select
-                  aria-label={`Type of ${field.name || "field"}`}
-                  value={field.type}
-                  // A saved field's values were stored for its type, so only new fields can change it.
-                  disabled={saved}
-                  title={saved ? "The type of a saved field can't change" : undefined}
-                  onChange={(e) => update(field.id, { type: e.target.value as CustomFieldType })}
-                  className="field w-32 py-1.5"
-                >
-                  {Object.entries(FIELD_TYPES).map(([value, label]) => (
-                    <option key={value} value={value}>
-                      {label}
-                    </option>
-                  ))}
-                </select>
-                <button type="button" className="btn min-h-9 px-3 text-xs" onClick={() => remove(field)}>
-                  Remove
-                </button>
+              <li key={field.id} className="flex flex-col gap-1.5">
+                <div className="flex items-center gap-2">
+                  <input
+                    aria-label={`Name of ${field.name || "field"}`}
+                    value={field.name}
+                    onChange={(e) => update(field.id, { name: e.target.value })}
+                    maxLength={64}
+                    className="field flex-1 py-1.5"
+                  />
+                  <select
+                    aria-label={`Type of ${field.name || "field"}`}
+                    value={field.type}
+                    // A saved field's values were stored for its type, so only new fields can change it.
+                    disabled={saved}
+                    title={saved ? "The type of a saved field can't change" : undefined}
+                    onChange={(e) => changeType(field, e.target.value as CustomFieldType)}
+                    className="field w-32 py-1.5"
+                  >
+                    {Object.entries(FIELD_TYPES).map(([value, label]) => (
+                      <option key={value} value={value}>
+                        {label}
+                      </option>
+                    ))}
+                  </select>
+                  <button type="button" className="btn min-h-9 px-3 text-xs" onClick={() => remove(field)}>
+                    Remove
+                  </button>
+                </div>
+                {field.type === "dropdown" && (
+                  <input
+                    aria-label={`Options of ${field.name || "field"}`}
+                    value={optionTexts[field.id] ?? field.options.join(", ")}
+                    onChange={(e) => changeOptions(field, e.target.value)}
+                    placeholder="Options, separated by commas, e.g. North yard, South yard"
+                    className={`field py-1.5 ${field.options.length === 0 ? "border-accent" : ""}`}
+                  />
+                )}
               </li>
             );
           })}
         </ul>
       )}
-      <form onSubmit={add} className="flex items-end gap-2 border-t border-border-default pt-3">
-        <label className="flex flex-1 flex-col gap-1.5">
-          <span className="text-[13px] font-semibold tracking-[0.08em] text-text-muted">NEW FIELD</span>
-          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Hull number" maxLength={64} className="field py-1.5" />
-        </label>
-        <select aria-label="Type of the new field" value={type} onChange={(e) => setType(e.target.value as CustomFieldType)} className="field w-32 py-1.5">
-          {Object.entries(FIELD_TYPES).map(([value, label]) => (
-            <option key={value} value={value}>
-              {label}
-            </option>
-          ))}
-        </select>
-        <button type="submit" className="btn min-h-9" disabled={!name.trim()}>
-          Add
-        </button>
+      <form onSubmit={add} className="flex flex-col gap-2 border-t border-border-default pt-3">
+        <div className="flex items-end gap-2">
+          <label className="flex flex-1 flex-col gap-1.5">
+            <span className="text-[13px] font-semibold tracking-[0.08em] text-text-muted">NEW FIELD</span>
+            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Hull number" maxLength={64} className="field py-1.5" />
+          </label>
+          <select aria-label="Type of the new field" value={type} onChange={(e) => setType(e.target.value as CustomFieldType)} className="field w-32 py-1.5">
+            {Object.entries(FIELD_TYPES).map(([value, label]) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
+          </select>
+          <button type="submit" className="btn min-h-9" disabled={!canAdd}>
+            Add
+          </button>
+        </div>
+        {type === "dropdown" && (
+          <input
+            aria-label="Options of the new field"
+            value={options}
+            onChange={(e) => setOptions(e.target.value)}
+            placeholder="Options, separated by commas, e.g. North yard, South yard"
+            className="field py-1.5"
+          />
+        )}
       </form>
       {status}
       <div className="flex gap-2">
@@ -337,6 +423,7 @@ function CustomFieldsEditor({ space, onSave }: { space: Space; onSave: (fields: 
             onClick={() => {
               touched();
               setFields(space.custom_fields_schema);
+              setOptionTexts(optionTextsOf(space.custom_fields_schema));
             }}
           >
             Revert

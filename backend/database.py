@@ -47,7 +47,8 @@ def init_db(bind: Engine = engine) -> None:
 
 
 def _add_missing_columns(bind: Engine) -> None:
-    """Add nullable columns introduced after a table was created (e.g. `deleted_at`).
+    """Add columns introduced after a table was created (e.g. `deleted_at`): nullable ones, or NOT NULL
+    ones with a `server_default` that fills the existing rows.
 
     `create_all` only creates missing tables, so databases from earlier phases need this.
     """
@@ -58,10 +59,16 @@ def _add_missing_columns(bind: Engine) -> None:
             for column in table.columns:
                 if column.name in existing:
                     continue
-                if not column.nullable:
-                    raise RuntimeError(f"Cannot add NOT NULL column {table.name}.{column.name} to an existing database")
                 column_type = column.type.compile(dialect=bind.dialect)
-                conn.execute(text(f'ALTER TABLE "{table.name}" ADD COLUMN "{column.name}" {column_type}'))
+                if column.nullable:
+                    constraint = ""
+                elif column.server_default is not None:
+                    default = column.server_default.arg
+                    default = default if isinstance(default, str) else default.compile(dialect=bind.dialect)
+                    constraint = f" NOT NULL DEFAULT {default}"
+                else:
+                    raise RuntimeError(f"Cannot add NOT NULL column {table.name}.{column.name} to an existing database")
+                conn.execute(text(f'ALTER TABLE "{table.name}" ADD COLUMN "{column.name}" {column_type}{constraint}'))
                 for index in table.indexes:
                     if [c.name for c in index.columns] == [column.name]:
                         index.create(conn, checkfirst=True)

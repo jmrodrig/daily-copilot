@@ -365,6 +365,12 @@ def _custom_value(field: schemas.CustomFieldDef, value: Any) -> Any:
             return date.fromisoformat(value.strip()).isoformat()
         except ValueError:
             pass
+    if field.type is kind.DROPDOWN and isinstance(value, str):
+        # A value whose option was since removed is kept until changed, but can't be chosen again.
+        if not value.strip():
+            return None
+        if value.strip() in field.options:
+            return value.strip()
     raise HTTPException(status_code=400, detail=f"Invalid value for the {field.type.value} field {field.name!r}: {value!r}")
 
 
@@ -1323,6 +1329,15 @@ def _get_person(db: Session, person_id: int) -> Person:
     return person
 
 
+def _only_me(db: Session, person: Person) -> None:
+    """If `person` is "me", nobody else in their space is any more."""
+    if not person.is_me:
+        return
+    others = select(Person).where(Person.space_id == person.space_id, Person.is_me.is_(True), Person.id != person.id)
+    for other in db.scalars(others):
+        other.is_me = False
+
+
 @app.get("/api/people")
 def list_people(space_id: int = spaces.DEFAULT_SPACE_ID, db: Session = Depends(get_db)) -> list[schemas.Person]:
     """The People directory of a space, by name."""
@@ -1337,6 +1352,8 @@ def create_person(request: schemas.PersonIn, db: Session = Depends(get_db)) -> s
     set_source(db, PEOPLE_SOURCE)
     person = Person(**request.model_dump())
     db.add(person)
+    db.flush()
+    _only_me(db, person)
     db.commit()
     return schemas.Person.model_validate(person, from_attributes=True)
 
@@ -1348,13 +1365,15 @@ def get_person(person_id: int, db: Session = Depends(get_db)) -> schemas.Person:
 
 @app.put("/api/people/{person_id}")
 def update_person(person_id: int, request: schemas.PersonIn, db: Session = Depends(get_db)) -> schemas.Person:
-    """Replace a person's details. A person can't move to another space."""
+    """Replace a person's details (`is_me` too: marking someone unmarks the rest of the space). A person
+    can't move to another space."""
     person = _get_person(db, person_id)
     if request.space_id != person.space_id:
         raise HTTPException(status_code=400, detail="A person can't move to another space")
     set_source(db, PEOPLE_SOURCE)
     for key, value in request.model_dump(exclude={"space_id"}).items():
         setattr(person, key, value)
+    _only_me(db, person)
     db.commit()
     return schemas.Person.model_validate(person, from_attributes=True)
 

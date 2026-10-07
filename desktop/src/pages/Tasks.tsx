@@ -6,6 +6,7 @@ import PageHeader from "../components/PageHeader";
 import { postStatusComment, useStatusChangePrompt } from "../components/StatusChangeDialog";
 import { formatDay, ME, NEUTRAL_TAG, NoteLink, PROJECT_TAG, Tag, TagPills } from "../components/TriageBoard";
 import { getJson, message, sendJson } from "../lib/api";
+import { AssigneeSelect, personLabel, PersonBadge, usePeople, type Person } from "../lib/people";
 import { useSpace } from "../lib/space";
 import {
   allowedStatuses,
@@ -228,6 +229,7 @@ function TaskBoard({
   actions?: (projects: ProjectOption[]) => ReactNode;
 }) {
   const { spaces } = useSpace();
+  const people = usePeople(spaceId);
   const [tasks, setTasks] = useState<State>({ state: "loading" });
   const [projects, setProjects] = useState<ProjectOption[]>([]);
   const [tags, setTags] = useState<string[]>([]);
@@ -301,7 +303,7 @@ function TaskBoard({
         setError(`The space's status flow doesn't allow "${task.title}" to move from ${STATUS_LABELS[task.status]} to ${STATUS_LABELS[status]}.`);
         return;
       }
-      const answer = await ask(task, status);
+      const answer = await ask(task, status, flow);
       if (answer) await patchTask(task, { status }, answer.comment);
     },
     [flow, ask, patchTask],
@@ -316,12 +318,14 @@ function TaskBoard({
     }),
   );
 
+  // The app's user: the person marked "me" on the People page, else the default name.
+  const me = people.find((p) => p.is_me)?.name ?? ME;
   const assignees = useMemo(() => {
-    const names = new Set<string>([ME]);
+    const names = new Set<string>([me, ...people.map((p) => p.name)]);
     if (tasks.state === "ok") tasks.tasks.forEach((t) => t.assignee && names.add(t.assignee));
     if (filters.assignee) names.add(filters.assignee);
-    return [...names].sort((a, b) => a.localeCompare(b));
-  }, [tasks, filters.assignee]);
+    return [...names].sort((a, b) => Number(b === me) - Number(a === me) || a.localeCompare(b));
+  }, [tasks, filters.assignee, people, me]);
 
   // A saved filter can point at a project this space no longer lists.
   const projectChoices =
@@ -373,7 +377,7 @@ function TaskBoard({
               <option value="">Unassigned</option>
               {assignees.map((name) => (
                 <option key={name} value={name}>
-                  {name}
+                  {personLabel({ name, is_me: name === me })}
                 </option>
               ))}
             </select>
@@ -405,6 +409,7 @@ function TaskBoard({
       <NewTaskForm
         spaceId={spaceId}
         projects={projects}
+        people={people}
         defaultProject={filters.project_id === null ? null : String(filters.project_id)}
         defaultStatus={viewType === "kanban" ? "todo" : "backlog"}
         onCreated={(task) =>
@@ -415,9 +420,9 @@ function TaskBoard({
       {error && <p className="text-[15px] text-accent">{error}</p>}
       {tasks.state === "loading" && <p className="text-[15px] text-text-muted">Loading tasks…</p>}
       {tasks.state === "error" && <p className="text-[15px] text-text-secondary">Could not load the tasks ({tasks.message}).</p>}
-      {visible && viewType === "kanban" && <Kanban tasks={visible} flow={flow} onStatus={changeStatus} />}
+      {visible && viewType === "kanban" && <Kanban tasks={visible} flow={flow} people={people} me={me} onStatus={changeStatus} />}
       {visible && viewType === "backlog" && (
-        <Backlog tasks={visible} projects={projects} flow={flow} onPatch={patchTask} onStatus={changeStatus} />
+        <Backlog tasks={visible} projects={projects} people={people} flow={flow} onPatch={patchTask} onStatus={changeStatus} />
       )}
       {visible && viewType === "gantt" && <TaskGantt tasks={visible} projects={projects} />}
       {visible && viewType === "list" && (
@@ -438,19 +443,21 @@ function TaskBoard({
 function NewTaskForm({
   spaceId,
   projects,
+  people,
   defaultProject,
   defaultStatus,
   onCreated,
 }: {
   spaceId: number;
   projects: ProjectOption[];
+  people: Person[];
   defaultProject: string | null;
   defaultStatus: TaskStatus;
   onCreated: (task: TaskItem) => void;
 }) {
   const [title, setTitle] = useState("");
   const [project, setProject] = useState(defaultProject ?? "");
-  const [assignee, setAssignee] = useState("");
+  const [assignee, setAssignee] = useState<string | null>(null);
   const [start, setStart] = useState("");
   const [due, setDue] = useState("");
   const [saving, setSaving] = useState(false);
@@ -468,7 +475,7 @@ function NewTaskForm({
         space_id: spaceId,
         title: title.trim(),
         project_id: project ? Number(project) : null,
-        assignee: assignee.trim() || null,
+        assignee,
         start_date: start || null,
         deadline: due || null,
         status: defaultStatus,
@@ -503,7 +510,7 @@ function NewTaskForm({
       </label>
       <label className="flex flex-col gap-1 text-[13px] text-text-muted">
         Assignee
-        <input value={assignee} onChange={(e) => setAssignee(e.target.value)} placeholder={ME} className="field w-28 py-1.5" />
+        <AssigneeSelect value={assignee} people={people} onChange={setAssignee} className="field w-40 py-1.5" />
       </label>
       <label className="flex flex-col gap-1 text-[13px] text-text-muted">
         Start
@@ -527,7 +534,7 @@ const DRAG_TYPE = "application/x-copilot-task";
 
 type OnPatch = (task: TaskItem, patch: Omit<TaskPatch, "custom_fields">) => void;
 
-function Kanban({ tasks, flow, onStatus }: { tasks: TaskItem[]; flow: StatusFlow | null; onStatus: OnStatus }) {
+function Kanban({ tasks, flow, people, me, onStatus }: { tasks: TaskItem[]; flow: StatusFlow | null; people: Person[]; me: string; onStatus: OnStatus }) {
   const [over, setOver] = useState<TaskStatus | null>(null);
   const byId = useMemo(() => new Map(tasks.map((t) => [t.id, t])), [tasks]);
 
@@ -564,7 +571,7 @@ function Kanban({ tasks, flow, onStatus }: { tasks: TaskItem[]; flow: StatusFlow
             </h3>
             <ul className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-2 pb-2">
               {column.map((task) => (
-                <KanbanCard key={task.id} task={task} flow={flow} onStatus={onStatus} />
+                <KanbanCard key={task.id} task={task} flow={flow} people={people} me={me} onStatus={onStatus} />
               ))}
             </ul>
           </section>
@@ -574,7 +581,7 @@ function Kanban({ tasks, flow, onStatus }: { tasks: TaskItem[]; flow: StatusFlow
   );
 }
 
-function KanbanCard({ task, flow, onStatus }: { task: TaskItem; flow: StatusFlow | null; onStatus: OnStatus }) {
+function KanbanCard({ task, flow, people, me, onStatus }: { task: TaskItem; flow: StatusFlow | null; people: Person[]; me: string; onStatus: OnStatus }) {
   const overdue = isOverdue(task);
   const { taskId, openTask } = useTaskPanel();
   const active = taskId === task.id;
@@ -631,7 +638,15 @@ function KanbanCard({ task, flow, onStatus }: { task: TaskItem; flow: StatusFlow
           ))}
         </select>
       </div>
-      {task.assignee && <div className="mt-1 text-[13px] text-text-muted">👤 {task.assignee}</div>}
+      {task.assignee && (
+        <div className="mt-1.5 text-[13px] text-text-muted">
+          {(() => {
+            const person = people.find((p) => p.name === task.assignee);
+            if (person) return <PersonBadge person={person} />;
+            return `👤 ${personLabel({ name: task.assignee, is_me: task.assignee === me })}`;
+          })()}
+        </div>
+      )}
     </li>
   );
 }
@@ -641,12 +656,14 @@ function KanbanCard({ task, flow, onStatus }: { task: TaskItem; flow: StatusFlow
 function Backlog({
   tasks,
   projects,
+  people,
   flow,
   onPatch,
   onStatus,
 }: {
   tasks: TaskItem[];
   projects: ProjectOption[];
+  people: Person[];
   flow: StatusFlow | null;
   onPatch: OnPatch;
   onStatus: OnStatus;
@@ -683,6 +700,7 @@ function Backlog({
                   key={task.id}
                   task={task}
                   projects={projects}
+                  people={people}
                   active={taskId === task.id}
                   onOpen={() => openTask(task.id)}
                   flow={flow}
@@ -701,6 +719,7 @@ function Backlog({
 function BacklogRow({
   task,
   projects,
+  people,
   active,
   onOpen,
   flow,
@@ -709,6 +728,7 @@ function BacklogRow({
 }: {
   task: TaskItem;
   projects: ProjectOption[];
+  people: Person[];
   active: boolean;
   onOpen: () => void;
   flow: StatusFlow | null;
@@ -776,42 +796,20 @@ function BacklogRow({
         </select>
       </td>
       <td className="px-2 py-1.5">
-        <AssigneeInput task={task} className={`${cell} w-full`} onPatch={onPatch} />
+        <AssigneeSelect
+          ariaLabel={`Assignee of ${task.title}`}
+          value={task.assignee}
+          people={people}
+          emptyLabel="—"
+          onChange={(assignee) => assignee !== task.assignee && onPatch(task, { assignee })}
+          className={`${cell} w-full`}
+        />
       </td>
       <td className="px-2 py-1.5 font-mono text-xs text-text-muted">{task.start_date ? formatDay(task.start_date) : "—"}</td>
       <td className={`px-2 py-1.5 font-mono text-xs ${overdue ? "text-accent" : "text-text-muted"}`}>
         {task.deadline ? formatDay(task.deadline) : "—"}
       </td>
     </tr>
-  );
-}
-
-/** Free-text assignee, saved on blur or Enter. */
-function AssigneeInput({
-  task,
-  className,
-  onPatch,
-}: {
-  task: TaskItem;
-  className: string;
-  onPatch: OnPatch;
-}) {
-  const [value, setValue] = useState(task.assignee ?? "");
-  useEffect(() => setValue(task.assignee ?? ""), [task.assignee]);
-  const save = () => {
-    const next = value.trim() || null;
-    if (next !== task.assignee) onPatch(task, { assignee: next });
-  };
-  return (
-    <input
-      aria-label={`Assignee of ${task.title}`}
-      value={value}
-      placeholder="—"
-      onChange={(e) => setValue(e.target.value)}
-      onBlur={save}
-      onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()}
-      className={className}
-    />
   );
 }
 
