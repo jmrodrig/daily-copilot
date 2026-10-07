@@ -26,6 +26,7 @@ export default defineConfig({
     }),
   ],
   server: {
+    allowedHosts: true,
     // The backend serves its routes under /api, except /health which lives at the root.
     proxy: {
       "/api": BACKEND,
