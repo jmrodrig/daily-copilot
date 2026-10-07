@@ -2,10 +2,7 @@
 @tailwind components;
 @tailwind utilities;
 
-/* The app is dark-only; pin the colour scheme so native controls and scrollbars match. */
-:root {
-  color-scheme: dark;
-}
+/* The colour scheme (light/dark, following the OS) comes from public/styles/brand.css. */
 
 html,
 body,

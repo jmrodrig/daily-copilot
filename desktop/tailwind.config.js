@@ -1,28 +1,49 @@
-import { readFileSync } from "node:fs";
-
-// Colours and fonts come from the shared design tokens so desktop and Android stay in sync.
-const tokens = JSON.parse(readFileSync(new URL("../shared/design-tokens.json", import.meta.url), "utf8"));
-const { colors, typography } = tokens;
-
-const fontStack = (value) => value.split(",").map((f) => f.trim());
+// Colours and fonts map to the brand CSS variables (public/styles/brand.css), which switch
+// between light and dark with the OS colour scheme.
+// color-mix keeps Tailwind's opacity modifiers (e.g. bg-accent/15) working on CSS variables.
+const brand = (name) => `color-mix(in srgb, var(--dc-${name}) calc(<alpha-value> * 100%), transparent)`;
 
 /** @type {import("tailwindcss").Config} */
 export default {
   content: ["./index.html", "./src/**/*.{ts,tsx}"],
-  darkMode: "class",
+  darkMode: "media",
   theme: {
     extend: {
       colors: {
-        background: colors.background,
-        surface: colors.surface,
-        border: colors.border,
-        text: colors.text,
-        accent: { ...colors.accent, DEFAULT: colors.accent.primary },
-        project: colors.project,
+        background: brand("bg"),
+        surface: {
+          raised: brand("surface"),
+          panel: brand("bg"),
+          active: brand("line"),
+          hover: "color-mix(in srgb, var(--dc-line) calc(<alpha-value> * 50%), transparent)",
+        },
+        border: {
+          default: brand("line"),
+          light: brand("line"),
+          strong: brand("muted"),
+        },
+        text: {
+          primary: brand("fg"),
+          secondary: brand("muted"),
+          muted: brand("stone-400"),
+          onAccent: brand("ink"),
+        },
+        accent: {
+          DEFAULT: brand("accent"),
+          primary: brand("accent"),
+          soft: brand("accent-text"),
+        },
+        project: {
+          c7801: "#6CB6EA",
+          r5301: "#B7A3F2",
+          p5002: "#56C8A8",
+          neutral: "#6B7A84",
+        },
       },
       fontFamily: {
-        sans: fontStack(typography.fontFamily.ui),
-        mono: fontStack(typography.fontFamily.mono),
+        sans: ["var(--dc-font-mono)"],
+        mono: ["var(--dc-font-mono)"],
+        display: ["var(--dc-font-display)"],
       },
       // Two pixels above Tailwind's defaults (12px / 14px) for readability.
       fontSize: {

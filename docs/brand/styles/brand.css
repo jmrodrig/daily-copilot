@@ -1,0 +1,69 @@
+/* Daily Copilot brand tokens. Import once, use the semantic vars (--dc-bg, --dc-fg, ...). */
+:root {
+  /* brand */
+  --dc-ink: #101820;
+  --dc-stone: #DCE0E2;
+  --dc-brass-light: #B07A1A;
+  --dc-brass-text: #8A5A0C;
+  --dc-brass-dark: #E0A94A;
+  --dc-stone-50: #F3F5F6;
+  --dc-stone-100: #E8EBED;
+  --dc-stone-200: #DCE0E2;
+  --dc-stone-300: #C4CBD0;
+  --dc-stone-400: #9AA5AD;
+  --dc-stone-500: #6F7B84;
+  --dc-stone-600: #4B5762;
+  --dc-stone-700: #2E3840;
+  --dc-stone-800: #18232D;
+  --dc-stone-900: #101820;
+  /* type */
+  --dc-font-display: "Cinzel", "Trajan Pro", Georgia, serif;
+  --dc-font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  color-scheme: light dark;
+}
+
+/* light (default) */
+:root,
+[data-theme="light"] {
+  --dc-bg: var(--dc-stone-50);
+  --dc-surface: #FFFFFF;
+  --dc-fg: var(--dc-ink);
+  --dc-muted: var(--dc-stone-600);
+  --dc-line: var(--dc-stone-300);
+  --dc-accent: var(--dc-brass-light);       /* fills, borders, icons */
+  --dc-accent-text: var(--dc-brass-text);   /* accent-coloured text */
+}
+
+/* dark: follows the OS unless data-theme="light" is set */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --dc-bg: var(--dc-ink);
+    --dc-surface: var(--dc-stone-800);
+    --dc-fg: var(--dc-stone-50);
+    --dc-muted: #AAB4BC;
+    --dc-line: #2E3A45;
+    --dc-accent: var(--dc-brass-dark);
+    --dc-accent-text: var(--dc-brass-dark);
+  }
+}
+[data-theme="dark"] {
+  --dc-bg: var(--dc-ink);
+  --dc-surface: var(--dc-stone-800);
+  --dc-fg: var(--dc-stone-50);
+  --dc-muted: #AAB4BC;
+  --dc-line: #2E3A45;
+  --dc-accent: var(--dc-brass-dark);
+  --dc-accent-text: var(--dc-brass-dark);
+}
+
+/* Inline logo: <svg class="dc-logo" ...> using mark-currentcolor.svg paths.
+   Strokes follow text colour, the top face takes the accent. */
+.dc-logo { color: var(--dc-fg); }
+.dc-logo .dc-top { fill: var(--dc-accent); }
+
+.dc-wordmark {
+  font-family: var(--dc-font-display);
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}

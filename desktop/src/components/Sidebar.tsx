@@ -358,7 +358,10 @@ export default function Sidebar({ onCollapse }: { onCollapse: () => void }) {
   return (
     <div className="flex h-full min-w-[200px] flex-col">
       <div className="flex items-center justify-between pb-2.5 pl-[18px] pr-3 pt-3.5">
-        <span className="text-[18px] font-semibold">Co-Pilot</span>
+        <span className="flex min-w-0 items-center gap-2.5">
+          <img src="/logo/mark-adaptive.svg" width="24" height="24" alt="" className="shrink-0" />
+          <span className="dc-wordmark truncate text-[15px]">Daily Copilot</span>
+        </span>
         <IconButton label="Collapse page tree" onClick={onCollapse} direction="left" />
       </div>
       <SpaceSwitcher />
