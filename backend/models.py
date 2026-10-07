@@ -97,6 +97,8 @@ class Project(Versioned, Base):
     code: Mapped[str] = mapped_column(String(32), unique=True, index=True)
     name: Mapped[str]
     description: Mapped[str] = mapped_column(default="")
+    # "#rrggbb" for its Gantt bars and pills; None uses the default swatch.
+    color: Mapped[str | None] = mapped_column(String(7), default=None)
     active: Mapped[bool] = mapped_column(default=True)
     created_at: Mapped[dt.datetime] = mapped_column(server_default=func.now())
 

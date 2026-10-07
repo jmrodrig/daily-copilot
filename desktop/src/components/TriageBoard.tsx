@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
 import { Link } from "react-router-dom";
 
+import { pillStyle } from "../lib/colors";
 import { notePath, useSpace } from "../lib/space";
 import { announceTaskChange, useTaskChanges, useTaskPanel } from "../lib/tasks";
 
@@ -296,12 +297,18 @@ function KindBadge({ isTask }: { isTask: boolean }) {
   );
 }
 
-export function Tag({ className, children }: { className: string; children: string }) {
+export function Tag({ className, style, title, children }: { className: string; style?: CSSProperties; title?: string; children: string }) {
   return (
-    <span className={`rounded border px-1.5 py-px font-mono text-[12px] uppercase leading-4 ${className}`}>
+    <span className={`rounded border px-1.5 py-px font-mono text-[12px] uppercase leading-4 ${className}`} style={style} title={title}>
       {children}
     </span>
   );
+}
+
+/** A project's code as a pill: in the project's own colour if set, else its built-in swatch. */
+export function ProjectTag({ code, color }: { code: string | null; color?: string | null }) {
+  if (code && color) return <Tag className="" style={pillStyle(color)}>{code}</Tag>;
+  return <Tag className={(code && PROJECT_TAG[code.toLowerCase()]) || NEUTRAL_TAG}>{code ?? "No project"}</Tag>;
 }
 
 /** A task's linked note: a page icon and the note's name, opening the note. */

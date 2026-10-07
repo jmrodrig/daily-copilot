@@ -13,6 +13,8 @@ export type TaskItem = {
   space_id: number;
   project_id: number | null;
   project_code: string | null;
+  /** The project's "#rrggbb" colour, if set. */
+  project_color: string | null;
   title: string;
   description: string;
   status: TaskStatus;
@@ -37,7 +39,10 @@ export type CustomFieldValue = string | number | boolean;
 /** Body of `POST /api/tasks`. */
 export type TaskCreate = Partial<Omit<TaskPatch, "project_id">> & { space_id: number; title: string; project_id?: number | null };
 
-export type ProjectOption = { id: number; code: string; name: string; folder_path: string | null };
+export type ProjectOption = { id: number; code: string; name: string; color: string | null; folder_path: string | null };
+
+/** Body of `PUT /api/projects/{id}`; `color: null` goes back to the default swatch. */
+export type ProjectUpdate = { name?: string; description?: string; color?: string | null };
 
 /** Fields of `PATCH /api/tasks/{id}` and of a bulk update's `updates`; the PATCH response is the plain task row. */
 export type TaskPatch = Partial<
@@ -108,7 +113,7 @@ export function isOverdue(task: TaskItem): boolean {
 }
 
 /**
- * Query string for `GET /api/tasks` and the task views: the space plus a view's Project/Assignee filters.
+ * Query string for `GET /api/tasks` and the task views: the space plus a view's filters, advanced ones included.
  * Archived tasks are left out unless `includeArchived`.
  */
 export function taskQuery(spaceId: number, filters: ViewFilters, includeArchived = false): string {
@@ -118,6 +123,11 @@ export function taskQuery(spaceId: number, filters: ViewFilters, includeArchived
   // An empty assignee asks for unassigned tasks.
   if (filters.assignee !== null) params.set("assignee", filters.assignee);
   if (filters.tag !== null) params.set("tag", filters.tag);
+  for (const [id, value] of Object.entries(filters.custom_fields)) params.append("cf", `${id}:${value}`);
+  if (filters.has_deadline !== null) params.set("has_deadline", String(filters.has_deadline));
+  if (filters.has_start_date !== null) params.set("has_start_date", String(filters.has_start_date));
+  if (filters.due_after !== null) params.set("due_after", filters.due_after);
+  if (filters.due_before !== null) params.set("due_before", filters.due_before);
   return params.toString();
 }
 

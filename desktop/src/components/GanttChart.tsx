@@ -1,4 +1,7 @@
-import type { ReactNode } from "react";
+import { useState, type CSSProperties, type ReactNode } from "react";
+
+import { tint, type HexColor } from "../lib/colors";
+import type { CustomFieldDef } from "../lib/space";
 
 // Shapes returned by GET /api/gantt (see backend/schemas.py).
 export type GanttTask = {
@@ -9,12 +12,16 @@ export type GanttTask = {
   completion_percent: number;
   status: "backlog" | "todo" | "in_progress" | "blocked" | "done" | "archived";
   is_milestone: boolean;
+  /** The task's custom field values, for colouring its bar by a dropdown field. */
+  custom_fields?: Record<string, unknown>;
 };
 
 export type GanttProject = {
   id: number;
   code: string;
   name: string;
+  /** "#rrggbb"; null falls back to the project's built-in swatch. */
+  color?: string | null;
   tasks: GanttTask[];
 };
 
@@ -23,18 +30,50 @@ const LABEL_W = 240;
 const MS_PER_DAY = 86_400_000;
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
+/** A class and/or inline style: built-in swatches are Tailwind classes, colours set by the user are inline. */
+type Paint = { className: string; style?: CSSProperties };
+type Swatch = { dot: Paint; fill: Paint; track: Paint };
+
 // Full class names so Tailwind can find them; the colours come from shared/design-tokens.json.
-type Swatch = { dot: string; fill: string; track: string };
 const SWATCHES: Record<string, Swatch> = {
-  c7801: { dot: "bg-project-c7801", fill: "bg-project-c7801", track: "border-project-c7801 bg-project-c7801/20" },
-  r5301: { dot: "bg-project-r5301", fill: "bg-project-r5301", track: "border-project-r5301 bg-project-r5301/20" },
-  p5002: { dot: "bg-project-p5002", fill: "bg-project-p5002", track: "border-project-p5002 bg-project-p5002/20" },
+  c7801: {
+    dot: { className: "bg-project-c7801" },
+    fill: { className: "bg-project-c7801" },
+    track: { className: "border-project-c7801 bg-project-c7801/20" },
+  },
+  r5301: {
+    dot: { className: "bg-project-r5301" },
+    fill: { className: "bg-project-r5301" },
+    track: { className: "border-project-r5301 bg-project-r5301/20" },
+  },
+  p5002: {
+    dot: { className: "bg-project-p5002" },
+    fill: { className: "bg-project-p5002" },
+    track: { className: "border-project-p5002 bg-project-p5002/20" },
+  },
 };
 const NEUTRAL: Swatch = {
-  dot: "bg-project-neutral",
-  fill: "bg-project-neutral",
-  track: "border-project-neutral bg-project-neutral/20",
+  dot: { className: "bg-project-neutral" },
+  fill: { className: "bg-project-neutral" },
+  track: { className: "border-project-neutral bg-project-neutral/20" },
 };
+
+function hexSwatch(color: HexColor): Swatch {
+  return {
+    dot: { className: "", style: { backgroundColor: color } },
+    fill: { className: "", style: { backgroundColor: color } },
+    track: { className: "", style: { borderColor: color, backgroundColor: tint(color, 0.2) } },
+  };
+}
+
+/** A project's swatch: its own colour if set, else the built-in one for its code, else neutral. */
+function projectSwatch(project: GanttProject): Swatch {
+  if (project.color) return hexSwatch(project.color);
+  return SWATCHES[project.code.toLowerCase()] ?? NEUTRAL;
+}
+
+/** Bars are coloured by their project, or by the option a task holds in one of the space's dropdown fields. */
+const BY_PROJECT = "project";
 
 /** Days since the epoch for a "YYYY-MM-DD" string, independent of the local time zone. */
 function toDay(iso: string): number {
@@ -70,13 +109,33 @@ function span(task: GanttTask): Span | null {
 /** Clicking a task opens it (in the task panel) when `onTaskClick` is given; `activeTaskId` is highlighted. */
 type TaskClick = { onTaskClick?: (id: number) => void; activeTaskId?: number | null };
 
-export default function GanttChart({ projects, onTaskClick, activeTaskId = null }: { projects: GanttProject[] } & TaskClick) {
+/**
+ * `customFields` are the space's custom fields: when some are dropdowns, a "Colour by" control offers to colour the
+ * bars by the option each task holds (options without a colour, and tasks without a value, are neutral).
+ */
+export default function GanttChart({
+  projects,
+  customFields = [],
+  onTaskClick,
+  activeTaskId = null,
+}: { projects: GanttProject[]; customFields?: CustomFieldDef[] } & TaskClick) {
   const today = todayDay();
   const spans = projects.flatMap((p) => p.tasks.map(span)).filter((s): s is Span => s !== null);
+  const dropdowns = customFields.filter((f) => f.type === "dropdown");
+  const [colorBy, setColorBy] = useState(BY_PROJECT);
+  // A field removed since it was picked goes back to the project colours.
+  const colorField = dropdowns.find((f) => f.id === colorBy) ?? null;
 
   if (projects.length === 0) {
     return <p className="text-sm text-text-secondary">No projects yet. Import a Gantt with cli_import.py.</p>;
   }
+
+  const barSwatch = (project: GanttProject, task: GanttTask): Swatch => {
+    if (!colorField) return projectSwatch(project);
+    const value = task.custom_fields?.[colorField.id];
+    const color = typeof value === "string" ? colorField.colors?.[value] : undefined;
+    return color ? hexSwatch(color) : NEUTRAL;
+  };
 
   // Timeline window: whole weeks around every dated task and today, with a week of breathing room.
   const first = weekStart(Math.min(today, ...spans.map((s) => s.start)));
@@ -87,6 +146,22 @@ export default function GanttChart({ projects, onTaskClick, activeTaskId = null 
 
   return (
     <div className="space-y-4">
+      {dropdowns.length > 0 && (
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-xs text-text-muted">
+          <label className="flex items-center gap-1.5">
+            Colour by
+            <select value={colorField?.id ?? BY_PROJECT} onChange={(e) => setColorBy(e.target.value)} className="field w-auto py-1 text-[13px]">
+              <option value={BY_PROJECT}>Project</option>
+              {dropdowns.map((field) => (
+                <option key={field.id} value={field.id}>
+                  {field.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          {colorField && <Legend field={colorField} />}
+        </div>
+      )}
       <div className="overflow-x-auto rounded-lg border border-border-default bg-surface-raised">
         <div className="relative" style={{ width: LABEL_W + width }}>
           {/* Week gridlines and the today marker, behind the rows. */}
@@ -112,7 +187,7 @@ export default function GanttChart({ projects, onTaskClick, activeTaskId = null 
           </div>
 
           {projects.map((project) => {
-            const swatch = SWATCHES[project.code.toLowerCase()] ?? NEUTRAL;
+            const swatch = projectSwatch(project);
             const dated = project.tasks.filter((t) => span(t) !== null);
             const milestones = dated.filter((t) => t.is_milestone);
             const bars = dated.filter((t) => !t.is_milestone);
@@ -146,7 +221,7 @@ export default function GanttChart({ projects, onTaskClick, activeTaskId = null 
                     width={width}
                     active={task.id === activeTaskId}
                   >
-                    <TaskBar task={task} span={span(task)!} x={x} swatch={swatch} onClick={onTaskClick && (() => onTaskClick(task.id))} />
+                    <TaskBar task={task} span={span(task)!} x={x} swatch={barSwatch(project, task)} onClick={onTaskClick && (() => onTaskClick(task.id))} />
                   </Row>
                 ))}
                 {dated.length === 0 && (
@@ -183,10 +258,32 @@ function Row({ label, width, active, children }: { label: ReactNode; width: numb
   );
 }
 
-function ProjectLabel({ project, dot }: { project: GanttProject; dot: string }) {
+/** The colours of a dropdown field's options, when the bars are coloured by it. */
+function Legend({ field }: { field: CustomFieldDef }) {
+  const chip = "h-2.5 w-2.5 rounded-sm";
+  return (
+    <ul aria-label={`${field.name} colours`} className="flex flex-wrap items-center gap-x-3 gap-y-1">
+      {field.options.map((option) => {
+        const color = field.colors?.[option];
+        return (
+          <li key={option} className="flex items-center gap-1.5">
+            <span className={`${chip} ${color ? "" : NEUTRAL.fill.className}`} style={color ? { backgroundColor: color } : undefined} />
+            {option}
+          </li>
+        );
+      })}
+      <li className="flex items-center gap-1.5">
+        <span className={`${chip} ${NEUTRAL.fill.className}`} />
+        No value
+      </li>
+    </ul>
+  );
+}
+
+function ProjectLabel({ project, dot }: { project: GanttProject; dot: Paint }) {
   return (
     <span className="flex min-w-0 items-center gap-2 pl-3 font-semibold" title={project.name}>
-      <span className={`h-2 w-2 shrink-0 rounded-full ${dot}`} />
+      <span className={`h-2 w-2 shrink-0 rounded-full ${dot.className}`} style={dot.style} />
       <span>{project.code}</span>
       {project.name !== project.code && <span className="truncate font-normal text-text-muted">{project.name}</span>}
     </span>
@@ -231,8 +328,8 @@ function TaskBar({
       title={`${task.name} · ${formatDay(span.start)} – ${formatDay(span.end)} · ${percent}%`}
       onClick={onClick}
     >
-      <div className={`relative h-5 overflow-hidden rounded-md border ${swatch.track}`} style={{ width }}>
-        <div className={`h-full ${swatch.fill}`} style={{ width: `${percent}%` }} />
+      <div className={`relative h-5 overflow-hidden rounded-md border ${swatch.track.className}`} style={{ ...swatch.track.style, width }}>
+        <div className={`h-full ${swatch.fill.className}`} style={{ ...swatch.fill.style, width: `${percent}%` }} />
       </div>
       <span className="font-mono text-xs text-text-muted">{percent}%</span>
     </div>

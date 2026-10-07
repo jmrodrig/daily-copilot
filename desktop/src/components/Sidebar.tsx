@@ -295,6 +295,15 @@ export default function Sidebar({ onCollapse }: { onCollapse: () => void }) {
           onClick: () => setFlag(folder, "is_reference"),
         });
       }
+      if (folder.is_project && folder.project_id !== null) {
+        flags.push({
+          label: "Project colour…",
+          onClick: () => {
+            setMenu(null);
+            navigate("/space-preferences#projects");
+          },
+        });
+      }
       items.push(...flags.map((flag, i) => ({ ...flag, separator: i === 0 })));
     }
     return items;

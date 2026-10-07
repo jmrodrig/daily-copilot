@@ -9,7 +9,7 @@ from typing import Any
 
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -182,6 +182,7 @@ def gantt(space_id: int = spaces.DEFAULT_SPACE_ID, db: Session = Depends(get_db)
                 id=project.id,
                 code=project.code,
                 name=project.name,
+                color=project.color,
                 tasks=[
                     GanttTask(
                         id=task.id,
@@ -191,6 +192,7 @@ def gantt(space_id: int = spaces.DEFAULT_SPACE_ID, db: Session = Depends(get_db)
                         completion_percent=task.completion_percent,
                         status=task.status,
                         is_milestone=task.is_milestone,
+                        custom_fields=task.custom_fields or {},
                     )
                     for task in sorted(by_project[project.id], key=_gantt_sort_key)
                 ],
@@ -776,11 +778,54 @@ def create_space(request: schemas.SpaceIn, db: Session = Depends(get_db)) -> sch
 
 @app.put("/api/spaces/{space_id}")
 def update_space(space_id: int, request: schemas.SpaceUpdate, db: Session = Depends(get_db)) -> schemas.Space:
-    """Rename a space and/or set its status flow and custom task fields; fields left out are kept."""
-    space = spaces.update_space(db, space_id, **request.model_dump(mode="json", exclude_unset=True))
+    """Rename a space and/or set its status flow and custom task fields; fields left out are kept.
+
+    Replacing the custom fields keeps the tasks' values, except those of fields that were removed (and values
+    that don't fit a field whose type changed); `renamed_options` carries renamed dropdown options over.
+    """
+    space = spaces.get_space(db, space_id)
     if space is None:
         raise HTTPException(status_code=404, detail=f"Unknown space id: {space_id}")
+    if request.custom_fields_schema is not None:
+        old_fields = schemas.clean_custom_fields_schema(space.custom_fields_schema)
+        _migrate_custom_values(db, space_id, old_fields, request.custom_fields_schema, request.renamed_options)
+    changes = request.model_dump(mode="json", exclude_unset=True, exclude={"renamed_options"})
+    space = spaces.update_space(db, space_id, **changes)  # commits the tasks' changes too
     return schemas.Space.model_validate(space, from_attributes=True)
+
+
+def _migrate_custom_values(
+    db: Session,
+    space_id: int,
+    old_fields: list[schemas.CustomFieldDef],
+    new_fields: list[schemas.CustomFieldDef],
+    renamed_options: dict[str, dict[str, str]],
+) -> None:
+    """Bring the custom field values of a space's tasks in line with its new fields (see `update_space`)."""
+    old = {f.id: f for f in old_fields}
+    new = {f.id: f for f in new_fields}
+    for task in db.scalars(select(Task).where(_in_space(space_id))):
+        current = task.custom_fields or {}
+        values = {}
+        for key, value in current.items():
+            field = new.get(key)
+            if field is None:
+                if key not in old:
+                    values[key] = value  # not a field the space had; not ours to remove
+                continue
+            renamed = renamed_options.get(key, {}).get(value) if isinstance(value, str) else None
+            if field.type is schemas.CustomFieldType.DROPDOWN and renamed in field.options:
+                value = renamed
+            if key in old and old[key].type is not field.type:
+                try:
+                    value = _custom_value(field, value)
+                except HTTPException:
+                    value = None
+            if value is not None:
+                values[key] = value
+        if values != current:
+            # A new dict rather than a change in place, so the JSON column is flagged dirty and versioned.
+            task.custom_fields = values
 
 
 @app.get("/api/tree")
@@ -1054,22 +1099,42 @@ def list_projects(space_id: int = spaces.DEFAULT_SPACE_ID, db: Session = Depends
         for meta in spaces.folder_metas(db, space_id).values()
         if meta.is_project and meta.project_id is not None
     }
-    return [ProjectOption(id=p.id, code=p.code, name=p.name, folder_path=folders.get(p.id)) for p in projects]
+    return [
+        ProjectOption(id=p.id, code=p.code, name=p.name, color=p.color, folder_path=folders.get(p.id)) for p in projects
+    ]
+
+
+@app.put("/api/projects/{project_id}")
+def update_project(project_id: int, request: schemas.ProjectUpdate, db: Session = Depends(get_db)) -> schemas.Project:
+    """Rename a project or change its description or colour (`color: null` goes back to the default); unsent
+    fields are kept. Its code is fixed: it ties the project to its imported Gantt."""
+    project = db.get(Project, project_id)
+    if project is None or project.deleted_at is not None:
+        raise HTTPException(status_code=404, detail=f"Unknown project id: {project_id}")
+    set_source(db, DESKTOP_SOURCE)
+    for key, value in request.model_dump(exclude_unset=True).items():
+        setattr(project, key, value)
+    db.commit()
+    return schemas.Project.model_validate(project, from_attributes=True)
 
 
 def _task_items(db: Session, tasks: list[Task]) -> list[TaskItem]:
     project_ids = {t.project_id for t in tasks if t.project_id is not None}
-    codes = dict(
-        db.execute(
-            select(Project.id, Project.code).where(Project.id.in_(project_ids)).execution_options(include_deleted=True)
-        ).all()
-    )
+    projects = {
+        project_id: (code, color)
+        for project_id, code, color in db.execute(
+            select(Project.id, Project.code, Project.color)
+            .where(Project.id.in_(project_ids))
+            .execution_options(include_deleted=True)
+        )
+    }
     return [
         TaskItem(
             id=t.id,
             space_id=t.space_id or spaces.DEFAULT_SPACE_ID,
             project_id=t.project_id,
-            project_code=codes.get(t.project_id),
+            project_code=projects.get(t.project_id, (None, None))[0],
+            project_color=projects.get(t.project_id, (None, None))[1],
             title=t.title,
             description=t.description,
             status=t.status,
@@ -1103,6 +1168,48 @@ def _link_path(root: Path, note_path: str | None) -> str | None:
     return path.relative_to(root.resolve()).as_posix()
 
 
+# `cf=<field id>:*` matches tasks with any value in that field.
+ANY_VALUE = "*"
+
+
+def _custom_field_matches(field: schemas.CustomFieldDef, value: Any, wanted: str) -> bool:
+    """Whether a task's stored `value` (None if unset) of a custom field matches the filter text `wanted`.
+
+    "" matches tasks without a value and "*" those with one. Otherwise text fields match case-insensitively
+    anywhere in the value, numbers by value, checkboxes by "true"/"false" (unset counts as false), and dates and
+    dropdowns exactly.
+    """
+    kind = schemas.CustomFieldType
+    unset = value is None or (field.type is kind.CHECKBOX and value is False)
+    if wanted == "":
+        return unset
+    if wanted == ANY_VALUE:
+        return not unset
+    if field.type is kind.CHECKBOX:
+        return wanted.lower() == ("false" if unset else "true")
+    if value is None:
+        return False
+    if field.type is kind.TEXT:
+        return wanted.lower() in str(value).lower()
+    if field.type is kind.NUMBER:
+        try:
+            return float(wanted) == float(value)
+        except (TypeError, ValueError):
+            return False
+    return str(value) == wanted
+
+
+def _parse_cf(params: list[str]) -> dict[str, str]:
+    """`cf=<field id>:<value>` query parameters as field id -> value (the value may contain colons)."""
+    filters = {}
+    for param in params:
+        field_id, sep, wanted = param.partition(":")
+        if not sep or not field_id.strip():
+            raise HTTPException(status_code=400, detail=f"cf must look like <field id>:<value>, not {param!r}")
+        filters[field_id.strip()] = wanted.strip()
+    return filters
+
+
 @app.get("/api/tasks")
 def list_tasks(
     space_id: int = spaces.DEFAULT_SPACE_ID,
@@ -1112,6 +1219,11 @@ def list_tasks(
     note_path: str | None = None,
     tag: str | None = None,
     include_archived: bool = False,
+    cf: list[str] = Query(default=[]),
+    has_deadline: bool | None = None,
+    has_start_date: bool | None = None,
+    due_after: date | None = None,
+    due_before: date | None = None,
     db: Session = Depends(get_db),
 ) -> list[TaskItem]:
     """The tasks of a space for the Kanban, Backlog, Gantt and List views, earliest due date first.
@@ -1119,7 +1231,12 @@ def list_tasks(
     Filters: `project_id`, `status`, `note_path` (tasks linked to that note), `tag` (tasks with
     that tag), and `assignee` (an empty `assignee=` means unassigned). Archived tasks are left out
     unless `include_archived` is set or `status=archived` asks for them.
+
+    Advanced filters: `cf=<field id>:<value>` (repeatable; see `_custom_field_matches`; fields the space
+    no longer has are ignored), `has_deadline` / `has_start_date` (true: set, false: not set), and
+    `due_after` / `due_before` (due on or after / on or before that day; tasks without a due date are left out).
     """
+    custom_filters = _parse_cf(cf)
     query = select(Task).where(_in_space(_space_id_or_404(db, space_id)))
     if project_id is not None:
         query = query.where(Task.project_id == project_id)
@@ -1131,11 +1248,29 @@ def list_tasks(
         query = query.where(Task.status != Status.ARCHIVED)
     if note_path is not None:
         query = query.where(Task.note_path == note_path)
+    if has_deadline is not None:
+        query = query.where(Task.deadline.is_not(None) if has_deadline else Task.deadline.is_(None))
+    if has_start_date is not None:
+        query = query.where(Task.start_date.is_not(None) if has_start_date else Task.start_date.is_(None))
+    if due_after is not None:
+        query = query.where(Task.deadline >= due_after)
+    if due_before is not None:
+        query = query.where(Task.deadline <= due_before)
     query = query.order_by(Task.deadline.is_(None), Task.deadline, Task.start_date.is_(None), Task.start_date, Task.id)
     tasks = list(db.scalars(query))
     if tag is not None and tag.strip():
         # Tags are a JSON list, so match them here rather than in SQL.
         tasks = [t for t in tasks if tag.strip() in schemas.clean_tags(t.tags)]
+    if custom_filters:
+        # Custom field values are JSON as well.
+        space = db.get(Space, space_id)
+        fields = {f.id: f for f in schemas.clean_custom_fields_schema(space.custom_fields_schema)}
+        checks = [(fields[key], wanted) for key, wanted in custom_filters.items() if key in fields]
+        tasks = [
+            t
+            for t in tasks
+            if all(_custom_field_matches(field, (t.custom_fields or {}).get(field.id), wanted) for field, wanted in checks)
+        ]
     return _task_items(db, tasks)
 
 

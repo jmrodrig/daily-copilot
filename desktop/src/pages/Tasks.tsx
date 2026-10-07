@@ -1,13 +1,16 @@
 import { useCallback, useEffect, useMemo, useState, type DragEvent, type FormEvent, type ReactNode } from "react";
 import { NavLink, Navigate, useNavigate, useParams, useSearchParams } from "react-router-dom";
 
+import AdvancedFilters from "../components/AdvancedFilters";
+import { OptionPill } from "../components/ColorPicker";
 import GanttChart, { type GanttProject } from "../components/GanttChart";
 import PageHeader from "../components/PageHeader";
 import { postStatusComment, useStatusChangePrompt } from "../components/StatusChangeDialog";
-import { formatDay, ME, NEUTRAL_TAG, NoteLink, PROJECT_TAG, Tag, TagPills } from "../components/TriageBoard";
+import { formatDay, ME, NEUTRAL_TAG, NoteLink, ProjectTag, Tag, TagPills } from "../components/TriageBoard";
 import { getJson, message, sendJson } from "../lib/api";
 import { AssigneeSelect, personLabel, PersonBadge, usePeople, type Person } from "../lib/people";
-import { useSpace } from "../lib/space";
+import { colouredOptions } from "../lib/colors";
+import { useSpace, type CustomFieldDef } from "../lib/space";
 import {
   allowedStatuses,
   announceTaskChange,
@@ -26,11 +29,13 @@ import {
 } from "../lib/tasks";
 import TaskListView from "./TaskListView";
 import {
+  filtersFromParams,
   NO_FILTERS,
   sameFilters,
   VIEW_TYPES,
   VIEWS_CHANGED,
   viewPath,
+  writeFilterParams,
   type TaskView,
   type ViewFilters,
   type ViewType,
@@ -49,10 +54,6 @@ type OnStatus = (task: TaskItem, status: TaskStatus) => void;
 type State = { state: "loading" } | { state: "ok"; tasks: TaskItem[] } | { state: "error"; message: string };
 
 const NO_PROJECT_ID = -1;
-
-function projectTag(code: string | null): string {
-  return (code && PROJECT_TAG[code.toLowerCase()]) || NEUTRAL_TAG;
-}
 
 /** A saved view (`/views/:id`) from the sidebar. Changed filters apply at once; "Save view" keeps them. */
 export default function SavedTaskView() {
@@ -131,7 +132,7 @@ export default function SavedTaskView() {
   );
 }
 
-/** An unsaved view (`/tasks/:view?project=&assignee=&tag=`), e.g. the note page's link to the backlog. "Save as view" adds it to the sidebar. */
+/** An unsaved view (`/tasks/:view?project=&assignee=&tag=&cf=…`, see `filtersFromParams`), e.g. the note page's link to the backlog. "Save as view" adds it to the sidebar. */
 export function AdHocTasks() {
   const { view = "" } = useParams();
   const [params, setParams] = useSearchParams();
@@ -140,22 +141,14 @@ export function AdHocTasks() {
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
-  const project = Number(params.get("project") ?? "");
-  const filters: ViewFilters = {
-    project_id: params.get("project") && Number.isInteger(project) ? project : null,
-    assignee: params.get("assignee"),
-    tag: params.get("tag") || null,
-  };
+  const filters = filtersFromParams(params);
   const setFilters = (next: ViewFilters) =>
     setParams(
       () => {
         const query = new URLSearchParams();
         const taskId = params.get("taskId");
         if (taskId) query.set("taskId", taskId);
-        if (next.project_id !== null) query.set("project", String(next.project_id));
-        if (next.assignee !== null) query.set("assignee", next.assignee);
-        if (next.tag !== null) query.set("tag", next.tag);
-        return query;
+        return writeFilterParams(query, next);
       },
       { replace: true },
     );
@@ -244,6 +237,7 @@ function TaskBoard({
   const space = spaces.find((s) => s.id === spaceId);
   const spaceName = space?.name ?? "";
   const flow = space?.status_flow ?? null;
+  const customFields = space?.custom_fields_schema ?? [];
 
   useEffect(() => {
     const controller = new AbortController();
@@ -331,7 +325,7 @@ function TaskBoard({
   const projectChoices =
     filters.project_id === null || projects.some((p) => p.id === filters.project_id)
       ? projects
-      : [...projects, { id: filters.project_id, code: `#${filters.project_id}`, name: `#${filters.project_id}`, folder_path: null }];
+      : [...projects, { id: filters.project_id, code: `#${filters.project_id}`, name: `#${filters.project_id}`, color: null, folder_path: null }];
   // Likewise a tag that no task carries any more.
   const tagChoices = filters.tag === null || tags.includes(filters.tag) ? tags : [...tags, filters.tag];
   // A task archived since the last load (e.g. in the task panel) leaves at once.
@@ -406,6 +400,8 @@ function TaskBoard({
         </div>
       </div>
 
+      <AdvancedFilters filters={filters} customFields={customFields} onFilters={onFilters} />
+
       <NewTaskForm
         spaceId={spaceId}
         projects={projects}
@@ -420,16 +416,18 @@ function TaskBoard({
       {error && <p className="text-[15px] text-accent">{error}</p>}
       {tasks.state === "loading" && <p className="text-[15px] text-text-muted">Loading tasks…</p>}
       {tasks.state === "error" && <p className="text-[15px] text-text-secondary">Could not load the tasks ({tasks.message}).</p>}
-      {visible && viewType === "kanban" && <Kanban tasks={visible} flow={flow} people={people} me={me} onStatus={changeStatus} />}
+      {visible && viewType === "kanban" && (
+        <Kanban tasks={visible} flow={flow} people={people} me={me} customFields={customFields} onStatus={changeStatus} />
+      )}
       {visible && viewType === "backlog" && (
         <Backlog tasks={visible} projects={projects} people={people} flow={flow} onPatch={patchTask} onStatus={changeStatus} />
       )}
-      {visible && viewType === "gantt" && <TaskGantt tasks={visible} projects={projects} />}
+      {visible && viewType === "gantt" && <TaskGantt tasks={visible} projects={projects} customFields={customFields} />}
       {visible && viewType === "list" && (
         <TaskListView
           tasks={visible}
           flow={flow}
-          customFields={space?.custom_fields_schema ?? []}
+          customFields={customFields}
           onUpdated={() => setReload((n) => n + 1)}
         />
       )}
@@ -534,7 +532,9 @@ const DRAG_TYPE = "application/x-copilot-task";
 
 type OnPatch = (task: TaskItem, patch: Omit<TaskPatch, "custom_fields">) => void;
 
-function Kanban({ tasks, flow, people, me, onStatus }: { tasks: TaskItem[]; flow: StatusFlow | null; people: Person[]; me: string; onStatus: OnStatus }) {
+type CardProps = { flow: StatusFlow | null; people: Person[]; me: string; customFields: CustomFieldDef[]; onStatus: OnStatus };
+
+function Kanban({ tasks, ...card }: { tasks: TaskItem[] } & CardProps) {
   const [over, setOver] = useState<TaskStatus | null>(null);
   const byId = useMemo(() => new Map(tasks.map((t) => [t.id, t])), [tasks]);
 
@@ -542,7 +542,7 @@ function Kanban({ tasks, flow, people, me, onStatus }: { tasks: TaskItem[]; flow
     event.preventDefault();
     setOver(null);
     const task = byId.get(Number(event.dataTransfer.getData(DRAG_TYPE)));
-    if (task && boardColumn(task.status) !== status) onStatus(task, status);
+    if (task && boardColumn(task.status) !== status) card.onStatus(task, status);
   }
 
   return (
@@ -571,7 +571,7 @@ function Kanban({ tasks, flow, people, me, onStatus }: { tasks: TaskItem[]; flow
             </h3>
             <ul className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-2 pb-2">
               {column.map((task) => (
-                <KanbanCard key={task.id} task={task} flow={flow} people={people} me={me} onStatus={onStatus} />
+                <KanbanCard key={task.id} task={task} {...card} />
               ))}
             </ul>
           </section>
@@ -581,7 +581,7 @@ function Kanban({ tasks, flow, people, me, onStatus }: { tasks: TaskItem[]; flow
   );
 }
 
-function KanbanCard({ task, flow, people, me, onStatus }: { task: TaskItem; flow: StatusFlow | null; people: Person[]; me: string; onStatus: OnStatus }) {
+function KanbanCard({ task, flow, people, me, customFields, onStatus }: { task: TaskItem } & CardProps) {
   const overdue = isOverdue(task);
   const { taskId, openTask } = useTaskPanel();
   const active = taskId === task.id;
@@ -609,9 +609,12 @@ function KanbanCard({ task, flow, people, me, onStatus }: { task: TaskItem; flow
     >
       <div className="text-[15px] text-text-primary">{task.title}</div>
       <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-        {task.project_code && <Tag className={projectTag(task.project_code)}>{task.project_code}</Tag>}
+        {task.project_code && <ProjectTag code={task.project_code} color={task.project_color} />}
         {task.status === "blocked" && <Tag className="border-accent bg-accent/15 text-accent">blocked</Tag>}
         {task.is_milestone && <Tag className="border-accent/60 text-accent">milestone</Tag>}
+        {colouredOptions(customFields, task.custom_fields).map(({ field }) => (
+          <OptionPill key={field.id} field={field} value={task.custom_fields[field.id]} />
+        ))}
         <TagPills tags={task.tags} />
         {task.note_path && <NoteLink path={task.note_path} />}
       </div>
@@ -740,7 +743,7 @@ function BacklogRow({
   const projectChoices = projects.some((p) => p.id === task.project_id)
     ? projects
     : task.project_id !== null
-      ? [...projects, { id: task.project_id, code: task.project_code ?? `#${task.project_id}`, name: "", folder_path: null }]
+      ? [...projects, { id: task.project_id, code: task.project_code ?? `#${task.project_id}`, name: "", color: null, folder_path: null }]
       : projects;
 
   return (
@@ -815,7 +818,7 @@ function BacklogRow({
 
 // --- Gantt ------------------------------------------------------------------------
 
-function TaskGantt({ tasks, projects }: { tasks: TaskItem[]; projects: ProjectOption[] }) {
+function TaskGantt({ tasks, projects, customFields }: { tasks: TaskItem[]; projects: ProjectOption[]; customFields: CustomFieldDef[] }) {
   const groups = useMemo(() => {
     const byProject = new Map<number, GanttProject>();
     for (const task of tasks) {
@@ -826,6 +829,7 @@ function TaskGantt({ tasks, projects }: { tasks: TaskItem[]; projects: ProjectOp
           id,
           code: task.project_code ?? "No project",
           name: project?.name ?? task.project_code ?? "No project",
+          color: project?.color ?? task.project_color,
           tasks: [],
         });
       }
@@ -837,6 +841,7 @@ function TaskGantt({ tasks, projects }: { tasks: TaskItem[]; projects: ProjectOp
         completion_percent: task.completion_percent,
         status: task.status,
         is_milestone: task.is_milestone,
+        custom_fields: task.custom_fields,
       });
     }
     const byStart = (a: { start_date: string | null }, b: { start_date: string | null }) =>
@@ -848,5 +853,5 @@ function TaskGantt({ tasks, projects }: { tasks: TaskItem[]; projects: ProjectOp
 
   const { taskId, openTask } = useTaskPanel();
   if (groups.length === 0) return <p className="panel text-center text-sm text-text-muted">No tasks match these filters.</p>;
-  return <GanttChart projects={groups} activeTaskId={taskId} onTaskClick={openTask} />;
+  return <GanttChart projects={groups} customFields={customFields} activeTaskId={taskId} onTaskClick={openTask} />;
 }

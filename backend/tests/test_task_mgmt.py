@@ -91,9 +91,9 @@ def test_space_preferences_round_trip(client):
     flow = {"todo": {"in_progress": False, "archived": True}, "done": {}}
     assert space["status_flow"] == flow
     assert space["custom_fields_schema"] == [
-        {"id": "hull", "name": "Hull no.", "type": "text", "options": []},
-        {"id": "weight", "name": "Weight", "type": "number", "options": []},
-        {"id": "yard", "name": "Yard", "type": "dropdown", "options": ["North", "South"]},
+        {"id": "hull", "name": "Hull no.", "type": "text", "options": [], "colors": {}},
+        {"id": "weight", "name": "Weight", "type": "number", "options": [], "colors": {}},
+        {"id": "yard", "name": "Yard", "type": "dropdown", "options": ["North", "South"], "colors": {}},
     ]
     assert client.get("/api/spaces").json()[0]["status_flow"] == flow
 
@@ -306,3 +306,172 @@ def test_only_one_person_per_space_is_me(client):
     client.put(f"/api/people/{elsewhere['id']}", json={"space_id": other, "name": "Elsewhere"})
     assert me(other) == []
     assert client.get(f"/api/people/{zoe['id']}").json()["is_me"] is False
+
+
+# --- Dropdown colours and editing custom fields --------------------------------------
+
+
+def test_dropdown_colors_are_cleaned(client):
+    response = client.put(
+        "/api/spaces/1",
+        json={
+            "custom_fields_schema": [
+                {
+                    "id": "yard",
+                    "name": "Yard",
+                    "type": "dropdown",
+                    "options": ["North", "South", "East"],
+                    # Short hex is expanded; blanks and options the field doesn't have are dropped.
+                    "colors": {" North ": "#3B82F6", "South": "#f00", "East": "", "West": "#00ff00"},
+                },
+                {"id": "hull", "name": "Hull", "type": "text", "colors": {"x": "#ffffff"}},
+            ]
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    yard, hull = response.json()["custom_fields_schema"]
+    assert yard["colors"] == {"North": "#3b82f6", "South": "#ff0000"}
+    assert hull["colors"] == {}
+
+
+@pytest.mark.parametrize("color", ["blue", "#12345", "#gggggg", 12])
+def test_dropdown_colors_must_be_hex(client, color):
+    field = {"id": "yard", "name": "Yard", "type": "dropdown", "options": ["North"], "colors": {"North": color}}
+    assert client.put("/api/spaces/1", json={"custom_fields_schema": [field]}).status_code == 422
+
+
+def test_editing_custom_fields_keeps_task_values(client, custom_fields):
+    task = new_task(
+        client, "Keel", custom_fields={"hull": "H-12", "weight": 4.5, "signed": True, "yard": "North", "survey": "2026-11-01"}
+    )
+    with database.SessionLocal() as db:
+        # A value of a field the space never had (e.g. imported) is left alone.
+        row = db.get(Task, task["id"])
+        row.custom_fields = {**row.custom_fields, "legacy": "x"}
+        db.commit()
+
+    response = client.put(
+        "/api/spaces/1",
+        json={
+            "custom_fields_schema": [
+                {"id": "hull", "name": "Hull number", "type": "text"},  # renamed: kept
+                {"id": "weight", "name": "Weight", "type": "text"},  # 4.5 isn't text: cleared
+                {"id": "survey", "name": "Survey", "type": "text"},  # "2026-11-01" is text: kept
+                {"id": "yard", "name": "Yard", "type": "dropdown", "options": ["Northern", "South"]},
+                # "signed" was deleted: its values go
+            ],
+            "renamed_options": {"yard": {"North": "Northern"}},
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert client.get(f"/api/tasks/{task['id']}").json()["custom_fields"] == {
+        "hull": "H-12",
+        "survey": "2026-11-01",
+        "yard": "Northern",
+        "legacy": "x",
+    }
+
+
+def test_removed_dropdown_option_is_kept_without_a_rename(client, custom_fields):
+    task = new_task(client, "Keel", custom_fields={"yard": "North"})
+    client.put(
+        "/api/spaces/1",
+        json={"custom_fields_schema": [{"id": "yard", "name": "Yard", "type": "dropdown", "options": ["South"]}]},
+    )
+    assert client.get(f"/api/tasks/{task['id']}").json()["custom_fields"] == {"yard": "North"}
+
+
+# --- Project colours ----------------------------------------------------------------
+
+
+def test_project_color_shows_on_projects_tasks_and_gantt(client):
+    with database.SessionLocal() as db:
+        project = Project(code="C7801", name="Keel")
+        db.add(project)
+        db.flush()
+        db.add(Task(space_id=1, project_id=project.id, title="Weld", is_gantt_task=True, custom_fields={"yard": "North"}))
+        db.commit()
+        project_id = project.id
+
+    response = client.put(f"/api/projects/{project_id}", json={"color": "#10B981"})
+    assert response.status_code == 200, response.text
+    assert (response.json()["name"], response.json()["color"]) == ("Keel", "#10b981")
+
+    assert client.get("/api/projects").json()[0]["color"] == "#10b981"
+    assert client.get("/api/tasks").json()[0]["project_color"] == "#10b981"
+    gantt = client.get("/api/gantt").json()["projects"][0]
+    assert gantt["color"] == "#10b981"
+    assert gantt["tasks"][0]["custom_fields"] == {"yard": "North"}
+
+    renamed = client.put(f"/api/projects/{project_id}", json={"name": " Keel build ", "color": None}).json()
+    assert (renamed["name"], renamed["color"]) == ("Keel build", None)
+
+
+@pytest.mark.parametrize(
+    "payload, status",
+    [({"color": "red"}, 422), ({"name": " "}, 422), ({"description": None}, 422)],
+)
+def test_project_update_validation(client, payload, status):
+    with database.SessionLocal() as db:
+        project = Project(code="C7801", name="Keel")
+        db.add(project)
+        db.commit()
+        project_id = project.id
+    assert client.put(f"/api/projects/{project_id}", json=payload).status_code == status
+    assert client.put("/api/projects/999", json={"color": "#ffffff"}).status_code == 404
+
+
+# --- Advanced filters ---------------------------------------------------------------
+
+
+def test_custom_field_filters(client, custom_fields):
+    new_task(client, "A", custom_fields={"hull": "H-12", "weight": 4.5, "signed": True, "yard": "North"})
+    new_task(client, "B", custom_fields={"hull": "h-120", "weight": 4, "yard": "South"})
+    new_task(client, "C")
+
+    def cf(*filters):
+        return titles(client, cf=list(filters))
+
+    assert cf("yard:North") == ["A"]
+    assert cf("yard:") == ["C"]
+    assert cf("yard:*") == ["A", "B"]
+    assert cf("hull:h-12") == ["A", "B"]  # text: case-insensitive, anywhere in the value
+    assert cf("weight:4.0") == ["B"]
+    assert cf("signed:true") == ["A"]
+    assert cf("signed:false") == ["B", "C"]  # unticked counts as false
+    assert cf("hull:h-12", "yard:South") == ["B"]
+    assert cf("gone:x") == ["A", "B", "C"]  # fields the space doesn't have are ignored
+    assert client.get("/api/tasks", params={"cf": "no-colon"}).status_code == 400
+
+
+def test_date_filters(client):
+    new_task(client, "Due soon", deadline="2026-10-10", start_date="2026-10-01")
+    new_task(client, "Due later", deadline="2026-12-01")
+    new_task(client, "Undated")
+
+    assert titles(client, has_deadline=True) == ["Due soon", "Due later"]
+    assert titles(client, has_deadline=False) == ["Undated"]
+    assert titles(client, has_start_date=True) == ["Due soon"]
+    assert titles(client, has_start_date=False) == ["Due later", "Undated"]
+    assert titles(client, due_after="2026-10-10") == ["Due soon", "Due later"]
+    assert titles(client, due_after="2026-10-11") == ["Due later"]
+    assert titles(client, due_before="2026-10-10") == ["Due soon"]
+    assert titles(client, due_after="2026-10-01", due_before="2026-11-30") == ["Due soon"]
+
+
+def test_saved_view_keeps_advanced_filters(client):
+    filters = {
+        "custom_fields": {"yard": "North", "signed": True, "weight": 4.5, "gone": None},
+        "has_deadline": True,
+        "has_start_date": False,
+        "due_after": "2026-10-01",
+        "due_before": "2026-10-31",
+    }
+    view = client.post("/api/views", json={"space_id": 1, "name": "North yard", "view_type": "list", "filters": filters})
+    assert view.status_code == 201, view.text
+    saved = view.json()["filters"]
+    assert saved["custom_fields"] == {"yard": "North", "signed": "true", "weight": "4.5"}
+    assert (saved["has_deadline"], saved["has_start_date"]) == (True, False)
+    assert (saved["due_after"], saved["due_before"]) == ("2026-10-01", "2026-10-31")

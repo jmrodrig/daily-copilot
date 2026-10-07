@@ -7,15 +7,21 @@ export type CustomFieldType = "text" | "number" | "date" | "checkbox" | "dropdow
 
 /**
  * One custom task field of a space; tasks keep its value under `id` (see CustomFieldDef in backend/schemas.py).
- * `options` are a dropdown's choices, in order; empty for the other types.
+ * `options` are a dropdown's choices, in order, and `colors` maps some of them to a "#rrggbb" colour; both are
+ * empty for the other types.
  */
-export type CustomFieldDef = { id: string; name: string; type: CustomFieldType; options: string[] };
+export type CustomFieldDef = { id: string; name: string; type: CustomFieldType; options: string[]; colors: Record<string, string> };
 
 // GET /api/spaces (see Space in backend/schemas.py).
 export type Space = { id: number; name: string; status_flow: StatusFlow | null; custom_fields_schema: CustomFieldDef[] };
 
-/** Body of `PUT /api/spaces/{id}`: fields left out are kept. */
-export type SpaceUpdate = Partial<Pick<Space, "name" | "status_flow" | "custom_fields_schema">>;
+/**
+ * Body of `PUT /api/spaces/{id}`: fields left out are kept. With `custom_fields_schema`, `renamed_options` (field id ->
+ * old dropdown option -> new name) moves tasks holding a renamed option over to its new name.
+ */
+export type SpaceUpdate = Partial<Pick<Space, "name" | "status_flow" | "custom_fields_schema">> & {
+  renamed_options?: Record<string, Record<string, string>>;
+};
 
 type SpaceState = {
   spaces: Space[];

@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type FormEvent, type Keyb
 import { Link } from "react-router-dom";
 
 import { getJson, message, sendJson } from "../lib/api";
+import { colouredOptions, optionColor } from "../lib/colors";
 import { AssigneeSelect, usePeople } from "../lib/people";
 import { notePath, useSpace, type CustomFieldDef } from "../lib/space";
 import {
@@ -18,7 +19,8 @@ import {
   type TaskStatus,
 } from "../lib/tasks";
 import { postStatusComment, useStatusChangePrompt } from "./StatusChangeDialog";
-import { ME, NEUTRAL_TAG, PROJECT_TAG, Tag, TagPills } from "./TriageBoard";
+import { OptionPill } from "./ColorPicker";
+import { ME, NEUTRAL_TAG, ProjectTag, Tag, TagPills } from "./TriageBoard";
 
 type State = { state: "loading" } | { state: "ok"; task: TaskItem } | { state: "error"; message: string };
 
@@ -160,12 +162,13 @@ function TaskFields({
           className="block w-full rounded-md border border-transparent bg-transparent px-1 py-0.5 text-base font-semibold leading-snug text-text-primary hover:border-border-default focus:border-accent/70 focus:outline-none"
         />
         <div className="flex flex-wrap items-center gap-1.5 px-1">
-          <Tag className={(task.project_code && PROJECT_TAG[task.project_code.toLowerCase()]) || NEUTRAL_TAG}>
-            {task.project_code ?? "No project"}
-          </Tag>
+          <ProjectTag code={task.project_code} color={task.project_color} />
           {task.is_gantt_task && <Tag className={NEUTRAL_TAG}>gantt</Tag>}
           {task.is_milestone && <Tag className="border-accent/60 text-accent">milestone</Tag>}
           {overdue && <Tag className="border-accent bg-accent/15 text-accent">overdue</Tag>}
+          {colouredOptions(customFields, task.custom_fields).map(({ field }) => (
+            <OptionPill key={field.id} field={field} value={task.custom_fields[field.id]} />
+          ))}
           <TagPills tags={task.tags} />
         </div>
       </div>
@@ -370,12 +373,15 @@ function CustomField({
       );
     case "dropdown": {
       const current = typeof value === "string" ? value : "";
+      const color = optionColor(field, current);
       return (
         <label className={label}>
           {field.name}
           <select
             value={current}
             onChange={(e) => onSave(e.target.value || null)}
+            // The chosen option's colour as a bar down the left edge.
+            style={color ? { borderLeftColor: color, borderLeftWidth: 4 } : undefined}
             className={`${input} ${current ? "text-text-primary" : "text-text-muted"}`}
           >
             <option value="">—</option>

@@ -159,6 +159,7 @@ def test_gantt_groups_shop_floor_tasks_by_project(client, gantt_db):
         "completion_percent": 40.0,
         "status": "in_progress",
         "is_milestone": False,
+        "custom_fields": {},
     }
 
 

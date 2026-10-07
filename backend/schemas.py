@@ -60,13 +60,58 @@ def clean_tags(value: Any) -> list[str]:
     return list(dict.fromkeys(tag.strip() for tag in value if isinstance(tag, str) and tag.strip()))
 
 
+# A colour as stored for projects and dropdown options: "#rrggbb", lower case.
+HEX_COLOR = r"#[0-9a-f]{6}"
+
+
+def clean_color(value: Any) -> str | None:
+    """`value` as a stored colour: a "#rrggbb" (or "#rgb") hex string, lower-cased; blank or None means none."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    if isinstance(value, str):
+        color = value.strip().lower()
+        if re.fullmatch(r"#[0-9a-f]{3}", color):
+            color = "#" + "".join(c * 2 for c in color[1:])
+        if re.fullmatch(HEX_COLOR, color):
+            return color
+    raise ValueError("colors must be hex codes like #3b82f6")
+
+
 class Project(BaseModel):
     id: int | None = None
     code: str = Field(min_length=1, description="Project number, e.g. C7801")
     name: str
     description: str = ""
+    color: str | None = Field(default=None, description='"#rrggbb"; None uses the default swatch')
     active: bool = True
     created_at: datetime | None = None
+
+
+class ProjectUpdate(BaseModel):
+    """`PUT /api/projects/{id}`: rename a project or change its description or colour. Unsent fields are kept."""
+
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    description: str | None = None
+    color: str | None = Field(default=None, description='"#rrggbb"; null (or blank) goes back to the default swatch')
+
+    @field_validator("name")
+    @classmethod
+    def _strip_name(cls, value: str | None) -> str:
+        if value is None or not value.strip():
+            raise ValueError("name must not be blank")
+        return value.strip()
+
+    @field_validator("description")
+    @classmethod
+    def _description_not_null(cls, value: str | None) -> str:
+        if value is None:
+            raise ValueError("cannot be null")
+        return value
+
+    @field_validator("color", mode="before")
+    @classmethod
+    def _clean_color(cls, value: Any) -> str | None:
+        return clean_color(value)
 
 
 class Subtask(BaseModel):
@@ -262,6 +307,7 @@ class GanttTask(BaseModel):
     completion_percent: float = Field(ge=0, le=100)
     status: Status
     is_milestone: bool
+    custom_fields: dict[str, Any] = Field(default_factory=dict, description="For colouring the bar by a dropdown field")
 
 
 class GanttProject(BaseModel):
@@ -270,6 +316,7 @@ class GanttProject(BaseModel):
     id: int
     code: str
     name: str
+    color: str | None = Field(default=None, description="The project's colour, if set")
     tasks: list[GanttTask]
 
 
@@ -598,6 +645,10 @@ class CustomFieldDef(BaseModel):
     options: list[str] = Field(
         default_factory=list, max_length=100, description="The choices of a dropdown field, in order; [] for other types"
     )
+    colors: dict[str, str] = Field(
+        default_factory=dict,
+        description='Dropdown option -> its "#rrggbb" colour, for pills and Gantt bars; options left out have none',
+    )
 
     @field_validator("name")
     @classmethod
@@ -614,12 +665,28 @@ class CustomFieldDef(BaseModel):
             raise ValueError("options must be at most 128 characters")
         return options
 
+    @field_validator("colors", mode="before")
+    @classmethod
+    def _clean_colors(cls, value: Any) -> dict[str, str]:
+        if not value:
+            return {}
+        if not isinstance(value, dict):
+            raise ValueError("colors must map options to hex codes")
+        colors = {}
+        for option, color in value.items():
+            color = clean_color(color)
+            if isinstance(option, str) and option.strip() and color is not None:
+                colors[option.strip()] = color
+        return colors
+
     @model_validator(mode="after")
     def _options_for_dropdowns(self) -> "CustomFieldDef":
         if self.type is not CustomFieldType.DROPDOWN:
             self.options = []
         elif not self.options:
             raise ValueError("a dropdown field needs at least one option")
+        # A colour only applies to an option the field still has.
+        self.colors = {option: color for option, color in self.colors.items() if option in self.options}
         return self
 
 
@@ -665,7 +732,16 @@ class SpaceUpdate(BaseModel):
         description="Status -> the statuses a task may move to next -> whether that move asks for a comment; "
         "a status left out (or a null/empty flow) may move anywhere without a comment",
     )
-    custom_fields_schema: list[CustomFieldDef] | None = Field(default=None, description="Replaces the space's custom fields")
+    custom_fields_schema: list[CustomFieldDef] | None = Field(
+        default=None,
+        description="Replaces the space's custom fields. Tasks lose the values of fields left out, and of fields whose "
+        "type changed that don't fit the new type; other values are kept",
+    )
+    renamed_options: dict[str, dict[str, str]] = Field(
+        default_factory=dict,
+        description="Field id -> old dropdown option -> its new name: tasks holding the old option are moved to the new "
+        "one. Only used together with `custom_fields_schema`",
+    )
 
     @field_validator("name")
     @classmethod
@@ -673,6 +749,14 @@ class SpaceUpdate(BaseModel):
         if value is None or not value.strip():
             raise ValueError("name must not be blank")
         return value.strip()
+
+    @field_validator("renamed_options")
+    @classmethod
+    def _strip_renames(cls, value: dict[str, dict[str, str]]) -> dict[str, dict[str, str]]:
+        return {
+            field_id: {old.strip(): new.strip() for old, new in renames.items() if old.strip() and new.strip()}
+            for field_id, renames in value.items()
+        }
 
     @field_validator("status_flow")
     @classmethod
@@ -806,6 +890,7 @@ class ProjectOption(BaseModel):
     id: int
     code: str
     name: str
+    color: str | None = Field(default=None, description='"#rrggbb", if set')
     folder_path: str | None = Field(default=None, description="The project folder in this space, if any")
 
 
@@ -850,6 +935,7 @@ class TaskItem(BaseModel):
     space_id: int
     project_id: int | None
     project_code: str | None
+    project_color: str | None = Field(default=None, description="The project's colour, if set")
     title: str
     description: str
     status: Status
@@ -891,6 +977,27 @@ class TaskViewFilters(BaseModel):
     project_id: int | None = Field(default=None, description="None means every project")
     assignee: str | None = Field(default=None, max_length=64, description='None means everyone; "" means unassigned')
     tag: str | None = Field(default=None, max_length=64, description="None means any tag")
+    custom_fields: dict[str, str] = Field(
+        default_factory=dict,
+        description='Custom field id -> the value to match (see `main._custom_field_matches`); "" matches tasks without a value',
+    )
+    has_deadline: bool | None = Field(default=None, description="True: only tasks with a due date; False: only without")
+    has_start_date: bool | None = Field(default=None, description="True: only tasks with a start date; False: only without")
+    due_after: date | None = Field(default=None, description="Only tasks due on or after this day")
+    due_before: date | None = Field(default=None, description="Only tasks due on or before this day")
+
+    @field_validator("custom_fields", mode="before")
+    @classmethod
+    def _values_as_text(cls, value: Any) -> dict[str, str]:
+        """Filter values as the text sent in `GET /api/tasks?cf=<id>:<value>`; null values are dropped."""
+        if not isinstance(value, dict):
+            return {}
+        texts = {}
+        for key, item in value.items():
+            if item is None or not isinstance(key, str):
+                continue
+            texts[key] = ("true" if item else "false") if isinstance(item, bool) else str(item).strip()
+        return texts
 
     @field_validator("assignee")
     @classmethod

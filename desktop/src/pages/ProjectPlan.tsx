@@ -13,7 +13,7 @@ type State = { state: "loading" } | { state: "ok"; project: GanttProject | null 
 export default function ProjectPlan() {
   const { code = "" } = useParams();
   const [gantt, setGantt] = useState<State>({ state: "loading" });
-  const { spaceId } = useSpace();
+  const { spaceId, space } = useSpace();
   const { taskId, openTask } = useTaskPanel();
 
   useEffect(() => {
@@ -39,7 +39,7 @@ export default function ProjectPlan() {
       )}
       {gantt.state === "ok" &&
         (project && project.tasks.length > 0 ? (
-          <GanttChart projects={[project]} activeTaskId={taskId} onTaskClick={openTask} />
+          <GanttChart projects={[project]} customFields={space?.custom_fields_schema} activeTaskId={taskId} onTaskClick={openTask} />
         ) : (
           <p className="panel text-center text-sm text-text-muted">
             No shop floor tasks loaded for this project yet. Import its Gantt PDF with cli_import.py.

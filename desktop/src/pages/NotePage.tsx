@@ -5,7 +5,7 @@ import rehypeRaw from "rehype-raw";
 import rehypeSanitize from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 
-import { formatDay, LABEL_TAG, NEUTRAL_TAG, PROJECT_TAG, Tag, TagPills } from "../components/TriageBoard";
+import { formatDay, LABEL_TAG, NEUTRAL_TAG, PROJECT_TAG, ProjectTag, Tag, TagPills } from "../components/TriageBoard";
 import { getJson, message, sendJson } from "../lib/api";
 import { useSpace } from "../lib/space";
 import { useTitle } from "../lib/title";
@@ -507,7 +507,7 @@ function LinkedTasks({ tasks }: { tasks: TaskItem[] }) {
               {task.title}
             </button>
             {task.project_code && (
-              <Tag className={PROJECT_TAG[task.project_code.toLowerCase()] ?? NEUTRAL_TAG}>{task.project_code}</Tag>
+              <ProjectTag code={task.project_code} color={task.project_color} />
             )}
             <Tag className={NEUTRAL_TAG}>{STATUS_LABELS[task.status]}</Tag>
             {task.assignee && <span className="text-xs text-text-muted">👤 {task.assignee}</span>}

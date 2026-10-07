@@ -1,8 +1,12 @@
 import { useEffect, useState, type FormEvent } from "react";
+import { useLocation } from "react-router-dom";
 
-import { message } from "../lib/api";
+import ColorPicker from "../components/ColorPicker";
+import { Tag } from "../components/TriageBoard";
+import { getJson, message, sendJson } from "../lib/api";
+import { pillStyle } from "../lib/colors";
 import { useSpace, type CustomFieldDef, type CustomFieldType, type Space } from "../lib/space";
-import { STATUS_LABELS, STATUSES, type StatusFlow, type TaskStatus } from "../lib/tasks";
+import { STATUS_LABELS, STATUSES, type ProjectOption, type ProjectUpdate, type StatusFlow, type TaskStatus } from "../lib/tasks";
 import { useTitle } from "../lib/title";
 
 export default function SpacePreferences() {
@@ -12,6 +16,12 @@ export default function SpacePreferences() {
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   useTitle("Space preferences");
+  const { hash } = useLocation();
+
+  // `/space-preferences#projects` (from a project folder's menu) scrolls to that section once it's there.
+  useEffect(() => {
+    if (hash && space) document.getElementById(hash.slice(1))?.scrollIntoView();
+  }, [hash, space?.id]);
 
   // Reset the form when the active space changes (or the spaces finish loading).
   useEffect(() => {
@@ -82,9 +92,10 @@ export default function SpacePreferences() {
         <CustomFieldsEditor
           key={`fields-${space.id}`}
           space={space}
-          onSave={(custom_fields_schema) => updateSpace(space.id, { custom_fields_schema })}
+          onSave={({ fields, renames }) => updateSpace(space.id, { custom_fields_schema: fields, renamed_options: renames })}
         />
       )}
+      {space && <ProjectsEditor key={`projects-${space.id}`} spaceId={space.id} />}
     </div>
   );
 }
@@ -255,9 +266,59 @@ const FIELD_TYPES: Record<CustomFieldType, string> = {
   dropdown: "Dropdown",
 };
 
-/** A dropdown's options typed as comma-separated values, trimmed and without blanks or repeats. */
-function parseOptions(text: string): string[] {
-  return [...new Set(text.split(",").map((o) => o.trim()).filter(Boolean))];
+/** A dropdown option being edited: `original` is its saved name (null if new), so a rename carries tasks over. */
+type OptionDraft = { key: number; name: string; original: string | null; color: string | null };
+type FieldDraft = { id: string; name: string; type: CustomFieldType; options: OptionDraft[] };
+
+let nextOptionKey = 1;
+
+function optionDraft(name: string, original: string | null, color: string | null): OptionDraft {
+  return { key: nextOptionKey++, name, original, color };
+}
+
+function draftsOf(fields: CustomFieldDef[]): FieldDraft[] {
+  return fields.map((f) => ({
+    id: f.id,
+    name: f.name,
+    type: f.type,
+    options: f.options.map((o) => optionDraft(o, o, f.colors?.[o] ?? null)),
+  }));
+}
+
+/** The options of a draft as saved: trimmed, without blanks or repeats (the first one's colour wins). */
+function cleanOptions(draft: FieldDraft): OptionDraft[] {
+  const seen = new Set<string>();
+  return draft.options.flatMap((o) => {
+    const name = o.name.trim();
+    if (!name || seen.has(name)) return [];
+    seen.add(name);
+    return [{ ...o, name }];
+  });
+}
+
+function schemaOf(drafts: FieldDraft[]): CustomFieldDef[] {
+  return drafts.map((d) => {
+    const options = d.type === "dropdown" ? cleanOptions(d) : [];
+    return {
+      id: d.id,
+      name: d.name.trim(),
+      type: d.type,
+      options: options.map((o) => o.name),
+      colors: Object.fromEntries(options.filter((o) => o.color).map((o) => [o.name, o.color!])),
+    };
+  });
+}
+
+/** Field id -> old option -> new name, for the saved dropdown options that were renamed. */
+function renamesOf(drafts: FieldDraft[], saved: CustomFieldDef[]): Record<string, Record<string, string>> {
+  const renames: Record<string, Record<string, string>> = {};
+  for (const draft of drafts) {
+    if (draft.type !== "dropdown" || saved.find((f) => f.id === draft.id)?.type !== "dropdown") continue;
+    for (const option of cleanOptions(draft)) {
+      if (option.original !== null && option.original !== option.name) (renames[draft.id] ??= {})[option.original] = option.name;
+    }
+  }
+  return renames;
 }
 
 /** A stable id for a new field: its name as a slug, numbered if taken. */
@@ -275,145 +336,95 @@ function fieldId(name: string, taken: Set<string>): string {
   return id;
 }
 
-function optionTextsOf(fields: CustomFieldDef[]): Record<string, string> {
-  return Object.fromEntries(fields.map((f) => [f.id, f.options.join(", ")]));
-}
+type FieldsSave = { fields: CustomFieldDef[]; renames: Record<string, Record<string, string>> };
 
-function CustomFieldsEditor({ space, onSave }: { space: Space; onSave: (fields: CustomFieldDef[]) => Promise<unknown> }) {
-  const [fields, setFields] = useState(space.custom_fields_schema);
+/**
+ * The space's custom fields: click one to edit its name, type and (for a dropdown) its options and their colours.
+ * Renamed options keep the tasks that held them; removing a field (or changing its type) clears the tasks' values that
+ * no longer fit when saved.
+ */
+function CustomFieldsEditor({ space, onSave }: { space: Space; onSave: (change: FieldsSave) => Promise<Space> }) {
+  const saved = space.custom_fields_schema;
+  const [drafts, setDrafts] = useState(() => draftsOf(saved));
+  const [editing, setEditing] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [type, setType] = useState<CustomFieldType>("text");
-  const [options, setOptions] = useState("");
-  // Each dropdown's options as typed (comma-separated), so a trailing comma or space survives while typing.
-  const [optionTexts, setOptionTexts] = useState<Record<string, string>>(() => optionTextsOf(space.custom_fields_schema));
-  const { save, saving, status, touched } = useSaver(onSave);
-  const dirty = JSON.stringify(fields) !== JSON.stringify(space.custom_fields_schema);
-  const valid = fields.every((f) => f.name.trim() && (f.type !== "dropdown" || f.options.length > 0));
-  const canAdd = name.trim() !== "" && (type !== "dropdown" || parseOptions(options).length > 0);
+  // After saving, start again from what the server kept (options' saved names included).
+  const { save, saving, status, touched } = useSaver(async (change: FieldsSave) => setDrafts(draftsOf((await onSave(change)).custom_fields_schema)));
+
+  const schema = schemaOf(drafts);
+  const renames = renamesOf(drafts, saved);
+  const dirty = JSON.stringify(schema) !== JSON.stringify(schemaOf(draftsOf(saved)));
+  const valid = schema.every((f) => f.name && (f.type !== "dropdown" || f.options.length > 0));
 
   function add(event: FormEvent) {
     event.preventDefault();
-    if (!canAdd) return;
+    if (!name.trim()) return;
     touched();
-    const id = fieldId(name, new Set(fields.map((f) => f.id)));
-    const choices = type === "dropdown" ? parseOptions(options) : [];
-    setFields((prev) => [...prev, { id, name: name.trim(), type, options: choices }]);
-    setOptionTexts((prev) => ({ ...prev, [id]: choices.join(", ") }));
+    const id = fieldId(name, new Set(drafts.map((f) => f.id)));
+    setDrafts((prev) => [...prev, { id, name: name.trim(), type, options: type === "dropdown" ? [optionDraft("", null, null)] : [] }]);
+    setEditing(id);
     setName("");
-    setOptions("");
   }
 
-  function update(id: string, change: Partial<CustomFieldDef>) {
+  function update(id: string, change: (draft: FieldDraft) => Partial<FieldDraft>) {
     touched();
-    setFields((prev) => prev.map((f) => (f.id === id ? { ...f, ...change } : f)));
+    setDrafts((prev) => prev.map((f) => (f.id === id ? { ...f, ...change(f) } : f)));
   }
 
-  function changeType(field: CustomFieldDef, next: CustomFieldType) {
-    update(field.id, { type: next, options: next === "dropdown" ? parseOptions(optionTexts[field.id] ?? "") : [] });
-  }
-
-  function changeOptions(field: CustomFieldDef, text: string) {
-    setOptionTexts((prev) => ({ ...prev, [field.id]: text }));
-    update(field.id, { options: parseOptions(text) });
-  }
-
-  function remove(field: CustomFieldDef) {
-    const saved = space.custom_fields_schema.some((f) => f.id === field.id);
-    if (saved && !window.confirm(`Remove the field "${field.name}"? Tasks keep their values, but they are no longer shown.`)) return;
+  function remove(field: FieldDraft) {
+    const wasSaved = saved.some((f) => f.id === field.id);
+    if (wasSaved && !window.confirm(`Remove the field "${field.name}"? When you save, tasks lose their values for it.`)) return;
     touched();
-    setFields((prev) => prev.filter((f) => f.id !== field.id));
+    setDrafts((prev) => prev.filter((f) => f.id !== field.id));
   }
 
   return (
     <section className="panel flex flex-col gap-3" aria-label="Custom fields">
       <div>
         <h2 className="text-base font-semibold">Custom fields</h2>
-        <p className="mt-1 text-[15px] text-text-muted">Extra fields every task in this space gets, shown in the task panel and the List view.</p>
+        <p className="mt-1 text-[15px] text-text-muted">
+          Extra fields every task in this space gets, shown in the task panel and the List view. Click a field to edit it;
+          give a dropdown's options colours to show them as coloured pills on cards and to colour the Gantt by them.
+        </p>
       </div>
-      {fields.length === 0 ? (
+      {drafts.length === 0 ? (
         <p className="text-[15px] text-text-muted">No custom fields yet.</p>
       ) : (
-        <ul className="flex flex-col gap-2">
-          {fields.map((field) => {
-            const saved = space.custom_fields_schema.some((f) => f.id === field.id);
-            return (
-              <li key={field.id} className="flex flex-col gap-1.5">
-                <div className="flex items-center gap-2">
-                  <input
-                    aria-label={`Name of ${field.name || "field"}`}
-                    value={field.name}
-                    onChange={(e) => update(field.id, { name: e.target.value })}
-                    maxLength={64}
-                    className="field flex-1 py-1.5"
-                  />
-                  <select
-                    aria-label={`Type of ${field.name || "field"}`}
-                    value={field.type}
-                    // A saved field's values were stored for its type, so only new fields can change it.
-                    disabled={saved}
-                    title={saved ? "The type of a saved field can't change" : undefined}
-                    onChange={(e) => changeType(field, e.target.value as CustomFieldType)}
-                    className="field w-32 py-1.5"
-                  >
-                    {Object.entries(FIELD_TYPES).map(([value, label]) => (
-                      <option key={value} value={value}>
-                        {label}
-                      </option>
-                    ))}
-                  </select>
-                  <button type="button" className="btn min-h-9 px-3 text-xs" onClick={() => remove(field)}>
-                    Remove
-                  </button>
-                </div>
-                {field.type === "dropdown" && (
-                  <input
-                    aria-label={`Options of ${field.name || "field"}`}
-                    value={optionTexts[field.id] ?? field.options.join(", ")}
-                    onChange={(e) => changeOptions(field, e.target.value)}
-                    placeholder="Options, separated by commas, e.g. North yard, South yard"
-                    className={`field py-1.5 ${field.options.length === 0 ? "border-accent" : ""}`}
-                  />
-                )}
-              </li>
-            );
-          })}
+        <ul className="flex flex-col divide-y divide-border-default/60 rounded-lg border border-border-default">
+          {drafts.map((field) => (
+            <li key={field.id}>
+              <FieldRow
+                field={field}
+                savedField={saved.find((f) => f.id === field.id)}
+                open={editing === field.id}
+                onToggle={() => setEditing((prev) => (prev === field.id ? null : field.id))}
+                onChange={(change) => update(field.id, change)}
+                onRemove={() => remove(field)}
+              />
+            </li>
+          ))}
         </ul>
       )}
-      <form onSubmit={add} className="flex flex-col gap-2 border-t border-border-default pt-3">
-        <div className="flex items-end gap-2">
-          <label className="flex flex-1 flex-col gap-1.5">
-            <span className="text-[13px] font-semibold tracking-[0.08em] text-text-muted">NEW FIELD</span>
-            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Hull number" maxLength={64} className="field py-1.5" />
-          </label>
-          <select aria-label="Type of the new field" value={type} onChange={(e) => setType(e.target.value as CustomFieldType)} className="field w-32 py-1.5">
-            {Object.entries(FIELD_TYPES).map(([value, label]) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-          </select>
-          <button type="submit" className="btn min-h-9" disabled={!canAdd}>
-            Add
-          </button>
-        </div>
-        {type === "dropdown" && (
-          <input
-            aria-label="Options of the new field"
-            value={options}
-            onChange={(e) => setOptions(e.target.value)}
-            placeholder="Options, separated by commas, e.g. North yard, South yard"
-            className="field py-1.5"
-          />
-        )}
+      <form onSubmit={add} className="flex items-end gap-2 border-t border-border-default pt-3">
+        <label className="flex flex-1 flex-col gap-1.5">
+          <span className="text-[13px] font-semibold tracking-[0.08em] text-text-muted">NEW FIELD</span>
+          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Hull number" maxLength={64} className="field py-1.5" />
+        </label>
+        <select aria-label="Type of the new field" value={type} onChange={(e) => setType(e.target.value as CustomFieldType)} className="field w-32 py-1.5">
+          {Object.entries(FIELD_TYPES).map(([value, label]) => (
+            <option key={value} value={value}>
+              {label}
+            </option>
+          ))}
+        </select>
+        <button type="submit" className="btn min-h-9" disabled={!name.trim()}>
+          Add
+        </button>
       </form>
       {status}
       <div className="flex gap-2">
-        <button
-          type="button"
-          className="btn-primary"
-          disabled={!dirty || !valid || saving}
-          onClick={() => save(fields.map((f) => ({ ...f, name: f.name.trim() })))}
-        >
+        <button type="button" className="btn-primary" disabled={!dirty || !valid || saving} onClick={() => save({ fields: schema, renames })}>
           {saving ? "Saving…" : "Save"}
         </button>
         {dirty && (
@@ -422,8 +433,7 @@ function CustomFieldsEditor({ space, onSave }: { space: Space; onSave: (fields: 
             className="btn"
             onClick={() => {
               touched();
-              setFields(space.custom_fields_schema);
-              setOptionTexts(optionTextsOf(space.custom_fields_schema));
+              setDrafts(draftsOf(saved));
             }}
           >
             Revert
@@ -431,5 +441,232 @@ function CustomFieldsEditor({ space, onSave }: { space: Space; onSave: (fields: 
         )}
       </div>
     </section>
+  );
+}
+
+/** One field: a summary line that opens its editor. */
+function FieldRow({
+  field,
+  savedField,
+  open,
+  onToggle,
+  onChange,
+  onRemove,
+}: {
+  field: FieldDraft;
+  savedField: CustomFieldDef | undefined;
+  open: boolean;
+  onToggle: () => void;
+  onChange: (change: (draft: FieldDraft) => Partial<FieldDraft>) => void;
+  onRemove: () => void;
+}) {
+  const label = field.name.trim() || "field";
+  const options = cleanOptions(field);
+  const invalid = !field.name.trim() || (field.type === "dropdown" && options.length === 0);
+  const typeChanged = savedField !== undefined && savedField.type !== field.type;
+
+  function setOption(key: number, change: Partial<OptionDraft>) {
+    onChange((d) => ({ options: d.options.map((o) => (o.key === key ? { ...o, ...change } : o)) }));
+  }
+
+  return (
+    <div className={open ? "bg-surface-panel/60" : ""}>
+      <button
+        type="button"
+        aria-expanded={open}
+        aria-label={`Edit ${label}`}
+        onClick={onToggle}
+        className="flex w-full flex-wrap items-center gap-2 px-3 py-2 text-left hover:bg-surface-hover"
+      >
+        <span aria-hidden className={`inline-block text-[11px] text-text-muted transition-transform ${open ? "rotate-90" : ""}`}>
+          ▶
+        </span>
+        <span className={`font-medium ${field.name.trim() ? "text-text-primary" : "text-text-muted"}`}>{field.name.trim() || "Unnamed field"}</span>
+        <span className="font-mono text-[12px] uppercase tracking-wider text-text-muted">{FIELD_TYPES[field.type]}</span>
+        {field.type === "dropdown" &&
+          options.map((o) => (
+            <Tag key={o.key} className={o.color ? "normal-case" : "normal-case border-border-default text-text-secondary"} style={o.color ? pillStyle(o.color) : undefined}>
+              {o.name}
+            </Tag>
+          ))}
+        {invalid && <span className="text-xs text-accent">Incomplete</span>}
+      </button>
+
+      {open && (
+        <div className="flex flex-col gap-2.5 px-3 pb-3 pl-8">
+          <div className="flex items-center gap-2">
+            <input
+              aria-label={`Name of ${label}`}
+              value={field.name}
+              onChange={(e) => onChange(() => ({ name: e.target.value }))}
+              maxLength={64}
+              className={`field flex-1 py-1.5 ${field.name.trim() ? "" : "border-accent"}`}
+            />
+            <select
+              aria-label={`Type of ${label}`}
+              value={field.type}
+              onChange={(e) => {
+                const next = e.target.value as CustomFieldType;
+                onChange((d) => ({ type: next, options: next === "dropdown" && d.options.length === 0 ? [optionDraft("", null, null)] : d.options }));
+              }}
+              className="field w-32 py-1.5"
+            >
+              {Object.entries(FIELD_TYPES).map(([value, text]) => (
+                <option key={value} value={value}>
+                  {text}
+                </option>
+              ))}
+            </select>
+            <button type="button" className="btn min-h-9 px-3 text-xs" onClick={onRemove}>
+              Remove
+            </button>
+          </div>
+          {typeChanged && (
+            <p className="text-xs text-accent">
+              Was {FIELD_TYPES[savedField.type]}: when you save, tasks' values that aren't valid for a {FIELD_TYPES[field.type].toLowerCase()} field are
+              cleared.
+            </p>
+          )}
+          {field.type === "dropdown" && (
+            <div className="flex flex-col gap-1.5">
+              <span className="text-[13px] font-semibold tracking-[0.08em] text-text-muted">OPTIONS</span>
+              <ul className="flex flex-col gap-1.5">
+                {field.options.map((option, index) => (
+                  <li key={option.key} className="flex flex-col gap-0.5">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <input
+                        aria-label={`Option ${index + 1} of ${label}`}
+                        value={option.name}
+                        onChange={(e) => setOption(option.key, { name: e.target.value })}
+                        placeholder="Option"
+                        maxLength={128}
+                        className="field w-48 py-1"
+                      />
+                      <ColorPicker
+                        label={option.name.trim() || `option ${index + 1}`}
+                        value={option.color}
+                        onChange={(color) => setOption(option.key, { color })}
+                      />
+                      <button
+                        type="button"
+                        aria-label={`Remove option ${option.name.trim() || index + 1}`}
+                        title="Remove option (tasks keep it until changed)"
+                        className="ml-auto px-1 text-text-muted hover:text-accent"
+                        onClick={() => onChange((d) => ({ options: d.options.filter((o) => o.key !== option.key) }))}
+                      >
+                        ×
+                      </button>
+                    </div>
+                    {option.original !== null && option.name.trim() && option.name.trim() !== option.original && (
+                      <span className="text-xs text-text-muted">
+                        Renamed from “{option.original}”: tasks holding it move to the new name.
+                      </span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+              <button
+                type="button"
+                className="self-start text-xs text-text-secondary hover:text-text-primary"
+                onClick={() => onChange((d) => ({ options: [...d.options, optionDraft("", null, null)] }))}
+              >
+                + Add option
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// --- Projects -----------------------------------------------------------------------
+
+/** The space's projects (folders marked as Project): their names and colours for pills and Gantt bars. */
+function ProjectsEditor({ spaceId }: { spaceId: number }) {
+  const [projects, setProjects] = useState<ProjectOption[] | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    getJson<ProjectOption[]>(`/api/projects?space_id=${spaceId}`, controller.signal)
+      .then(setProjects)
+      .catch((err: unknown) => {
+        if (!controller.signal.aborted) setLoadError(message(err));
+      });
+    return () => controller.abort();
+  }, [spaceId]);
+
+  return (
+    <section id="projects" className="panel flex scroll-mt-4 flex-col gap-3" aria-label="Projects">
+      <div>
+        <h2 className="text-base font-semibold">Projects</h2>
+        <p className="mt-1 text-[15px] text-text-muted">
+          A project's colour is used for its pills and its Gantt bars. Mark a folder as Project in the sidebar to add one.
+        </p>
+      </div>
+      {loadError && <p className="text-[15px] text-text-secondary">Could not load the projects ({loadError}).</p>}
+      {projects === null && !loadError && <p className="text-[15px] text-text-muted">Loading…</p>}
+      {projects?.length === 0 && <p className="text-[15px] text-text-muted">No projects in this space yet.</p>}
+      {projects && projects.length > 0 && (
+        <ul className="flex flex-col divide-y divide-border-default/60">
+          {projects.map((project) => (
+            <li key={project.id} className="py-2.5 first:pt-0 last:pb-0">
+              <ProjectRow project={project} onSaved={(next) => setProjects((prev) => prev && prev.map((p) => (p.id === next.id ? { ...p, ...next } : p)))} />
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+function ProjectRow({ project, onSaved }: { project: ProjectOption; onSaved: (project: ProjectOption) => void }) {
+  const [name, setName] = useState(project.name);
+  const [color, setColor] = useState(project.color);
+  const { save, saving, status, touched } = useSaver(async (change: ProjectUpdate) => {
+    const saved = await sendJson<ProjectOption>("PUT", `/api/projects/${project.id}`, change);
+    onSaved({ ...project, name: saved.name, color: saved.color });
+  });
+  const dirty = name.trim() !== project.name || color !== project.color;
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="flex items-center gap-2">
+        <span
+          className="rounded border px-1.5 py-px font-mono text-[12px] uppercase leading-4"
+          style={color ? pillStyle(color) : undefined}
+        >
+          {project.code}
+        </span>
+        <input
+          aria-label={`Name of ${project.code}`}
+          value={name}
+          onChange={(e) => {
+            touched();
+            setName(e.target.value);
+          }}
+          maxLength={200}
+          className="field min-w-24 flex-1 py-1"
+        />
+        <ColorPicker
+          label={project.code}
+          value={color}
+          onChange={(next) => {
+            touched();
+            setColor(next);
+          }}
+        />
+        <button
+          type="button"
+          className="btn-primary min-h-8 shrink-0 px-3 text-xs"
+          disabled={!dirty || !name.trim() || saving}
+          onClick={() => save({ name: name.trim(), color })}
+        >
+          {saving ? "Saving…" : "Save"}
+        </button>
+      </div>
+      {status}
+    </div>
   );
 }

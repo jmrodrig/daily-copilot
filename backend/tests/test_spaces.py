@@ -24,6 +24,10 @@ def client(monkeypatch):
         yield client
 
 
+# The advanced filters of a saved view that sets none.
+NO_ADVANCED_FILTERS = {"custom_fields": {}, "has_deadline": None, "has_start_date": None, "due_after": None, "due_before": None}
+
+
 def write(space_id, path, text):
     file = spaces.content_dir(space_id) / path
     file.parent.mkdir(parents=True, exist_ok=True)
@@ -560,6 +564,7 @@ def test_task_crud_filters_and_links(client):
         "space_id": 1,
         "project_id": project_id,
         "project_code": "C7801",
+        "project_color": None,
         "title": "Keel drawings",
         "description": "",
         "status": "backlog",
@@ -811,7 +816,7 @@ def test_folder_meta_is_per_space(two_spaces):
 def test_default_views_are_seeded_per_space(client):
     views = client.get("/api/views?space_id=1").json()
     assert [(v["name"], v["view_type"]) for v in views] == [("Kanban", "kanban"), ("Backlog", "backlog"), ("Gantt", "gantt")]
-    assert views[0]["filters"] == {"project_id": None, "assignee": None, "tag": None}
+    assert views[0]["filters"] == {"project_id": None, "assignee": None, "tag": None, **NO_ADVANCED_FILTERS}
 
     space = client.post("/api/spaces", json={"name": "Private"}).json()
     assert [v["view_type"] for v in client.get(f"/api/views?space_id={space['id']}").json()] == ["kanban", "backlog", "gantt"]
@@ -839,7 +844,7 @@ def test_view_crud(client):
     assert created.status_code == 201
     view = created.json()
     assert (view["name"], view["view_type"]) == ("C7801 Kanban", "kanban")
-    assert view["filters"] == {"project_id": project_id, "assignee": None, "tag": None}
+    assert view["filters"] == {"project_id": project_id, "assignee": None, "tag": None, **NO_ADVANCED_FILTERS}
     assert client.get(f"/api/views/{view['id']}").json() == view
 
     renamed = client.put(f"/api/views/{view['id']}", json={"name": "Hull board"}).json()
@@ -848,7 +853,7 @@ def test_view_crud(client):
 
     refiltered = client.put(f"/api/views/{view['id']}", json={"filters": {"assignee": " Jose ", "tag": " weld "}}).json()
     assert refiltered["name"] == "Hull board"
-    assert refiltered["filters"] == {"project_id": None, "assignee": "Jose", "tag": "weld"}
+    assert refiltered["filters"] == {"project_id": None, "assignee": "Jose", "tag": "weld", **NO_ADVANCED_FILTERS}
 
     assert client.delete(f"/api/views/{view['id']}").status_code == 204
     assert view["id"] not in [v["id"] for v in client.get("/api/views?space_id=1").json()]

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { formatDay, NEUTRAL_TAG, NoteLink, Tag, TagPills } from "../components/TriageBoard";
+import { formatDay, NEUTRAL_TAG, NoteLink, ProjectTag, Tag, TagPills } from "../components/TriageBoard";
+import { optionColor, tint } from "../lib/colors";
 import { message } from "../lib/api";
 import { byName, personLabel, PersonBadge, usePeople, type Person } from "../lib/people";
 import { useSpace, type CustomFieldDef } from "../lib/space";
@@ -208,7 +209,7 @@ export default function TaskListView({
                         {task.note_path && <NoteLink path={task.note_path} />}
                       </div>
                     </td>
-                    <td className="px-2 py-1.5 font-mono text-xs">{task.project_code ?? "—"}</td>
+                    <td className="px-2 py-1.5 font-mono text-xs">{task.project_code ? <ProjectTag code={task.project_code} color={task.project_color} /> : "—"}</td>
                     <td className="px-2 py-1.5">
                       {task.status === "archived" || task.status === "blocked" ? (
                         <Tag className={task.status === "blocked" ? "border-accent bg-accent/15 text-accent" : NEUTRAL_TAG}>{STATUS_LABELS[task.status]}</Tag>
@@ -266,12 +267,15 @@ function DropdownCell({
 }) {
   const value = task.custom_fields[field.id];
   const current = typeof value === "string" ? value : "";
+  const color = optionColor(field, current);
   return (
     <select
       aria-label={`${field.name} of ${task.title}`}
       value={current}
       disabled={disabled}
       onChange={(e) => onChange(e.target.value || null)}
+      // A coloured option shows as a pill in its colour.
+      style={color ? { borderColor: tint(color, 0.6), color, backgroundColor: tint(color, 0.12) } : undefined}
       className={`field w-auto py-0.5 text-[13px] ${current ? "text-text-primary" : "text-text-muted"}`}
     >
       <option value="">—</option>

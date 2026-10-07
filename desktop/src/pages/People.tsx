@@ -2,7 +2,7 @@ import { useEffect, useState, type FormEvent } from "react";
 
 import PageHeader from "../components/PageHeader";
 import { getJson, message, sendJson } from "../lib/api";
-import { announcePeopleChange, ASSIGNEE_MAX, Avatar, byName, initials, type Person } from "../lib/people";
+import { announcePeopleChange, ASSIGNEE_MAX, Avatar, byName, type Person } from "../lib/people";
 import { useSpace } from "../lib/space";
 
 type PersonDraft = Pick<Person, "name" | "is_external"> & { email: string; company: string; avatar_url: string };
