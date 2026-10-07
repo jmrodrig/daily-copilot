@@ -101,7 +101,7 @@ body {
   @apply mt-4 text-lg;
 }
 .note-body p {
-  @apply my-[14px];
+  @apply my-3;
 }
 .note-body li > p {
   @apply my-1;
