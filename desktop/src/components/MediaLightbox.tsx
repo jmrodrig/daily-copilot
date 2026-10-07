@@ -1,18 +1,34 @@
+import type { PDFDocumentLoadingTask, PDFDocumentProxy, RenderTask } from "pdfjs-dist";
 import { useEffect, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
+import { getStroke } from "perfect-freehand";
 
-import { message } from "../lib/api";
+import { getJson, message, sendJson } from "../lib/api";
 
 /** The view: the image's scale (1 is its natural size) and its center's offset from the stage's, in screen pixels. */
 type View = { zoom: number; x: number; y: number };
 type Point = { x: number; y: number };
-type Tool = "draw" | "pan" | "select" | "erase" | "lasso-erase" | "line" | "arrow" | "rect" | "circle" | "text";
+type Tool = "draw" | "pan" | "select" | "erase" | "lasso-erase" | "line" | "arrow" | "rect" | "circle" | "text" | "comment";
 type Eraser = "erase" | "lasso-erase";
-/** A markup stroke, in image pixels; each point carries its line width, which follows the pen's pressure. A freehand
- * one ("draw", "erase", which rubs out the ink under it, or "lasso-erase", which rubs out all the ink inside the loop
- * it traces) has a point for each the pointer passed; a shape has two, where its drag started and where it is (or
- * ended); a text has one, its top left, whose width is its font size, and is turned by `angle` (in radians) about it. */
-type Stroke = { type: Exclude<Tool, "pan" | "select">; color: string; points: (Point & { width: number })[]; text?: string; angle?: number };
+/** A markup stroke, in image pixels; each point carries its line width. A freehand one ("draw") has a point for each
+ * the pointer passed; a shape has two, where its drag started and where it is (or ended); a text has one, its top
+ * left, whose width is its font size, and is turned by `angle` (in radians) about it. A freehand stroke with a `taper`
+ * is drawn as perfect-freehand's outline, thinned by a pen's pressure (kept on each point) or by the pointer's speed;
+ * one without (an older one, or a turned rectangle or ellipse) as a line whose width follows its points'.
+ * The erasers leave no strokes: they delete the ones they touch (or loop around). */
+type Stroke = {
+  type: Exclude<Tool, "pan" | "select" | "comment" | Eraser>;
+  color: string;
+  points: (Point & { width: number; pressure?: number })[];
+  text?: string;
+  angle?: number;
+  taper?: "pen" | "speed";
+};
+/** A sticky-note comment pinned to a point on the image or a PDF's page (counted from 0), in its pixels. */
+type Comment = Point & { id: string; text: string; isExpanded: boolean; page: number };
+/** `GET`/`PUT /api/notes/image/{name}/markup` (MediaMarkup in backend/schemas.py): the sidecar beside the file. An
+ * older one may still hold eraser strokes, which are dropped when it's read (see `strokesByPage`). */
+export type MediaMarkup = { strokes: ((Stroke | (Omit<Stroke, "type"> & { type: Eraser })) & { page?: number })[]; comments: Comment[] };
 /** A text being typed: where it goes, in image pixels, its font size, in them too, its ink and what's typed so far. */
 type TextEntry = Point & { size: number; color: string; value: string };
 /** A box, in image pixels. */
@@ -50,9 +66,10 @@ const textFont = (size: number) => `600 ${size}px system-ui, sans-serif`;
 /** The markup canvas's limits, in device pixels: a larger one fails to allocate (and draws nothing) or eats memory. */
 const MAX_CANVAS_SIDE = 16384;
 const MAX_CANVAS_AREA = 4096 * 4096;
-/** A saved markup's longest side, in pixels, beyond which it isn't scaled up: each save reloads the image it saved,
- * so scaling it up every time would grow it without end. */
-const MAX_SAVE_SIDE = 4096;
+/** A PDF page's pixels per point, as browsers show PDFs at 100%. */
+const PDF_SCALE = 96 / 72;
+/** How long a zoom rests before a PDF's page is rendered again at its resolution, in milliseconds. */
+const PDF_RENDER_DELAY = 150;
 /** The selection's handles' size, and how far above its box the rotate handle sits, in screen pixels. */
 const HANDLE_SIZE = 9;
 const ROTATE_OFFSET = 24;
@@ -68,28 +85,75 @@ const HANDLE_CURSORS: Record<Handle, string> = {
   sw: "cursor-nesw-resize",
 };
 
+/** Whether a URL is a PDF's, by its name. */
+export const isPdfUrl = (url: string) => /\.pdf$/i.test(new URL(url, window.location.href).pathname);
+
+/** A stored file's markup sidecar's URL (in the same space), or null for a file that isn't stored in one. */
+export function markupUrlOf(src: string): string | null {
+  const url = new URL(src, window.location.href);
+  if (url.origin !== window.location.origin || !/^\/api\/notes\/image\/[^/]+$/.test(url.pathname)) return null;
+  return `${url.pathname}/markup${url.search}`;
+}
+
+/** Start loading a PDF with pdf.js, which (with its worker) is only fetched once one is opened. */
+async function loadPdf(url: string): Promise<PDFDocumentLoadingTask> {
+  const [pdfjs, worker] = await Promise.all([import("pdfjs-dist"), import("pdfjs-dist/build/pdf.worker.min.mjs?url")]);
+  pdfjs.GlobalWorkerOptions.workerSrc = worker.default;
+  return pdfjs.getDocument({ url });
+}
+
+/** The sidecar holding strokes kept by page (the image's are page 0's) and comments; a comment's open state isn't
+ * kept, so opening one doesn't count as a change. */
+function snapshot(byPage: Map<number, Stroke[]>, comments: Comment[]): MediaMarkup {
+  return {
+    strokes: [...byPage].sort(([a], [b]) => a - b).flatMap(([page, list]) => list.map((s) => ({ ...s, page }))),
+    comments: comments.map((c) => ({ ...c, isExpanded: false })),
+  };
+}
+
+/** A sidecar's strokes, by the page they're on. An older sidecar's eraser strokes (which once masked the ink under
+ * them) are dropped: erasing now deletes strokes instead. */
+export function strokesByPage(markup: MediaMarkup): Map<number, Stroke[]> {
+  const byPage = new Map<number, Stroke[]>();
+  for (const { page = 0, ...stroke } of markup.strokes) {
+    if (isEraser(stroke.type)) continue;
+    byPage.set(page, [...(byPage.get(page) ?? []), stroke as Stroke]);
+  }
+  return byPage;
+}
+
 /**
- * A note's image, fullscreen: dragged to pan and zoomed with the wheel, a pinch or the footer's controls. Given
- * `onSave`, it can be marked up: a canvas over the image takes a stylus's (or, with the pen tool, the mouse's)
- * strokes, while touch still pans and pinch-zooms. Saving hands `onSave` the image with the strokes drawn on it, as
- * a PNG; closing or leaving markup saves them too, and Cancel discards them.
+ * A note's image or PDF, fullscreen: dragged to pan and zoomed with the wheel, a pinch or the footer's controls; a
+ * PDF is rendered with pdf.js, a page at a time. A stored file's markup, the strokes and comments drawn over it, is
+ * kept beside it in a JSON sidecar, never in the file, and shown over it. While `editable`, it can be marked up: a
+ * canvas over the file takes a stylus's (or, with the pen tool, the mouse's) strokes, while touch still pans and
+ * pinch-zooms, and the comment tool pins a sticky note where it's clicked. Saving, or closing or leaving markup, puts
+ * the sidecar, and Cancel goes back to it as it was.
  */
-export default function ImageLightbox({
+export default function MediaLightbox({
   src,
   alt,
   title,
   onClose,
-  onSave,
+  editable = false,
 }: {
   src: string;
   alt?: string | null;
   title?: string | null;
   onClose: () => void;
-  onSave?: (image: Blob) => Promise<void>;
+  editable?: boolean;
 }) {
   const stageRef = useRef<HTMLDivElement>(null);
-  const imageRef = useRef<HTMLImageElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const pdfCanvasRef = useRef<HTMLCanvasElement>(null);
+  const isPdf = isPdfUrl(src);
+  const markupUrl = markupUrlOf(src);
+  // The PDF, once it's loaded, its page shown (counted from 0) and how many it has.
+  const [pdf, setPdf] = useState<PDFDocumentProxy | null>(null);
+  const [page, setPage] = useState(0);
+  const pageRef = useRef(page);
+  pageRef.current = page;
+  // The size of the image, or the PDF's page, in its pixels.
   const [size, setSize] = useState<{ width: number; height: number } | null>(null);
   const [view, setView] = useState<View>({ zoom: 1, x: 0, y: 0 });
   const viewRef = useRef(view);
@@ -106,13 +170,22 @@ export default function ImageLightbox({
   const eraserMenuRef = useRef<HTMLSpanElement>(null);
   const [ink, setInk] = useState(INKS[0].value);
   const [lineSize, setLineSize] = useState(SIZES[1]);
+  // The strokes on the page shown (an image's all are), the other pages' strokes, and the comments on every page.
   const [strokes, setStrokes] = useState<Stroke[]>([]);
+  const otherPages = useRef(new Map<number, Stroke[]>());
+  const [comments, setComments] = useState<Comment[]>([]);
+  // The sidecar as last loaded or saved, to tell whether there's anything to save and to go back to on Cancel; and
+  // whether it's loaded, before which the markup can't be edited (a save would overwrite what's there).
+  const saved = useRef(JSON.stringify(snapshot(new Map(), [])));
+  const [loaded, setLoaded] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // The pointers down on the stage, where they last were: one pans, two pinch.
   const pointers = useRef(new Map<number, Point>());
   // The stroke being drawn, and the pointer drawing it.
   const drawing = useRef<{ pointerId: number; stroke: Stroke } | null>(null);
+  // The stroke eraser's drag: the pointer, and how near it a stroke must pass to be deleted, in image pixels.
+  const erasing = useRef<{ pointerId: number; reach: number } | null>(null);
   // The text being typed, if one is; the ref is cleared as soon as it's finished, so it's only finished once.
   const [textEntry, setTextEntry] = useState<TextEntry | null>(null);
   const textEntryRef = useRef(textEntry);
@@ -120,13 +193,13 @@ export default function ImageLightbox({
   const textInputRef = useRef<HTMLInputElement>(null);
   // The tool Shift swapped for the eraser, while it's held.
   const shiftFrom = useRef<Tool | null>(null);
-  // The strokes the select tool picked (those of them still in `strokes`), the lasso picking them as it's drawn, the
-  // drag transforming them, and the handle the pointer is over.
+  // The strokes the select tool picked (those of them still in `strokes`), the lasso picking them (or, for the lasso
+  // eraser, deleting them) as it's drawn, the drag transforming them, and the handle the pointer is over.
   const [selected, setSelected] = useState<Set<Stroke>>(() => new Set());
   const selection = strokes.filter((s) => selected.has(s));
   const selectionRef = useRef(selection);
   selectionRef.current = selection;
-  const selecting = useRef<{ pointerId: number; points: Point[] } | null>(null);
+  const selecting = useRef<{ pointerId: number; points: Point[]; erase: boolean } | null>(null);
   const transforming = useRef<Transform | null>(null);
   const [hover, setHover] = useState<Handle | null>(null);
 
@@ -167,50 +240,51 @@ export default function ImageLightbox({
     });
   }
 
-  /** Save the strokes onto the image (if there are any), handing it to `onSave`; whether it went (or there were none). */
+  /** Show a sidecar's markup, on the page shown. */
+  function hydrate(markup: MediaMarkup) {
+    const byPage = strokesByPage(markup);
+    setStrokes(byPage.get(pageRef.current) ?? []);
+    byPage.delete(pageRef.current);
+    otherPages.current = byPage;
+    setComments(markup.comments.map((c) => ({ ...c, isExpanded: false })));
+    setSelected(new Set());
+  }
+
+  // The sidecar's loaded once, when the lightbox opens.
+  useEffect(() => {
+    if (!markupUrl) return setLoaded(true);
+    const controller = new AbortController();
+    getJson<MediaMarkup>(markupUrl, controller.signal).then(
+      (markup) => {
+        hydrate(markup);
+        // As `current()` will put it, so it only counts as changed once it is.
+        saved.current = JSON.stringify(snapshot(strokesByPage(markup), markup.comments));
+        setLoaded(true);
+      },
+      (err) => !controller.signal.aborted && setError(`Could not load the markup (${message(err)}).`),
+    );
+    return () => controller.abort();
+  }, [markupUrl]);
+
+  /** The markup as it is now, every page's. */
+  function current(): MediaMarkup {
+    return snapshot(new Map([...otherPages.current, [page, strokes]]), comments);
+  }
+
+  /** Put the markup in its sidecar, if it changed; whether it went (or there was nothing to put). */
   async function save(): Promise<boolean> {
-    const image = imageRef.current;
-    if (!strokes.length || !onSave || !image || !size) return true;
+    if (!markupUrl || !loaded) return true;
+    const markup = current();
+    const json = JSON.stringify(markup);
+    if (json === saved.current) return true;
     setSaving(true);
     setError(null);
     try {
-      // At the screen's density, so the ink stays sharp on it however small the image is, but not past
-      // MAX_SAVE_SIDE (unless the image already is) or the canvas's limits.
-      const saveScale = Math.max(
-        1,
-        Math.min(
-          window.devicePixelRatio || 1,
-          MAX_SAVE_SIDE / Math.max(size.width, size.height),
-          MAX_CANVAS_SIDE / Math.max(size.width, size.height),
-          Math.sqrt(MAX_CANVAS_AREA / (size.width * size.height)),
-        ),
-      );
-      const merged = document.createElement("canvas");
-      merged.width = Math.max(1, Math.round(size.width * saveScale));
-      merged.height = Math.max(1, Math.round(size.height * saveScale));
-      const context = merged.getContext("2d");
-      if (!context) throw new Error("no canvas");
-      context.imageSmoothingQuality = "high";
-      context.drawImage(image, 0, 0, merged.width, merged.height);
-      // The strokes are redrawn at the merged canvas's resolution, not copied from the screen's canvas, whose
-      // resolution follows the zoom; on a layer of their own, so the eraser rubs out ink but not the image.
-      const layer = document.createElement("canvas");
-      layer.width = merged.width;
-      layer.height = merged.height;
-      const layerContext = layer.getContext("2d");
-      if (!layerContext) throw new Error("no canvas");
-      layerContext.scale(merged.width / size.width, merged.height / size.height);
-      drawStrokes(layerContext, strokes);
-      context.drawImage(layer, 0, 0);
-      // An image from another site taints the canvas, which then can't be read back.
-      const blob = await new Promise<Blob>((resolve, reject) =>
-        merged.toBlob((b) => (b ? resolve(b) : reject(new Error("the image could not be encoded"))), "image/png"),
-      );
-      await onSave(blob);
-      setStrokes([]);
+      await sendJson("PUT", markupUrl, markup);
+      saved.current = json;
       return true;
     } catch (err) {
-      setError(`Could not save the markup (${err instanceof DOMException && err.name === "SecurityError" ? "the image is from another site" : message(err)}).`);
+      setError(`Could not save the markup (${message(err)}).`);
       return false;
     } finally {
       setSaving(false);
@@ -227,15 +301,33 @@ export default function ImageLightbox({
 
   function cancelMarkup() {
     cancelText();
-    setStrokes([]);
+    hydrate(JSON.parse(saved.current) as MediaMarkup);
     setError(null);
     setMarkup(false);
   }
 
-  /** Escape: drop the text being typed, or close the eraser's menu, or drop the selection, or else the lightbox. */
+  /** Show a PDF's page (counted from 0), keeping the strokes on the one that was shown. */
+  function goToPage(next: number) {
+    if (!pdf || next < 0 || next >= pdf.numPages || next === page) return;
+    commitText();
+    otherPages.current.set(page, strokes);
+    setStrokes(otherPages.current.get(next) ?? []);
+    otherPages.current.delete(next);
+    setSelected(new Set());
+    setPage(next);
+  }
+
+  /** Close the open comments: one never written in goes. */
+  function collapseComments() {
+    setComments((all) => all.filter((c) => !c.isExpanded || c.text.trim()).map((c) => ({ ...c, isExpanded: false })));
+  }
+
+  /** Escape: drop the text being typed, or close the eraser's menu or the open comments, or drop the selection, or
+   * else the lightbox. */
   function escape() {
     if (textEntryRef.current) cancelText();
     else if (eraserMenu) setEraserMenu(false);
+    else if (comments.some((c) => c.isExpanded)) collapseComments();
     else if (selection.length && !transforming.current) setSelected(new Set());
     else void close();
   }
@@ -261,7 +353,82 @@ export default function ImageLightbox({
     return () => window.removeEventListener("keydown", keydown, true);
   }, []);
 
-  const editing = markup && !!onSave;
+  // A file that isn't stored in the space has nowhere to keep its markup.
+  const canMarkup = editable && !!markupUrl && loaded;
+  const editing = markup && canMarkup;
+
+  // A PDF's loaded when the lightbox opens, and let go when it closes.
+  useEffect(() => {
+    if (!isPdf) return;
+    let cancelled = false;
+    let task: PDFDocumentLoadingTask | null = null;
+    loadPdf(src)
+      .then((loading) => {
+        task = loading;
+        if (cancelled) void loading.destroy();
+        return loading.promise;
+      })
+      .then(
+        (doc) => !cancelled && setPdf(doc),
+        (err) => !cancelled && setError(`Could not open the PDF (${message(err)}).`),
+      );
+    return () => {
+      cancelled = true;
+      void task?.destroy();
+    };
+  }, [src, isPdf]);
+
+  // A PDF's page is sized, and fitted, when it's shown.
+  useEffect(() => {
+    if (!pdf) return;
+    let cancelled = false;
+    pdf.getPage(page + 1).then(
+      (pdfPage) => {
+        if (cancelled) return;
+        const { width, height } = pdfPage.getViewport({ scale: PDF_SCALE });
+        setView({ zoom: fitZoom(width, height), x: 0, y: 0 });
+        setSize({ width, height });
+      },
+      (err) => !cancelled && setError(`Could not show page ${page + 1} (${message(err)}).`),
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [pdf, page]);
+
+  // A PDF's page is rendered at the markup canvas's resolution, so it stays sharp as it's zoomed in: off screen, then
+  // copied over, so it doesn't flash blank. A zoom renders it again once it rests; till then it's scaled as it was.
+  useEffect(() => {
+    const shown = pdfCanvasRef.current;
+    if (!pdf || !size || !shown) return;
+    let cancelled = false;
+    let task: RenderTask | null = null;
+    const render = async () => {
+      try {
+        const pdfPage = await pdf.getPage(page + 1);
+        if (cancelled) return;
+        const offscreen = document.createElement("canvas");
+        offscreen.width = canvasWidth;
+        offscreen.height = canvasHeight;
+        task = pdfPage.render({ canvas: offscreen, viewport: pdfPage.getViewport({ scale: (PDF_SCALE * canvasWidth) / size.width }) });
+        await task.promise;
+        if (cancelled) return;
+        shown.width = offscreen.width;
+        shown.height = offscreen.height;
+        shown.getContext("2d")?.drawImage(offscreen, 0, 0);
+        shown.dataset.page = String(page);
+      } catch (err) {
+        if (!cancelled) setError(`Could not show page ${page + 1} (${message(err)}).`);
+      }
+    };
+    // The first render of a page isn't held back: there's nothing to show till it's done.
+    const timer = setTimeout(() => void render(), shown.dataset.page === String(page) ? PDF_RENDER_DELAY : 0);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+      task?.cancel();
+    };
+  }, [pdf, page, size, canvasWidth, canvasHeight]);
 
   // Holding Shift in markup swaps the tool for the eraser, and letting go swaps it back (unless another was picked
   // meanwhile). Not while typing, where Shift is for capitals.
@@ -363,7 +530,7 @@ export default function ImageLightbox({
   useLayoutEffect(redraw, [strokes, selected, size, markup, canvasWidth, canvasHeight, view.zoom]);
 
   /** Redraw the canvas whole, with the stroke being drawn too: a pinch can zoom mid-stroke, and a shape's drag moves
-   * its end. A lasso being drawn shows as its outline, and erases (or selects) once it's done. The selection shows
+   * its end. A lasso being drawn shows as its outline, and deletes (or selects) once it's done. The selection shows
    * as its box, with its handles: turned with it while it's being turned. */
   function redraw() {
     const canvas = canvasRef.current;
@@ -373,29 +540,15 @@ export default function ImageLightbox({
     context.clearRect(0, 0, canvas.width, canvas.height);
     context.scale(canvas.width / size.width, canvas.height / size.height);
     const current = drawing.current?.stroke;
-    const lasso = current?.type === "lasso-erase";
-    drawStrokes(context, current && !lasso ? [...strokes, current] : strokes);
-    if (current && lasso) drawLassoOutline(context, current.points, view.zoom);
+    drawStrokes(context, current ? [...strokes, current] : strokes);
     if (selecting.current) drawLassoOutline(context, selecting.current.points, view.zoom);
     const transform = transforming.current;
     if (transform?.handle === "rotate") drawSelection(context, transform.box, view.zoom, transform.angle);
     else if (selection.length) drawSelection(context, selectionBox(selection), view.zoom, 0);
   }
 
-  /** Draw on the canvas straight away, in image pixels. */
-  function drawOnCanvas(draw: (context: CanvasRenderingContext2D) => void) {
-    const canvas = canvasRef.current;
-    const context = canvas?.getContext("2d");
-    if (!canvas || !context || !size) return;
-    context.save();
-    context.resetTransform();
-    context.scale(canvas.width / size.width, canvas.height / size.height);
-    draw(context);
-    context.restore();
-  }
-
   /** Whether a pointer draws: in markup, a pen or the mouse with any tool but Move. Touch always pans. */
-  const draws = (e: ReactPointerEvent) => markup && tool !== "pan" && (e.pointerType === "pen" || e.pointerType === "mouse");
+  const draws = (e: ReactPointerEvent) => editing && tool !== "pan" && (e.pointerType === "pen" || e.pointerType === "mouse");
 
   /** A pointer's position on the image, in its pixels. */
   function imagePoint(e: { clientX: number; clientY: number }): Point | null {
@@ -405,10 +558,21 @@ export default function ImageLightbox({
     return { x: ((e.clientX - rect.left) / rect.width) * size.width, y: ((e.clientY - rect.top) / rect.height) * size.height };
   }
 
-  /** A stroke's width in image pixels: the line size on screen at the current zoom, thickened by a pen's pressure
-   * for the pen and the stroke eraser (a shape's line, and a lasso's, is even). */
-  const lineWidth = (pointerType: string, pressure: number) =>
-    (lineSize / view.zoom) * (pointerType === "pen" && (tool === "draw" || tool === "erase") ? 0.5 + (pressure || 0.5) : 1);
+  /** A stroke's width in image pixels: the line size on screen at the current zoom. A freehand stroke's thins from
+   * it with the pen's pressure or the pointer's speed (see `drawFreehand`). */
+  const lineWidth = lineSize / view.zoom;
+
+  /** A freehand stroke's point at a pointer event: with its pressure, for a pen. */
+  const freehandPoint = (point: Point, pointerType: string, pressure: number) =>
+    pointerType === "pen" ? { ...point, width: lineWidth, pressure } : { ...point, width: lineWidth };
+
+  /** Delete the strokes whose ink passes within the stroke eraser's reach of a point. */
+  function eraseAt(point: Point, reach: number) {
+    setStrokes((all) => {
+      const kept = all.filter((s) => !touches(s, point, reach));
+      return kept.length === all.length ? all : kept;
+    });
+  }
 
   function pointerDown(e: ReactPointerEvent) {
     if (e.button !== 0 && e.pointerType === "mouse") return;
@@ -416,7 +580,19 @@ export default function ImageLightbox({
     e.currentTarget.setPointerCapture(e.pointerId);
     if (draws(e)) {
       const point = imagePoint(e);
-      if (!point || drawing.current || selecting.current || transforming.current || tool === "pan") return;
+      if (!point || drawing.current || erasing.current || selecting.current || transforming.current || tool === "pan") return;
+      if (tool === "erase") {
+        // Deletes every stroke it touches, here and along its drag.
+        const reach = Math.max(lineSize, ERASER_MIN_REACH) / view.zoom;
+        erasing.current = { pointerId: e.pointerId, reach };
+        eraseAt(point, reach);
+        return;
+      }
+      if (tool === "lasso-erase") {
+        // Deletes the strokes wholly inside the loop it draws, once it's done.
+        selecting.current = { pointerId: e.pointerId, points: [point], erase: true };
+        return;
+      }
       if (tool === "select") {
         // On the selection, or a handle of it, transforms it; anywhere else drops it, and starts a lasso for another.
         const box = selection.length ? selectionBox(selection) : null;
@@ -427,7 +603,18 @@ export default function ImageLightbox({
         }
         setSelected(new Set());
         setHover(null);
-        selecting.current = { pointerId: e.pointerId, points: [point] };
+        selecting.current = { pointerId: e.pointerId, points: [point], erase: false };
+        return;
+      }
+      if (tool === "comment") {
+        // A click pins a comment, open to be written in; any other open one closes.
+        commitText();
+        const newId = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2);
+        const comment: Comment = { id: newId, x: point.x, y: point.y, text: "", isExpanded: true, page };
+        setComments((all) => [
+          ...all.filter((c) => !c.isExpanded || c.text.trim()).map((c) => ({ ...c, isExpanded: false })),
+          comment,
+        ]);
         return;
       }
       if (tool === "text") {
@@ -436,11 +623,12 @@ export default function ImageLightbox({
         else setTextEntry({ ...point, size: textSize(lineSize) / view.zoom, color: ink, value: "" });
         return;
       }
-      const width = lineWidth(e.pointerType, e.pressure);
-      const stroke: Stroke = { type: tool, color: ink, points: [{ ...point, width }] };
+      const stroke: Stroke = isShape(tool)
+        ? { type: tool, color: ink, points: [{ ...point, width: lineWidth }] }
+        : { type: tool, color: ink, points: [freehandPoint(point, e.pointerType, e.pressure)], taper: e.pointerType === "pen" ? "pen" : "speed" };
       drawing.current = { pointerId: e.pointerId, stroke };
-      // A shape shows once it's dragged, and a lasso once it's drawn out.
-      if (!isShape(tool) && tool !== "lasso-erase") drawOnCanvas((context) => drawDot(context, stroke));
+      // A shape shows once it's dragged.
+      if (!isShape(tool)) redraw();
       return;
     }
     pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
@@ -458,17 +646,23 @@ export default function ImageLightbox({
         redraw();
         return;
       }
-      // A pen reports more points than it fires events for; they're all drawn, for a smooth line.
+      // A pen reports more points than it fires events for; they're all kept, for a smooth line. Its outline is
+      // worked out afresh from them all, so the canvas is redrawn.
       const events = e.nativeEvent.getCoalescedEvents?.() ?? [];
-      const lasso = stroke.type === "lasso-erase";
       for (const event of events.length ? events : [e.nativeEvent]) {
         const point = imagePoint(event);
-        if (!point) continue;
-        stroke.points.push({ ...point, width: lineWidth(e.pointerType, event.pressure) });
-        if (!lasso) drawOnCanvas((context) => drawSegment(context, stroke, stroke.points.length - 1));
+        if (point) stroke.points.push(freehandPoint(point, e.pointerType, event.pressure));
       }
-      // A lasso's outline is dashed, so it's redrawn whole rather than a segment at a time.
-      if (lasso) redraw();
+      redraw();
+      return;
+    }
+    const eraser = erasing.current;
+    if (eraser?.pointerId === e.pointerId) {
+      const events = e.nativeEvent.getCoalescedEvents?.() ?? [];
+      for (const event of events.length ? events : [e.nativeEvent]) {
+        const point = imagePoint(event);
+        if (point) eraseAt(point, eraser.reach);
+      }
       return;
     }
     const transform = transforming.current;
@@ -530,37 +724,55 @@ export default function ImageLightbox({
       setSelected((picked) => new Set(picked));
       return;
     }
+    if (erasing.current?.pointerId === e.pointerId) {
+      erasing.current = null;
+      return;
+    }
     const lassoing = selecting.current;
     if (lassoing?.pointerId === e.pointerId) {
       selecting.current = null;
-      // A lasso picks the strokes it mostly encloses; one that encloses nothing (a click) just clears its outline.
+      // A lasso picks (or the lasso eraser deletes) the strokes it wholly encloses; one that encloses nothing (a
+      // click) just clears its outline.
       if (lassoing.points.length < 3) return redraw();
-      setSelected(new Set(strokes.filter((s) => lassoed(s, lassoing.points))));
+      const inside = new Set(strokes.filter((s) => lassoed(s, lassoing.points)));
+      if (!lassoing.erase) setSelected(inside);
+      else if (inside.size) setStrokes((all) => all.filter((s) => !inside.has(s)));
+      else redraw();
       return;
     }
     const current = drawing.current;
     if (current?.pointerId !== e.pointerId) return;
     drawing.current = null;
-    // A shape that was never dragged isn't one, nor is a lasso that encloses nothing (which still needs its
-    // outline cleared).
+    // A shape that was never dragged isn't one.
     if (isShape(current.stroke.type) && current.stroke.points.length < 2) return;
-    if (current.stroke.type === "lasso-erase" && current.stroke.points.length < 3) return redraw();
     setStrokes((s) => [...s, current.stroke]);
   }
 
   const heading = title || alt || name;
+  const kind = isPdf ? "PDF" : "Image";
+  const pageComments = comments.filter((c) => c.page === page);
+
+  /** Change a comment, or, given null, remove it. */
+  function updateComment(id: string, next: Partial<Comment> | null) {
+    setComments((all) => (next ? all.map((c) => (c.id === id ? { ...c, ...next } : c)) : all.filter((c) => c.id !== id)));
+  }
 
   return createPortal(
-    <div role="dialog" aria-modal aria-label={heading || "Image"} className="fixed inset-0 z-50 flex flex-col bg-background/95">
+    <div role="dialog" aria-modal aria-label={heading || kind} className="fixed inset-0 z-50 flex flex-col bg-background/95">
       <header className="flex min-h-14 items-center justify-between gap-4 border-b border-border-default px-5 py-2">
         <div className="min-w-0">
-          <p className="truncate text-sm font-medium text-text-primary">{heading || "Image"}</p>
+          <p className="truncate text-sm font-medium text-text-primary">{heading || kind}</p>
           <p className="truncate font-mono text-[13px] text-text-muted">
-            {[size && `${size.width} × ${size.height}`, name !== heading && name].filter(Boolean).join(" · ")}
+            {[
+              pdf ? `Page ${page + 1} of ${pdf.numPages}` : size && `${size.width} × ${size.height}`,
+              name !== heading && name,
+            ]
+              .filter(Boolean)
+              .join(" · ")}
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          {onSave && !markup && (
+          {canMarkup && !markup && (
             <button type="button" className="btn" onClick={() => setMarkup(true)} disabled={!size}>
               Edit / Markup
             </button>
@@ -637,10 +849,10 @@ export default function ImageLightbox({
               aria-pressed={ink === c.value}
               onClick={() => {
                 setInk(c.value);
-                // Ink is for drawing: picking one recolours the selection (but not its erasers), or else swaps Move,
-                // Select or an eraser for the pen, but keeps a shape or text.
+                // Ink is for drawing: picking one recolours the selection, or else swaps Move, Select or an eraser
+                // for the pen, but keeps a shape or text.
                 if (tool === "select" && selection.length) {
-                  replaceStrokes(new Map(selection.filter((s) => !isEraser(s.type)).map((s) => [s, { ...s, color: c.value }])));
+                  replaceStrokes(new Map(selection.map((s) => [s, { ...s, color: c.value }])));
                 } else if (tool === "pan" || tool === "select" || isEraser(tool)) setTool("draw");
               }}
               className={`h-6 w-6 rounded-full border-2 ${ink === c.value ? "border-text-primary" : "border-transparent"}`}
@@ -665,7 +877,15 @@ export default function ImageLightbox({
           <Segment on={false} label="Undo the last stroke" disabled={!strokes.length || saving} onClick={() => setStrokes((s) => s.slice(0, -1))}>
             Undo
           </Segment>
-          <Segment on={false} label="Clear the markup" disabled={!strokes.length || saving} onClick={() => setStrokes([])}>
+          <Segment
+            on={false}
+            label={pdf ? "Clear this page's markup and comments" : "Clear the markup and comments"}
+            disabled={(!strokes.length && !pageComments.length) || saving}
+            onClick={() => {
+              setStrokes([]);
+              setComments((all) => all.filter((c) => c.page !== page));
+            }}
+          >
             Clear
           </Segment>
           <span className="ml-auto flex items-center gap-2">
@@ -708,22 +928,23 @@ export default function ImageLightbox({
             visibility: size ? "visible" : "hidden",
           }}
         >
-          <img
-            ref={imageRef}
-            src={src}
-            alt={alt ?? ""}
-            draggable={false}
-            onLoad={(e) => {
-              const { naturalWidth: width, naturalHeight: height } = e.currentTarget;
-              // Fitted when first shown; a saved markup reloads the same image, at the same view.
-              if (!size) setView({ zoom: fitZoom(width, height), x: 0, y: 0 });
-              setSize({ width, height });
-            }}
-            className="block h-full w-full max-w-none shadow-lg"
-          />
-          {editing && size && (
-            <canvas ref={canvasRef} width={canvasWidth} height={canvasHeight} className="absolute inset-0 h-full w-full" />
+          {isPdf ? (
+            <canvas ref={pdfCanvasRef} aria-label={heading || kind} className="block h-full w-full bg-white shadow-lg" />
+          ) : (
+            <img
+              src={src}
+              alt={alt ?? ""}
+              draggable={false}
+              onLoad={(e) => {
+                const { naturalWidth: width, naturalHeight: height } = e.currentTarget;
+                setView({ zoom: fitZoom(width, height), x: 0, y: 0 });
+                setSize({ width, height });
+              }}
+              className="block h-full w-full max-w-none shadow-lg"
+            />
           )}
+          {/* The markup shows over the file whether or not it's being edited. */}
+          {size && <canvas ref={canvasRef} width={canvasWidth} height={canvasHeight} className="absolute inset-0 h-full w-full" />}
           {editing && textEntry && (
             // In image pixels, like the canvas, so it zooms with the image and its text sits where it's drawn.
             <input
@@ -753,6 +974,20 @@ export default function ImageLightbox({
               }}
             />
           )}
+          {size &&
+            pageComments.map((c) => (
+              <CommentPin
+                key={c.id}
+                comment={c}
+                zoom={view.zoom}
+                editable={editing}
+                onToggle={() =>
+                  c.isExpanded && !c.text.trim() ? updateComment(c.id, null) : updateComment(c.id, { isExpanded: !c.isExpanded })
+                }
+                onSave={(text) => updateComment(c.id, text.trim() ? { text, isExpanded: false } : null)}
+                onDelete={() => updateComment(c.id, null)}
+              />
+            ))}
         </div>
       </div>
       <footer className="flex items-center justify-center gap-1 border-t border-border-default px-5 py-1.5">
@@ -772,6 +1007,20 @@ export default function ImageLightbox({
         <Segment on={false} label="Actual size" onClick={() => zoomTo(1)}>
           100%
         </Segment>
+        {pdf && pdf.numPages > 1 && (
+          <>
+            <span aria-hidden className="mx-1 h-5 w-px bg-border-default" />
+            <Segment on={false} label="Previous page" disabled={page === 0 || saving} onClick={() => goToPage(page - 1)}>
+              ‹
+            </Segment>
+            <span role="status" aria-label="Page" className="w-16 text-center font-mono text-xs text-text-secondary">
+              {page + 1} / {pdf.numPages}
+            </span>
+            <Segment on={false} label="Next page" disabled={page === pdf.numPages - 1 || saving} onClick={() => goToPage(page + 1)}>
+              ›
+            </Segment>
+          </>
+        )}
       </footer>
     </div>,
     document.body,
@@ -786,17 +1035,20 @@ const ERASERS: { tool: Eraser; name: string; label: string; icon: string }[] = [
   {
     tool: "lasso-erase",
     name: "Lasso eraser",
-    label: "Lasso eraser: loop around ink to rub it out",
+    label: "Lasso eraser: loop around ink to delete it",
     // A lasso's loop, its rope running down to an eraser's block.
     icon: "M7 2c2.8 0 5 1.3 5 3s-2.2 3-5 3-5-1.3-5-3 2.2-3 5-3z M5.4 7.8c-.6 1.2-.2 2.6 1.2 3.2.9.4 1.9.7 2.7 1.5 M8.6 13.2l3.6-3.6a.7.7 0 0 1 1 0l1.2 1.2a.7.7 0 0 1 0 1L12 14.2H9.6z M10.4 11.4l2.2 2.2",
   },
   {
     tool: "erase",
     name: "Stroke eraser",
-    label: "Stroke eraser: a stylus or the mouse rubs out ink",
+    label: "Stroke eraser: a stylus or the mouse deletes the ink it touches",
     icon: "M6 13.5h7.5 M2.8 9.7l6.5-6.5a1 1 0 0 1 1.4 0l2.6 2.6a1 1 0 0 1 0 1.4L7.6 13H5.1z M6 6.5l4 4",
   },
 ];
+
+/** A speech bubble, in a 16 × 16 box. */
+const COMMENT_ICON = "M2.5 3.5h11v7h-6l-3 2.5v-2.5h-2z";
 
 /** The markup tools, with their icons (paths in a 16 × 16 box, dashed for some). */
 const TOOLS: { tool: Tool; label: string; icon: string; dashed?: boolean }[] = [
@@ -813,15 +1065,16 @@ const TOOLS: { tool: Tool; label: string; icon: string; dashed?: boolean }[] = [
   { tool: "rect", label: "Rectangle: drag across its corners", icon: "M2.5 4h11v8h-11z" },
   { tool: "circle", label: "Ellipse: drag across its bounds", icon: "M14 8a6 4.5 0 1 1-12 0a6 4.5 0 1 1 12 0z" },
   { tool: "text", label: "Text: click to type some", icon: "M3 4.5V3h10v1.5 M8 3v10 M6 13h4" },
+  { tool: "comment", label: "Comment: click to pin a sticky note there", icon: COMMENT_ICON },
   { tool: "pan", label: "Move: a stylus or the mouse pans", icon: "M8 1.5v13 M1.5 8h13 M6 3.5l2-2 2 2 M6 12.5l2 2 2-2 M3.5 6l-2 2 2 2 M12.5 6l2 2-2 2" },
 ];
 
 /** Draw whole strokes, in image pixels. */
-function drawStrokes(context: CanvasRenderingContext2D, strokes: Stroke[]) {
+export function drawStrokes(context: CanvasRenderingContext2D, strokes: Stroke[]) {
   for (const stroke of strokes) {
     if (isShape(stroke.type)) drawShape(context, stroke);
-    else if (stroke.type === "lasso-erase") drawLasso(context, stroke);
     else if (stroke.type === "text") drawText(context, stroke);
+    else if (stroke.taper) drawFreehand(context, stroke);
     else {
       for (let i = 1; i < stroke.points.length; i++) drawSegment(context, stroke, i);
       if (stroke.points.length === 1) drawDot(context, stroke);
@@ -829,10 +1082,8 @@ function drawStrokes(context: CanvasRenderingContext2D, strokes: Stroke[]) {
   }
 }
 
-/** Set the context up to draw a stroke: in its ink, or, for the eraser's, rubbing ink out. Reset after with
- * `globalCompositeOperation = "source-over"`. */
+/** Set the context up to draw a stroke, in its ink. */
 function inkFor(context: CanvasRenderingContext2D, stroke: Stroke) {
-  context.globalCompositeOperation = isEraser(stroke.type) ? "destination-out" : "source-over";
   context.strokeStyle = stroke.color;
   context.fillStyle = stroke.color;
   context.lineCap = "round";
@@ -849,7 +1100,21 @@ function drawSegment(context: CanvasRenderingContext2D, stroke: Stroke, i: numbe
   context.moveTo(from.x, from.y);
   context.lineTo(to.x, to.y);
   context.stroke();
-  context.globalCompositeOperation = "source-over";
+}
+
+/** Draw a tapered freehand stroke as the polygon perfect-freehand outlines around its points, filled. */
+function drawFreehand(context: CanvasRenderingContext2D, stroke: Stroke) {
+  const pen = stroke.taper === "pen";
+  const outline = getStroke(
+    stroke.points.map((p) => [p.x, p.y, p.pressure ?? 0.5]),
+    { size: stroke.points[0].width, thinning: 0.5, smoothing: 0.5, streamline: 0.5, simulatePressure: !pen },
+  );
+  if (!outline.length) return;
+  inkFor(context, stroke);
+  context.beginPath();
+  outline.forEach(([x, y], i) => (i ? context.lineTo(x, y) : context.moveTo(x, y)));
+  context.closePath();
+  context.fill();
 }
 
 /** Draw a stroke's first point: a tap leaves a dot. */
@@ -859,7 +1124,6 @@ function drawDot(context: CanvasRenderingContext2D, stroke: Stroke) {
   context.beginPath();
   context.arc(x, y, width / 2, 0, Math.PI * 2);
   context.fill();
-  context.globalCompositeOperation = "source-over";
 }
 
 /** Trace a lasso's loop, closed. */
@@ -867,17 +1131,6 @@ function traceLasso(context: CanvasRenderingContext2D, points: Point[]) {
   context.beginPath();
   points.forEach(({ x, y }, i) => (i ? context.lineTo(x, y) : context.moveTo(x, y)));
   context.closePath();
-}
-
-/** Rub out the ink inside a lasso's loop, and under its line, so the loop's edge goes cleanly too. */
-function drawLasso(context: CanvasRenderingContext2D, stroke: Stroke) {
-  if (stroke.points.length < 3) return;
-  inkFor(context, stroke);
-  context.lineWidth = stroke.points[0].width;
-  traceLasso(context, stroke.points);
-  context.fill();
-  context.stroke();
-  context.globalCompositeOperation = "source-over";
 }
 
 /** Stroke the path traced dashed black on white, so it shows on any ink or image, and thin at any `zoom`. */
@@ -937,7 +1190,6 @@ function drawText(context: CanvasRenderingContext2D, stroke: Stroke) {
   context.textBaseline = "top";
   context.fillText(stroke.text ?? "", 0, 0);
   context.restore();
-  context.globalCompositeOperation = "source-over";
 }
 
 /** A text's width, in the pixels its size is in. */
@@ -1014,10 +1266,35 @@ function insideLoop({ x, y }: Point, loop: Point[]): boolean {
   return inside;
 }
 
-/** Whether a lasso's loop picks a stroke: whether it encloses at least half of its outline. */
+/** Whether a lasso's loop picks a stroke: whether it encloses all of its outline (an ellipse's checked all round),
+ * so one it only crosses, or mostly encloses, is left out. */
 function lassoed(stroke: Stroke, loop: Point[]): boolean {
-  const points = outline(stroke);
-  return points.filter((p) => insideLoop(p, loop)).length * 2 >= points.length;
+  return outline(stroke, 48).every((p) => insideLoop(p, loop));
+}
+
+/** The least the stroke eraser reaches from the pointer, in screen pixels, so the thinnest line size still hits ink. */
+const ERASER_MIN_REACH = 6;
+
+/** How far a point is from the segment between `a` and `b`. */
+function segmentDistance(p: Point, a: Point, b: Point): number {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const length = dx * dx + dy * dy;
+  const t = length ? Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / length)) : 0;
+  return distance(p, { x: a.x + t * dx, y: a.y + t * dy });
+}
+
+/** Whether a stroke's ink is within `reach` of a point: a text's anywhere over its box, any other's along its line
+ * (a rectangle's or ellipse's closed), widened by half its width. */
+function touches(stroke: Stroke, point: Point, reach: number): boolean {
+  const points = outline(stroke, 48);
+  const closed = stroke.type === "text" || stroke.type === "rect" || stroke.type === "circle";
+  if (stroke.type === "text" && insideLoop(point, points)) return true;
+  const near = reach + (stroke.type === "text" ? 0 : Math.max(...stroke.points.map((p) => p.width)) / 2);
+  if (points.length === 1) return distance(point, points[0]) <= near;
+  const segments = closed ? points.length : points.length - 1;
+  for (let i = 0; i < segments; i++) if (segmentDistance(point, points[i], points[(i + 1) % points.length]) <= near) return true;
+  return false;
 }
 
 /** The box around strokes' ink. */
@@ -1145,6 +1422,199 @@ function Segment({
     >
       {children}
     </button>
+  );
+}
+
+/**
+ * A comment, pinned where it was placed: in image pixels, like the canvas, so it stays on its spot as the view pans
+ * and zooms, but scaled back to stay the same size on screen. Collapsed, it's an icon, which a click opens to a
+ * sticky note: written in and saved (which collapses it again) while `editable`, else just read.
+ */
+export function CommentPin({
+  comment,
+  zoom,
+  editable,
+  onToggle,
+  onSave,
+  onDelete,
+}: {
+  comment: Comment;
+  zoom: number;
+  editable: boolean;
+  onToggle: () => void;
+  onSave: (text: string) => void;
+  onDelete: () => void;
+}) {
+  const [draft, setDraft] = useState(comment.text);
+  const fieldRef = useRef<HTMLTextAreaElement>(null);
+
+  // Opening it starts from what's saved, in the field, once the click that opened it is done.
+  useEffect(() => {
+    if (!comment.isExpanded) return;
+    setDraft(comment.text);
+    const timer = setTimeout(() => fieldRef.current?.focus());
+    return () => clearTimeout(timer);
+  }, [comment.isExpanded]);
+
+  return (
+    <div
+      className="absolute"
+      style={{ left: comment.x, top: comment.y, transform: `scale(${1 / zoom})`, transformOrigin: "0 0" }}
+      // Clicking and typing in it isn't drawing on, or panning, the stage.
+      onPointerDown={(e) => e.stopPropagation()}
+      onDoubleClick={(e) => e.stopPropagation()}
+    >
+      <button
+        type="button"
+        title={comment.text || "Comment"}
+        aria-label={comment.isExpanded ? "Close the comment" : "Open the comment"}
+        aria-expanded={comment.isExpanded}
+        onClick={onToggle}
+        className={`absolute flex h-7 w-7 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border-2 border-white shadow-lg ${
+          comment.isExpanded ? "bg-accent text-white" : "bg-yellow-300 text-neutral-900 hover:scale-110"
+        }`}
+      >
+        <svg aria-hidden width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round">
+          <path d={COMMENT_ICON} />
+        </svg>
+      </button>
+      {comment.isExpanded && (
+        <div role="note" className="absolute left-5 top-2 w-64 cursor-auto rounded-md bg-yellow-100 p-2 text-neutral-900 shadow-xl">
+          {editable ? (
+            <>
+              <textarea
+                ref={fieldRef}
+                aria-label="Comment"
+                value={draft}
+                rows={4}
+                placeholder="Write a comment…"
+                onChange={(e) => setDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+                    e.preventDefault();
+                    onSave(draft);
+                  }
+                }}
+                className="block w-full resize-none select-text rounded border border-yellow-300 bg-yellow-50 p-1.5 text-sm text-neutral-900 placeholder:text-neutral-500 focus:outline-none"
+              />
+              <div className="mt-2 flex items-center justify-end gap-2">
+                {comment.text && (
+                  <button type="button" onClick={onDelete} className="mr-auto rounded px-2 py-1 text-xs font-medium text-neutral-600 hover:bg-yellow-200">
+                    Delete
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => onSave(draft)}
+                  title="Save (Ctrl+Enter)"
+                  className="rounded bg-neutral-900 px-3 py-1 text-xs font-medium text-yellow-50 hover:bg-neutral-700"
+                >
+                  Save
+                </button>
+              </div>
+            </>
+          ) : (
+            <p className="max-h-60 select-text overflow-auto whitespace-pre-wrap text-sm">{comment.text}</p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * A stored image's markup, shown over it where it sits in a note: its strokes on a canvas, and its comments' pins,
+ * which open to be read. Laid over the top of the image's (positioned) box at its width, scaled down from the image's
+ * pixels; it doesn't take the pointer, but its pins do. Loaded again whenever `version` changes, as it does once the
+ * lightbox, which may have changed it, closes.
+ */
+export function MarkupOverlay({ src, version = 0 }: { src: string; version?: number }) {
+  const boxRef = useRef<HTMLSpanElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const markupUrl = markupUrlOf(src);
+  // The image's strokes and comments (its page 0's), its size in its pixels, and its width on screen.
+  const [markup, setMarkup] = useState<{ strokes: Stroke[]; comments: Comment[] } | null>(null);
+  const [size, setSize] = useState<{ width: number; height: number } | null>(null);
+  const [shown, setShown] = useState(0);
+  // The comment opened to be read.
+  const [open, setOpen] = useState<string | null>(null);
+  const empty = !markup || (!markup.strokes.length && !markup.comments.length);
+
+  useEffect(() => {
+    if (!markupUrl) return;
+    const controller = new AbortController();
+    getJson<MediaMarkup>(markupUrl, controller.signal).then(
+      (sidecar) =>
+        setMarkup({ strokes: strokesByPage(sidecar).get(0) ?? [], comments: sidecar.comments.filter((c) => (c.page ?? 0) === 0) }),
+      // The note still shows the image without it.
+      () => !controller.signal.aborted && setMarkup(null),
+    );
+    return () => controller.abort();
+  }, [markupUrl, version]);
+
+  // The image's own size, which the markup's pixels are in: only wanted once there's markup to show.
+  useEffect(() => {
+    if (empty || size) return;
+    let cancelled = false;
+    const image = new Image();
+    image.onload = () => !cancelled && setSize({ width: image.naturalWidth, height: image.naturalHeight });
+    image.src = src;
+    return () => {
+      cancelled = true;
+    };
+  }, [src, empty, size]);
+
+  // Its width on screen follows the image's (a resize, a narrower window).
+  useEffect(() => {
+    const box = boxRef.current;
+    if (!box) return;
+    const observer = new ResizeObserver(() => setShown(box.clientWidth));
+    observer.observe(box);
+    setShown(box.clientWidth);
+    return () => observer.disconnect();
+  }, [empty, size]);
+
+  const scale = size && shown ? shown / size.width : 0;
+
+  useLayoutEffect(() => {
+    const canvas = canvasRef.current;
+    const context = canvas?.getContext("2d");
+    if (!canvas || !context || !size || !scale || !markup) return;
+    const pixels = Math.min(window.devicePixelRatio * scale, MAX_CANVAS_SIDE / Math.max(size.width, size.height));
+    canvas.width = Math.max(1, Math.round(size.width * pixels));
+    canvas.height = Math.max(1, Math.round(size.height * pixels));
+    context.resetTransform();
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    context.scale(canvas.width / size.width, canvas.height / size.height);
+    drawStrokes(context, markup.strokes);
+  }, [markup, size, scale]);
+
+  if (!markupUrl || empty || !size || !markup) return null;
+  return (
+    <span
+      ref={boxRef}
+      aria-hidden={!markup.comments.length}
+      className="pointer-events-none absolute left-0 top-0 z-[1] block w-full"
+      style={{ aspectRatio: `${size.width} / ${size.height}` }}
+    >
+      <canvas ref={canvasRef} className="absolute inset-0 h-full w-full" />
+      {scale > 0 && (
+        <span className="absolute left-0 top-0 block" style={{ width: size.width, height: size.height, transform: `scale(${scale})`, transformOrigin: "0 0" }}>
+          {markup.comments.map((c) => (
+            <span key={c.id} className="pointer-events-auto">
+              <CommentPin
+                comment={{ ...c, isExpanded: open === c.id }}
+                zoom={scale}
+                editable={false}
+                onToggle={() => setOpen((id) => (id === c.id ? null : c.id))}
+                onSave={() => setOpen(null)}
+                onDelete={() => setOpen(null)}
+              />
+            </span>
+          ))}
+        </span>
+      )}
+    </span>
   );
 }
 

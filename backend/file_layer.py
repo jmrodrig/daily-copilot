@@ -19,6 +19,7 @@ so an overwritten or deleted note can always be recovered.
 
 import functools
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -512,3 +513,30 @@ def asset_path(name: str, *, notes_dir: str | Path | None = None) -> Path:
     if not path.is_file():
         raise FileNotFoundError(f"No asset {name}")
     return path
+
+
+# A stored asset's markup (strokes and comments drawn over it in the lightbox) lives beside it, in `<name>.json`,
+# so the asset itself is never changed. The sidecar's name has two suffixes, so it can't be fetched as an asset.
+MARKUP_SUFFIX = ".json"
+
+
+def read_asset_markup(name: str, *, notes_dir: str | Path | None = None) -> dict[str, Any] | None:
+    """An asset's markup sidecar, or None if it has none. Raises as `asset_path` does for the asset."""
+    path = asset_path(name, notes_dir=notes_dir).with_name(name + MARKUP_SUFFIX)
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+
+
+def write_asset_markup(name: str, markup: dict[str, Any], *, notes_dir: str | Path | None = None) -> None:
+    """Save an asset's markup sidecar, swapped in whole. Raises as `asset_path` does for the asset."""
+    path = asset_path(name, notes_dir=notes_dir).with_name(name + MARKUP_SUFFIX)
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(markup, fh)
+        os.replace(tmp_name, path)
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise

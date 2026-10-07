@@ -1,4 +1,4 @@
-import { Extension } from "@tiptap/core";
+import { Extension, getMarkRange } from "@tiptap/core";
 import type { ImageOptions } from "@tiptap/extension-image";
 import { TaskItem, TaskList } from "@tiptap/extension-list";
 import { TableKit, TableView } from "@tiptap/extension-table";
@@ -24,7 +24,7 @@ import { useEffect, useLayoutEffect, useRef, useState, useMemo, useCallback, typ
 
 import { errorDetail, message } from "../lib/api";
 import type { TaskItem as TaskRow } from "../lib/tasks";
-import ImageLightbox, { ExpandButton } from "./ImageLightbox";
+import MediaLightbox, { ExpandButton, isPdfUrl, MarkupOverlay } from "./MediaLightbox";
 import { LinkPanel, panelPosition, TaskPanel, type PanelDraft } from "./refPanels";
 import { pillContent, ReferencePill, taskHref, type RefPillAttrs } from "./referencePill";
 import { SlashCommand, SlashMenu, type SlashItem, type SlashMenuState } from "./slashCommand";
@@ -52,8 +52,8 @@ import {
  * A rich-text editor over a note's title and markdown body (front-matter is kept by the backend), laid out like a
  * Confluence page: a sticky formatting toolbar across the page, then the title, `children` (the note's properties
  * and tasks), and the body in a centered text column, edited rendered and handed back as markdown. Pasted or dropped
- * images and files are uploaded to the space (a file is linked by name), and an image opens fullscreen to be marked
- * up. Ctrl/Cmd+S saves. Typing `/` offers to insert a task or a link, and selected text can be turned into either:
+ * images and files are uploaded to the space (a file is linked by name), and an image or a linked PDF opens fullscreen
+ * to be marked up. Ctrl/Cmd+S saves. Typing `/` offers to insert a task or a link, and selected text can be turned into either:
  * each goes in as an inline pill (see referencePill), replacing the selected text. With `notePath`, a new task can be
  * linked to the note.
  */
@@ -93,13 +93,6 @@ export default function NoteEditor({
   const slashKeyRef = useRef<(event: KeyboardEvent) => boolean>(() => false);
   const slashPickRef = useRef<(item: SlashItem, range: { from: number; to: number }) => void>(() => {});
 
-  /**
-   * Upload files one by one, inserting each at `pos` (or the selection) once it's stored: an image as itself, any
-   * other file as a link named after it.
-   */
-  const uploadRef = useRef(async (file: File) => (await uploadFile(spaceId, file)).url);
-  uploadRef.current = async (file: File) => (await uploadFile(spaceId, file)).url;
-
   const editor = useEditor({
     extensions: [
       // Paragraphs and headings are swapped for ones that save their alignment (see noteFormatting).
@@ -119,9 +112,9 @@ export default function NoteEditor({
       ColoredTableCell,
       ColoredTableHeader,
       // Inline, as markdown images are: `![](url)` sits in a paragraph, so saved notes parse back the same. Shown
-      // column-wide and centered, with handles to resize it to a layout column or the page (see noteFormatting). A
-      // marked-up image is uploaded as a new one.
-      ResizableImage.configure({ inline: true, allowBase64: false, upload: (file: File) => uploadRef.current(file) }),
+      // column-wide and centered, with handles to resize it to a layout column or the page (see noteFormatting). Its
+      // markup is kept beside it (see MediaLightbox), so the image itself is never changed.
+      ResizableImage.configure({ inline: true, allowBase64: false }),
       Markdown,
       UploadPlaceholders,
       ReferencePill,
@@ -392,8 +385,9 @@ function isAttachmentHref(href: string | undefined): boolean {
 }
 
 /**
- * The menu under a link: open it, and for an uploaded file in an editable note, remove it. Extracted so its props
- * memoize without cluttering NoteEditor's top-level hooks.
+ * The menu under a link: open it, and for an uploaded file in an editable note, remove it. A linked PDF opens in the
+ * lightbox, to be marked up while the note is editable, as does a click on its pill. Extracted so its props memoize
+ * without cluttering NoteEditor's top-level hooks.
  */
 function BubbleMenuWrapper({ editor }: { editor: Editor }) {
   const options = useMemo(() => ({ placement: "bottom" as const, offset: 8 }), []);
@@ -402,6 +396,21 @@ function BubbleMenuWrapper({ editor }: { editor: Editor }) {
     editor,
     selector: ({ editor: e }) => ({ href: e.getAttributes("link").href as string | undefined, editable: e.isEditable }),
   });
+  // The PDF open in the lightbox: its link and name.
+  const [pdf, setPdf] = useState<{ href: string; name: string } | null>(null);
+
+  useEffect(() => {
+    const dom = editor.view.dom;
+    const click = (event: MouseEvent) => {
+      const anchor = event.target instanceof Element ? event.target.closest("a[href]") : null;
+      const href = anchor?.getAttribute("href") ?? undefined;
+      if (!anchor || !isAttachmentHref(href) || !isPdfUrl(href!) || event.ctrlKey || event.metaKey || event.shiftKey) return;
+      event.preventDefault();
+      setPdf({ href: href!, name: anchor.textContent ?? "" });
+    };
+    dom.addEventListener("click", click);
+    return () => dom.removeEventListener("click", click);
+  }, [editor]);
 
   /** Delete the whole linked name, and the space inserted after it with the upload. */
   function removeAttachment() {
@@ -419,42 +428,49 @@ function BubbleMenuWrapper({ editor }: { editor: Editor }) {
   }
 
   return (
-    <BubbleMenu
-      editor={editor}
-      options={options}
-      shouldShow={shouldShow}
-      className="flex items-center overflow-hidden rounded-lg border border-border-default bg-surface-raised shadow-xl"
-    >
-      <a
-        href={link.href}
-        target="_blank"
-        rel="noopener noreferrer"
-        className="px-4 py-2 text-xs font-bold uppercase tracking-wider text-accent hover:bg-surface-hover focus:outline-none"
+    <>
+      <BubbleMenu
+        editor={editor}
+        options={options}
+        shouldShow={shouldShow}
+        className="flex items-center overflow-hidden rounded-lg border border-border-default bg-surface-raised shadow-xl"
       >
-        Open
-      </a>
-      {link.editable && isAttachmentHref(link.href) && (
-        <button
-          type="button"
-          title="Remove attachment"
-          aria-label="Remove attachment"
-          // Keep the editor's selection on the link until the click lands.
-          onMouseDown={(event) => event.preventDefault()}
-          onClick={removeAttachment}
-          className="flex items-center gap-1.5 border-l border-border-default px-3 py-2 text-xs font-bold uppercase tracking-wider text-text-secondary hover:bg-surface-hover hover:text-accent focus:outline-none"
+        <a
+          href={link.href}
+          target="_blank"
+          rel="noopener noreferrer"
+          onClick={(event) => {
+            if (!isAttachmentHref(link.href) || !isPdfUrl(link.href!)) return;
+            event.preventDefault();
+            const { state } = editor;
+            const range = getMarkRange(state.selection.$from, state.schema.marks.link);
+            setPdf({ href: link.href!, name: range ? state.doc.textBetween(range.from, range.to) : "" });
+          }}
+          className="px-4 py-2 text-xs font-bold uppercase tracking-wider text-accent hover:bg-surface-hover focus:outline-none"
         >
-          <TrashIcon />
-          Remove
-        </button>
-      )}
-    </BubbleMenu>
+          Open
+        </a>
+        {link.editable && isAttachmentHref(link.href) && (
+          <button
+            type="button"
+            title="Remove attachment"
+            aria-label="Remove attachment"
+            // Keep the editor's selection on the link until the click lands.
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={removeAttachment}
+            className="flex items-center gap-1.5 border-l border-border-default px-3 py-2 text-xs font-bold uppercase tracking-wider text-text-secondary hover:bg-surface-hover hover:text-accent focus:outline-none"
+          >
+            <TrashIcon />
+            Remove
+          </button>
+        )}
+      </BubbleMenu>
+      {pdf && <MediaLightbox src={pdf.href} title={pdf.name || null} onClose={() => setPdf(null)} editable={link.editable} />}
+    </>
   );
 }
 
-const ResizableImage = SizedImage.extend<ImageOptions & { upload: ((file: File) => Promise<string>) | null }>({
-  addOptions() {
-    return { ...(this.parent?.() as ImageOptions), upload: null };
-  },
+const ResizableImage = SizedImage.extend<ImageOptions>({
   addNodeView() {
     return ReactNodeViewRenderer(ImageView, {
       className: "note-image",
@@ -470,7 +486,7 @@ const ResizableImage = SizedImage.extend<ImageOptions & { upload: ((file: File) 
  * columns that fit the page and to its full width, which show as guide lines over it while it's dragged. Double-click
  * it, or its expand button on hover, to open it fullscreen, where it can be marked up while the note is editable.
  */
-function ImageView({ node, selected, editor, extension, updateAttributes }: NodeViewProps) {
+function ImageView({ node, selected, editor, updateAttributes }: NodeViewProps) {
   const { src, alt, title } = node.attrs as { src: string; alt: string | null; title: string | null };
   const width = (node.attrs.width as number | null) ?? 100;
   const [dragWidth, setDragWidth] = useState<number | null>(null);
@@ -479,15 +495,9 @@ function ImageView({ node, selected, editor, extension, updateAttributes }: Node
   const columnRef = useRef<HTMLSpanElement>(null);
   const imageRef = useRef<HTMLSpanElement>(null);
   const [expanded, setExpanded] = useState(false);
+  // Counted up as the lightbox closes, so the markup over the image is loaded again (it may have been changed there).
+  const [opened, setOpened] = useState(0);
   const shown = dragWidth ?? width;
-  const upload = (extension.options as { upload: ((file: File) => Promise<string>) | null }).upload;
-
-  /** Store a marked-up copy of the image and show it in the note instead. */
-  async function saveMarkup(image: Blob) {
-    if (!upload) return;
-    const stored = await upload(new File([image], "markup.png", { type: "image/png" }));
-    updateAttributes({ src: stored });
-  }
 
   function startResize(event: ReactPointerEvent, side: -1 | 1) {
     const column = columnRef.current?.getBoundingClientRect().width;
@@ -535,6 +545,7 @@ function ImageView({ node, selected, editor, extension, updateAttributes }: Node
           onDoubleClick={() => setExpanded(true)}
           className={selected ? "outline outline-2 outline-accent" : undefined}
         />
+        <MarkupOverlay src={src} version={opened} />
         {dragWidth === null && <ExpandButton onClick={() => setExpanded(true)} />}
         {selected && editor.isEditable && (
           <>
@@ -545,12 +556,15 @@ function ImageView({ node, selected, editor, extension, updateAttributes }: Node
         {dragWidth !== null && <span className="media-width-label">{widthLabel(dragWidth)}</span>}
       </span>
       {expanded && (
-        <ImageLightbox
+        <MediaLightbox
           src={src}
           alt={alt}
           title={title}
-          onClose={() => setExpanded(false)}
-          onSave={editor.isEditable && upload ? saveMarkup : undefined}
+          onClose={() => {
+            setExpanded(false);
+            setOpened((n) => n + 1);
+          }}
+          editable={editor.isEditable}
         />
       )}
     </NodeViewWrapper>
