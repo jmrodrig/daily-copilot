@@ -100,6 +100,12 @@ body {
 .note-body h3 {
   @apply mt-4 text-lg;
 }
+.note-body p {
+  @apply my-4;
+}
+.note-body li > p {
+  @apply my-1;
+}
 .note-body table {
   @apply w-full text-[15px];
 }
