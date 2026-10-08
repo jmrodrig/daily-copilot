@@ -447,6 +447,7 @@ export default function GanttChart({
       clickTask(Number(row.dataset.taskRow), mods);
       return;
     }
+    if (selected.size > 0) setSelected(new Set());
     setLockedDay((prev) => (prev === day ? null : day));
   };
 
@@ -455,7 +456,7 @@ export default function GanttChart({
   const dragged = drag?.moved ? drag : null;
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4 select-none">
       {(dropdowns.length > 0 || editable) && (
         <div className="flex min-h-8 flex-wrap items-center justify-between gap-x-4 gap-y-2 text-xs text-text-muted">
           {dropdowns.length > 0 ? (
