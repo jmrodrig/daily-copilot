@@ -294,6 +294,7 @@ export default function NoteEditor({
       {editor && (
         <BubbleMenuWrapper editor={editor} />
       )}
+      {editor && <PillMenuWrapper editor={editor} />}
       {editor && !panel && (
         <SelectionMenu editor={editor} onOpen={(type) => openPanel(type, editor.state.selection.from, editor.state.selection.to)} />
       )}
@@ -386,6 +387,118 @@ function CheckboxIcon() {
     <svg aria-hidden width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
       <rect x="0.7" y="0.7" width="10.6" height="10.6" rx="2" />
       <path d="M3.3 6.2l1.9 1.9 3.6-4" />
+    </svg>
+  );
+}
+
+/** The menu under a selected web-page pill in an editable note: open the page, or edit the pill's text and URL. */
+function PillMenuWrapper({ editor }: { editor: Editor }) {
+  const options = useMemo(() => ({ placement: "bottom" as const, offset: 8 }), []);
+  const shouldShow = useCallback(
+    ({ editor: e }: { editor: Editor }) => e.isEditable && e.isActive("referencePill") && e.getAttributes("referencePill").kind === "url",
+    [],
+  );
+  const pill = useEditorState({
+    editor,
+    selector: ({ editor: e }) => {
+      const attrs = e.getAttributes("referencePill") as Partial<RefPillAttrs>;
+      return { pos: e.state.selection.from, href: attrs.href ?? "", label: attrs.label ?? "" };
+    },
+  });
+  const [editing, setEditing] = useState(false);
+  const [label, setLabel] = useState("");
+  const [href, setHref] = useState("");
+
+  // Another pill (or none) selected: back to the buttons.
+  useEffect(() => setEditing(false), [pill.pos]);
+
+  function startEditing() {
+    setLabel(pill.label);
+    setHref(pill.href);
+    setEditing(true);
+  }
+
+  function save() {
+    const url = href.trim();
+    if (!url) return;
+    setEditing(false);
+    editor.chain().focus().updateAttributes("referencePill", { label: label.trim() || url, href: url }).run();
+  }
+
+  const button = "px-4 py-2 text-xs font-bold uppercase tracking-wider hover:bg-surface-hover focus:outline-none";
+
+  return (
+    <BubbleMenu
+      editor={editor}
+      pluginKey="pillMenu"
+      options={options}
+      shouldShow={shouldShow}
+      className="overflow-hidden rounded-lg border border-border-default bg-surface-raised shadow-xl"
+    >
+      {editing ? (
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            save();
+          }}
+          onKeyDown={(event) => {
+            if (event.key !== "Escape") return;
+            event.preventDefault();
+            setEditing(false);
+            editor.commands.focus();
+          }}
+          aria-label="Edit link"
+          className="flex w-[min(22rem,90vw)] flex-col gap-2 p-3"
+        >
+          <label className="flex flex-col gap-1 text-xs text-text-muted">
+            Display text
+            <input autoFocus value={label} onChange={(e) => setLabel(e.target.value)} placeholder={href} className="field py-1 text-[15px]" />
+          </label>
+          <label className="flex flex-col gap-1 text-xs text-text-muted">
+            URL
+            <input value={href} onChange={(e) => setHref(e.target.value)} placeholder="https://" className="field py-1 text-[15px]" />
+          </label>
+          <div className="flex items-center justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                setEditing(false);
+                editor.commands.focus();
+              }}
+              className="btn min-h-0 px-2 py-1 text-xs"
+            >
+              Cancel
+            </button>
+            <button type="submit" disabled={!href.trim()} className="btn-primary min-h-0 px-2 py-1 text-xs">
+              Save
+            </button>
+          </div>
+        </form>
+      ) : (
+        <div className="flex items-center">
+          <a href={pill.href} target="_blank" rel="noopener noreferrer" className={`${button} text-accent`}>
+            Open
+          </a>
+          <button
+            type="button"
+            // Keep the pill selected until the click lands.
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={startEditing}
+            className={`${button} flex items-center gap-1.5 border-l border-border-default text-text-secondary hover:text-accent`}
+          >
+            <PencilIcon />
+            Edit
+          </button>
+        </div>
+      )}
+    </BubbleMenu>
+  );
+}
+
+function PencilIcon() {
+  return (
+    <svg aria-hidden width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M11.3 2.3a1.6 1.6 0 0 1 2.4 2.4L5.5 12.9 2.5 13.5l.6-3z" />
     </svg>
   );
 }

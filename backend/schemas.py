@@ -1167,3 +1167,9 @@ class Person(PersonIn):
     id: int
     name: str  # people saved before the 64-character limit keep their longer names
     created_at: datetime | None = None
+
+
+class UrlMetadata(BaseModel):
+    """A web page's metadata for a link pill: its `<title>`, or None when it can't be fetched or has none."""
+
+    title: str | None = None

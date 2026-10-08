@@ -705,3 +705,58 @@ def test_update_note_tags(client, notes_dir):
 def test_capture_records_source(client, notes_dir):
     path = client.post("/api/capture", json={"content": "Hi", "source": "Verbal"}).json()["path"]
     assert file_layer.read_note(path)["frontmatter"]["source"] == "verbal"
+
+
+class _FakePage:
+    """A urlopen response serving `body` with the given charset."""
+
+    def __init__(self, body: bytes, charset: str | None = "utf-8"):
+        self.body = body
+        self.headers = type("Headers", (), {"get_content_charset": lambda _self: charset})()
+
+    def read(self, limit: int = -1) -> bytes:
+        return self.body if limit < 0 else self.body[:limit]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def test_url_metadata_returns_the_page_title(client, monkeypatch):
+    requests = []
+
+    def urlopen(request, timeout):
+        requests.append((request, timeout))
+        return _FakePage(b"<html><head><TITLE data-x='1'>\n  Steel &amp; Glass\n  Supplier </TITLE></head></html>")
+
+    monkeypatch.setattr(main.urllib.request, "urlopen", urlopen)
+    response = client.get("/api/url-metadata", params={"url": "https://example.com/a?b=1"})
+
+    assert response.status_code == 200
+    assert response.json() == {"title": "Steel & Glass Supplier"}
+    request, timeout = requests[0]
+    assert request.full_url == "https://example.com/a?b=1"
+    assert request.get_header("User-agent") == "Mozilla/5.0"
+    assert timeout == 5
+
+
+def test_url_metadata_title_is_null_when_the_page_has_none_or_fails(client, monkeypatch):
+    monkeypatch.setattr(main.urllib.request, "urlopen", lambda request, timeout: _FakePage(b"<html><title> </title></html>"))
+    assert client.get("/api/url-metadata", params={"url": "https://example.com"}).json() == {"title": None}
+
+    def fail(request, timeout):
+        raise OSError("unreachable")
+
+    monkeypatch.setattr(main.urllib.request, "urlopen", fail)
+    assert client.get("/api/url-metadata", params={"url": "https://example.com"}).json() == {"title": None}
+
+
+def test_url_metadata_only_fetches_web_pages(client, monkeypatch):
+    def urlopen(request, timeout):
+        raise AssertionError("should not be fetched")
+
+    monkeypatch.setattr(main.urllib.request, "urlopen", urlopen)
+    for url in ("file:///etc/passwd", "mailto:a@example.com", "ftp://example.com"):
+        assert client.get("/api/url-metadata", params={"url": url}).json() == {"title": None}

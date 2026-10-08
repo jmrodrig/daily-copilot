@@ -1,7 +1,9 @@
 """FastAPI entry point. Run with `uvicorn main:app --reload` from backend/."""
 
+import html
 import re
 import secrets
+import urllib.request
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
@@ -64,6 +66,7 @@ from schemas import (
     TriageItem,
     TriageKind,
     TriageRank,
+    UrlMetadata,
 )
 
 INBOX = "Inbox"
@@ -99,6 +102,29 @@ def space_content(space_id: int = spaces.DEFAULT_SPACE_ID, db: Session = Depends
 def health() -> dict[str, str]:
     from config import get_settings
     return {"status": "ok", "chat_model": get_settings().chat_model}
+
+
+_URL_TIMEOUT_SECONDS = 5
+# Enough for the <head> of any page; the title is never further in.
+_URL_MAX_BYTES = 512 * 1024
+_TITLE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
+
+
+@app.get("/api/url-metadata")
+def url_metadata(url: str) -> UrlMetadata:
+    """The `<title>` of a web page, for a new link pill's display text; `title` is None if it can't be had."""
+    if not re.match(r"https?://", url, re.IGNORECASE):
+        return UrlMetadata()
+    request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        with urllib.request.urlopen(request, timeout=_URL_TIMEOUT_SECONDS) as response:
+            charset = response.headers.get_content_charset() or "utf-8"
+            page = response.read(_URL_MAX_BYTES).decode(charset, errors="replace")
+    except Exception:  # noqa: BLE001 - any failure (network, HTTP error, bad charset) just means no title
+        return UrlMetadata()
+    match = _TITLE.search(page)
+    title = " ".join(html.unescape(match.group(1)).split()) if match else ""
+    return UrlMetadata(title=title or None)
 
 
 def _capture_path(project: str, now: datetime, root: Path) -> str:

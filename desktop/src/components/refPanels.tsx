@@ -320,6 +320,31 @@ export function LinkPanel({
   }, [spaceId]);
 
   const url = asUrl(query);
+  // The last title filled in for the user, so a newer page's title can replace it but never their own text.
+  const fetchedTitle = useRef("");
+  useEffect(() => {
+    if (!url || !/^https?:/i.test(url)) return;
+    const controller = new AbortController();
+    // Wait for a pause in the typing; a pasted URL is fetched almost at once.
+    const timer = setTimeout(() => {
+      getJson<{ title: string | null }>(`/api/url-metadata?url=${encodeURIComponent(url)}`, controller.signal)
+        .then(({ title }) => {
+          if (!title) return;
+          setDisplayText((text) => {
+            if (text.trim() && text !== fetchedTitle.current) return text;
+            fetchedTitle.current = title;
+            return title;
+          });
+        })
+        // No title: the pill falls back to the URL.
+        .catch(() => {});
+    }, 300);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [url]);
+
   const candidates = useMemo<Candidate[]>(
     () => [
       ...(notes ?? []).map((n) => ({
