@@ -7,7 +7,7 @@ notes and emails live as markdown files with YAML front-matter (see `file_layer`
 import re
 from datetime import date, datetime
 from enum import Enum
-from typing import Any
+from typing import Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -976,8 +976,12 @@ class ViewType(str, Enum):
 class TaskViewFilters(BaseModel):
     """The filters a saved task view applies to `GET /api/tasks`."""
 
-    project_id: int | None = Field(default=None, description="None means every project")
-    assignee: str | None = Field(default=None, max_length=64, description='None means everyone; "" means unassigned')
+    LIST_FILTERS: ClassVar[tuple[str, ...]] = ("project_id", "assignee", "priority", "status")
+
+    project_id: list[int] | None = Field(default=None, description="Tasks of any of these projects; None means every project")
+    assignee: list[str] | None = Field(
+        default=None, description='Tasks assigned to any of these people; None means everyone; "" means unassigned'
+    )
     tag: str | None = Field(default=None, max_length=64, description="None means any tag")
     custom_fields: dict[str, str] = Field(
         default_factory=dict,
@@ -987,8 +991,10 @@ class TaskViewFilters(BaseModel):
     has_start_date: bool | None = Field(default=None, description="True: only tasks with a start date; False: only without")
     due_after: date | None = Field(default=None, description="Only tasks due on or after this day")
     due_before: date | None = Field(default=None, description="Only tasks due on or before this day")
-    priority: Priority | None = Field(default=None, description="None means any priority")
-    status: Status | None = Field(default=None, description="None means any status but archived")
+    priority: list[Priority] | None = Field(default=None, description="Tasks of any of these priorities; None means any")
+    status: list[Status] | None = Field(
+        default=None, description="Tasks in any of these statuses; None means any status but archived"
+    )
     is_gantt_task: bool | None = Field(default=None, description="True: only shop floor Gantt tasks; False: only the others")
     is_milestone: bool | None = Field(default=None, description="True: only milestones; False: only the others")
     has_note: bool | None = Field(default=None, description="True: only tasks linked to a note; False: only unlinked")
@@ -997,6 +1003,25 @@ class TaskViewFilters(BaseModel):
     gantt_color_by: str | None = Field(
         default=None, max_length=64, description='What the Gantt bars are coloured by: a dropdown field id, or None/"project"'
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _single_values_as_lists(cls, data: Any) -> Any:
+        """Views saved before the multi-select filters hold one value (or null) per list filter."""
+        if not isinstance(data, dict):
+            return data
+        data = dict(data)
+        for key in cls.LIST_FILTERS:
+            value = data.get(key)
+            if value is not None and not isinstance(value, list):
+                data[key] = [value]
+        return data
+
+    @field_validator(*LIST_FILTERS)
+    @classmethod
+    def _empty_is_any(cls, value: list | None) -> list | None:
+        """Duplicates are dropped; an empty list means "any", like None."""
+        return (list(dict.fromkeys(value)) or None) if value is not None else None
 
     @field_validator("custom_fields", mode="before")
     @classmethod
@@ -1011,10 +1036,12 @@ class TaskViewFilters(BaseModel):
             texts[key] = ("true" if item else "false") if isinstance(item, bool) else str(item).strip()
         return texts
 
-    @field_validator("assignee")
+    @field_validator("assignee", mode="before")
     @classmethod
-    def _strip_assignee(cls, value: str | None) -> str | None:
-        return value.strip() if value is not None else None
+    def _strip_assignee(cls, value: Any) -> Any:
+        if isinstance(value, list):
+            return [item.strip() if isinstance(item, str) else item for item in value]
+        return value
 
     @field_validator("tag")
     @classmethod

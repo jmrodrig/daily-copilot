@@ -13,7 +13,7 @@ import main
 import spaces
 from config import Settings
 from history import soft_delete
-from models import FolderMeta, HistoryRecord, Project, Space, Task, TaskNoteLink
+from models import FolderMeta, HistoryRecord, Project, Space, Task, TaskNoteLink, TaskView
 from schemas import AccessMode, ChatMessage, Status
 
 
@@ -858,16 +858,16 @@ def test_view_crud(client):
     assert created.status_code == 201
     view = created.json()
     assert (view["name"], view["view_type"]) == ("C7801 Kanban", "kanban")
-    assert view["filters"] == {"project_id": project_id, "assignee": None, "tag": None, **NO_ADVANCED_FILTERS}
+    assert view["filters"] == {"project_id": [project_id], "assignee": None, "tag": None, **NO_ADVANCED_FILTERS}
     assert client.get(f"/api/views/{view['id']}").json() == view
 
     renamed = client.put(f"/api/views/{view['id']}", json={"name": "Hull board"}).json()
     assert renamed["name"] == "Hull board"
-    assert renamed["filters"]["project_id"] == project_id
+    assert renamed["filters"]["project_id"] == [project_id]
 
     refiltered = client.put(f"/api/views/{view['id']}", json={"filters": {"assignee": " Jose ", "tag": " weld "}}).json()
     assert refiltered["name"] == "Hull board"
-    assert refiltered["filters"] == {"project_id": None, "assignee": "Jose", "tag": "weld", **NO_ADVANCED_FILTERS}
+    assert refiltered["filters"] == {"project_id": None, "assignee": ["Jose"], "tag": "weld", **NO_ADVANCED_FILTERS}
 
     assert client.delete(f"/api/views/{view['id']}").status_code == 204
     assert view["id"] not in [v["id"] for v in client.get("/api/views?space_id=1").json()]
@@ -896,10 +896,31 @@ def test_create_view_validation(client, payload):
     assert client.post("/api/views", json=payload).status_code == 422
 
 
+def test_views_saved_with_single_filter_values_load_as_lists(client):
+    view_id = client.get("/api/views?space_id=1").json()[0]["id"]
+    with database.SessionLocal() as db:
+        view = db.get(TaskView, view_id)
+        view.filters = {"project_id": 7, "assignee": " Jose ", "priority": "high", "status": "blocked"}
+        db.commit()
+    filters = client.get(f"/api/views/{view_id}").json()["filters"]
+    assert (filters["project_id"], filters["assignee"]) == ([7], ["Jose"])
+    assert (filters["priority"], filters["status"]) == (["high"], ["blocked"])
+
+
+def test_multi_select_view_filters(client):
+    filters = {"assignee": ["Jose", " ", "Jose"], "priority": ["high", "urgent"], "status": []}
+    view = client.post("/api/views", json={"space_id": 1, "name": "Mine", "view_type": "list", "filters": filters})
+    assert view.status_code == 201, view.text
+    saved = view.json()["filters"]
+    assert (saved["assignee"], saved["priority"], saved["status"]) == (["Jose", ""], ["high", "urgent"], None)
+    assert client.post("/api/views", json={**view.json(), "filters": {"priority": ["whenever"]}}).status_code == 422
+
+
 def test_view_references_must_exist(client):
     assert client.post("/api/views", json={"space_id": 99, "name": "A", "view_type": "gantt"}).status_code == 404
     unknown_project = {"space_id": 1, "name": "A", "view_type": "gantt", "filters": {"project_id": 999}}
     assert client.post("/api/views", json=unknown_project).status_code == 400
     view_id = client.get("/api/views?space_id=1").json()[0]["id"]
     assert client.put(f"/api/views/{view_id}", json={"filters": {"project_id": 999}}).status_code == 400
+    assert client.put(f"/api/views/{view_id}", json={"filters": {"project_id": [999]}}).status_code == 400
     assert client.put(f"/api/views/{view_id}", json={"name": " "}).status_code == 422

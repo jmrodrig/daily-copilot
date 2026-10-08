@@ -4,8 +4,21 @@ import { NavLink, Navigate, useNavigate, useParams, useSearchParams } from "reac
 import AdvancedFilters from "../components/AdvancedFilters";
 import { OptionPill } from "../components/ColorPicker";
 import GanttChart, { type GanttDateChange, type GanttProject } from "../components/GanttChart";
+import MultiSelect from "../components/MultiSelect";
 import PageHeader from "../components/PageHeader";
 import { postStatusComment, useStatusChangePrompt } from "../components/StatusChangeDialog";
+import {
+  AddTaskButton,
+  ColumnPicker,
+  customColumn,
+  formatCustomValue,
+  NewTaskRow,
+  newTaskDefaults,
+  TITLE_COLUMN,
+  useColumns,
+  type Column,
+  type NewTaskDraft,
+} from "../components/TaskTable";
 import { formatDay, ME, NEUTRAL_TAG, NoteLink, ProjectTag, Tag, TagPills } from "../components/TriageBoard";
 import { getJson, message, sendJson } from "../lib/api";
 import { AssigneeSelect, personLabel, PersonBadge, usePeople, type Person } from "../lib/people";
@@ -18,6 +31,7 @@ import {
   boardColumn,
   fromGanttDates,
   isOverdue,
+  PRIORITY_LABELS,
   STATUS_LABELS,
   taskQuery,
   updateTaskDates,
@@ -28,11 +42,13 @@ import {
   type StatusFlow,
   type TaskItem,
   type TaskPatch,
+  type TaskPriority,
   type TaskStatus,
 } from "../lib/tasks";
 import TaskListView from "./TaskListView";
 import {
   filtersFromParams,
+  fromSaved,
   NO_FILTERS,
   sameFilters,
   VIEW_TYPES,
@@ -79,7 +95,7 @@ export default function SavedTaskView() {
     fetchView()
       .then((body) => {
         setView(body);
-        setFilters(body.filters);
+        setFilters(fromSaved(body.filters));
       })
       .catch(failed);
     // Renamed from the sidebar: refresh the saved view but keep any unsaved filters.
@@ -98,7 +114,7 @@ export default function SavedTaskView() {
     try {
       const updated = await sendJson<TaskView>("PUT", `/api/views/${view.id}`, { filters });
       setView(updated);
-      setFilters(updated.filters);
+      setFilters(fromSaved(updated.filters));
       window.dispatchEvent(new Event(VIEWS_CHANGED));
     } catch (err: unknown) {
       setSaveError(`Could not save the view: ${message(err)}`);
@@ -109,7 +125,8 @@ export default function SavedTaskView() {
 
   if (loadError) return <p className="px-9 py-7 text-[15px] text-text-secondary">Could not load this view ({loadError}).</p>;
   if (!view) return <p className="px-9 py-7 text-[15px] text-text-muted">Loading view…</p>;
-  const dirty = !sameFilters(filters, view.filters);
+  const saved = fromSaved(view.filters);
+  const dirty = !sameFilters(filters, saved);
 
   return (
     <TaskBoard
@@ -122,7 +139,7 @@ export default function SavedTaskView() {
         <>
           {saveError && <span className="text-xs text-accent">{saveError}</span>}
           {dirty && (
-            <button type="button" className="btn min-h-8 px-3 text-xs" onClick={() => setFilters(view.filters)}>
+            <button type="button" className="btn min-h-8 px-3 text-xs" onClick={() => setFilters(saved)}>
               Revert
             </button>
           )}
@@ -160,7 +177,8 @@ export function AdHocTasks() {
   const viewType = view as ViewType;
 
   async function saveAs(projects: ProjectOption[]) {
-    const code = projects.find((p) => p.id === filters.project_id)?.code;
+    // Named after its project when it shows just one.
+    const code = filters.project_id.length === 1 ? projects.find((p) => p.id === filters.project_id[0])?.code : undefined;
     setSaving(true);
     setSaveError(null);
     try {
@@ -347,19 +365,24 @@ function TaskBoard({
   const assignees = useMemo(() => {
     const names = new Set<string>([me, ...people.map((p) => p.name)]);
     if (tasks.state === "ok") tasks.tasks.forEach((t) => t.assignee && names.add(t.assignee));
-    if (filters.assignee) names.add(filters.assignee);
+    filters.assignee.forEach((name) => name && names.add(name));
     return [...names].sort((a, b) => Number(b === me) - Number(a === me) || a.localeCompare(b));
   }, [tasks, filters.assignee, people, me]);
 
   // A saved filter can point at a project this space no longer lists.
-  const projectChoices =
-    filters.project_id === null || projects.some((p) => p.id === filters.project_id)
-      ? projects
-      : [...projects, { id: filters.project_id, code: `#${filters.project_id}`, name: `#${filters.project_id}`, color: null, folder_path: null }];
+  const projectChoices = [
+    ...projects,
+    ...filters.project_id
+      .filter((id) => !projects.some((p) => p.id === id))
+      .map((id) => ({ id, code: `#${id}`, name: `#${id}`, color: null, folder_path: null })),
+  ];
   // Likewise a tag that no task carries any more.
   const tagChoices = filters.tag === null || tags.includes(filters.tag) ? tags : [...tags, filters.tag];
   // A task archived since the last load (e.g. in the task panel) leaves at once, unless the status filter asks for them.
-  const keepArchived = includeArchived || filters.status === "archived";
+  const keepArchived = includeArchived || filters.status.includes("archived");
+  const newTask = newTaskDefaults(filters, customFields, viewType === "kanban" ? "todo" : "backlog");
+  const addTask = (task: TaskItem) =>
+    setTasks((prev) => (prev.state === "ok" ? { ...prev, tasks: [...prev.tasks, task] } : prev));
   const visible =
     tasks.state === "ok" ? (keepArchived ? tasks.tasks : tasks.tasks.filter((t) => t.status !== "archived")) : null;
 
@@ -375,38 +398,31 @@ function TaskBoard({
       <div className="flex flex-wrap items-center justify-between gap-3">
         {nav ?? <span />}
         <div className="flex flex-wrap items-center gap-2 text-xs text-text-muted">
-          <label className="flex items-center gap-1.5">
+          <div role="group" aria-label="Project" className="flex items-center gap-1.5">
             Project
-            <select
-              value={filters.project_id ?? ""}
-              onChange={(e) => onFilters({ ...filters, project_id: e.target.value ? Number(e.target.value) : null })}
-              className="field w-auto py-1.5 text-[15px]"
-            >
-              <option value="">All projects</option>
-              {projectChoices.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.code}
-                  {p.name !== p.code ? ` · ${p.name}` : ""}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="flex items-center gap-1.5">
+            <MultiSelect
+              label="Project"
+              anyLabel="All projects"
+              options={projectChoices.map((p) => ({ value: p.id, label: p.name !== p.code ? `${p.code} · ${p.name}` : p.code }))}
+              value={filters.project_id}
+              onChange={(project_id) => onFilters({ ...filters, project_id })}
+              className="w-44 py-1.5 text-[15px]"
+            />
+          </div>
+          <div role="group" aria-label="Assignee" className="flex items-center gap-1.5">
             Assignee
-            <select
-              value={filters.assignee === null ? "*" : filters.assignee}
-              onChange={(e) => onFilters({ ...filters, assignee: e.target.value === "*" ? null : e.target.value })}
-              className="field w-auto py-1.5 text-[15px]"
-            >
-              <option value="*">Everyone</option>
-              <option value="">Unassigned</option>
-              {assignees.map((name) => (
-                <option key={name} value={name}>
-                  {personLabel({ name, is_me: name === me })}
-                </option>
-              ))}
-            </select>
-          </label>
+            <MultiSelect
+              label="Assignee"
+              anyLabel="Everyone"
+              options={[
+                { value: "", label: "Unassigned" },
+                ...assignees.map((name) => ({ value: name, label: personLabel({ name, is_me: name === me }) })),
+              ]}
+              value={filters.assignee}
+              onChange={(assignee) => onFilters({ ...filters, assignee })}
+              className="w-44 py-1.5 text-[15px]"
+            />
+          </div>
           <label className="flex items-center gap-1.5">
             Tag
             <select
@@ -433,16 +449,18 @@ function TaskBoard({
 
       <AdvancedFilters filters={filters} customFields={customFields} onFilters={onFilters} />
 
-      <NewTaskForm
-        spaceId={spaceId}
-        projects={projects}
-        people={people}
-        defaultProject={filters.project_id === null ? null : String(filters.project_id)}
-        defaultStatus={viewType === "kanban" ? "todo" : "backlog"}
-        onCreated={(task) =>
-          setTasks((prev) => (prev.state === "ok" ? { ...prev, tasks: [task, ...prev.tasks] } : prev))
-        }
-      />
+      {/* The Backlog and List add tasks from a row at the bottom of their table. */}
+      {(viewType === "kanban" || viewType === "gantt") && (
+        <NewTaskForm
+          spaceId={spaceId}
+          projects={projects}
+          people={people}
+          defaults={newTask}
+          onCreated={(task) =>
+            setTasks((prev) => (prev.state === "ok" ? { ...prev, tasks: [task, ...prev.tasks] } : prev))
+          }
+        />
+      )}
 
       {error && <p className="text-[15px] text-accent">{error}</p>}
       {tasks.state === "loading" && <p className="text-[15px] text-text-muted">Loading tasks…</p>}
@@ -451,7 +469,18 @@ function TaskBoard({
         <Kanban tasks={visible} flow={flow} people={people} me={me} customFields={customFields} onStatus={changeStatus} />
       )}
       {visible && viewType === "backlog" && (
-        <Backlog tasks={visible} projects={projects} people={people} flow={flow} onPatch={patchTask} onStatus={changeStatus} />
+        <Backlog
+          spaceId={spaceId}
+          tasks={visible}
+          projects={projects}
+          people={people}
+          flow={flow}
+          customFields={customFields}
+          newTask={newTask}
+          onCreated={addTask}
+          onPatch={patchTask}
+          onStatus={changeStatus}
+        />
       )}
       {visible && viewType === "gantt" && (
         <TaskGantt
@@ -465,9 +494,13 @@ function TaskBoard({
       )}
       {visible && viewType === "list" && (
         <TaskListView
+          spaceId={spaceId}
           tasks={visible}
           flow={flow}
+          projects={projects}
           customFields={customFields}
+          newTask={newTask}
+          onCreated={addTask}
           onUpdated={() => setReload((n) => n + 1)}
         />
       )}
@@ -482,26 +515,28 @@ function NewTaskForm({
   spaceId,
   projects,
   people,
-  defaultProject,
-  defaultStatus,
+  defaults,
   onCreated,
 }: {
   spaceId: number;
   projects: ProjectOption[];
   people: Person[];
-  defaultProject: string | null;
-  defaultStatus: TaskStatus;
+  /** The fields matching the view's filters (see `newTaskDefaults`). */
+  defaults: NewTaskDraft;
   onCreated: (task: TaskItem) => void;
 }) {
+  const defaultProject = defaults.project_id === null ? "" : String(defaults.project_id);
+  const defaultStatus = defaults.status;
   const [title, setTitle] = useState("");
-  const [project, setProject] = useState(defaultProject ?? "");
-  const [assignee, setAssignee] = useState<string | null>(null);
+  const [project, setProject] = useState(defaultProject);
+  const [assignee, setAssignee] = useState<string | null>(defaults.assignee);
   const [start, setStart] = useState("");
   const [due, setDue] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => setProject(defaultProject ?? ""), [defaultProject]);
+  useEffect(() => setProject(defaultProject), [defaultProject]);
+  useEffect(() => setAssignee(defaults.assignee), [defaults.assignee]);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -517,6 +552,9 @@ function NewTaskForm({
         start_date: start || null,
         deadline: due || null,
         status: defaultStatus,
+        priority: defaults.priority,
+        tags: defaults.tags,
+        custom_fields: defaults.custom_fields,
       });
       onCreated(task);
       setTitle("");
@@ -696,45 +734,82 @@ function KanbanCard({ task, flow, people, me, customFields, onStatus }: { task: 
 
 // --- Backlog ----------------------------------------------------------------------
 
+const BACKLOG_COLUMNS: Column[] = [
+  { id: TITLE_COLUMN, label: "Task" },
+  { id: "project", label: "Project" },
+  { id: "status", label: "Status" },
+  { id: "assignee", label: "Assignee" },
+  { id: "priority", label: "Priority" },
+  { id: "start", label: "Start" },
+  { id: "due", label: "Due" },
+];
+
+// The dates are wide enough for the new task row's date inputs.
+const BACKLOG_WIDTHS: Record<string, string> = {
+  project: "w-28",
+  status: "w-32",
+  assignee: "w-32",
+  priority: "w-28",
+  start: "w-32",
+  due: "w-32",
+};
+
 function Backlog({
+  spaceId,
   tasks,
   projects,
   people,
   flow,
+  customFields,
+  newTask,
+  onCreated,
   onPatch,
   onStatus,
 }: {
+  spaceId: number;
   tasks: TaskItem[];
   projects: ProjectOption[];
   people: Person[];
   flow: StatusFlow | null;
+  customFields: CustomFieldDef[];
+  /** The new task row's fields, from the view's filters. */
+  newTask: NewTaskDraft;
+  onCreated: (task: TaskItem) => void;
   onPatch: OnPatch;
   onStatus: OnStatus;
 }) {
   // A task's pill in a note links here with `?taskId=<id>`: show that task even if it's done.
   const { taskId, openTask } = useTaskPanel();
   const [hideDone, setHideDone] = useState(() => !tasks.some((t) => t.id === taskId && t.status === "done"));
+  const [adding, setAdding] = useState(false);
   const shown = hideDone ? tasks.filter((t) => t.status !== "done") : tasks;
+  const allColumns = [...BACKLOG_COLUMNS, ...customFields.map(customColumn)];
+  // Priority and the custom fields are hidden until picked, so the table looks as it did.
+  const columns = useColumns("copilot:backlog-columns", allColumns, (id) => id === "priority" || id.startsWith("cf:"));
 
   return (
     <div className="flex flex-col gap-2">
-      <label className="flex items-center gap-2 self-end text-xs text-text-muted">
-        <input type="checkbox" checked={hideDone} onChange={(e) => setHideDone(e.target.checked)} />
-        Hide done ({tasks.length - tasks.filter((t) => t.status !== "done").length})
-      </label>
-      {shown.length === 0 ? (
-        <p className="panel text-center text-sm text-text-muted">No tasks match these filters.</p>
-      ) : (
-        <div className="overflow-hidden rounded-lg border border-border-default bg-surface-raised">
-          <table className="w-full table-fixed text-[15px]">
+      <div className="flex items-center justify-end gap-3 text-xs text-text-muted">
+        <label className="flex items-center gap-2">
+          <input type="checkbox" checked={hideDone} onChange={(e) => setHideDone(e.target.checked)} />
+          Hide done ({tasks.length - tasks.filter((t) => t.status !== "done").length})
+        </label>
+        <ColumnPicker columns={allColumns} isShown={columns.isShown} onToggle={columns.toggle} />
+      </div>
+      {shown.length === 0 && !adding && <p className="panel text-center text-sm text-text-muted">No tasks match these filters.</p>}
+      <div className="overflow-x-auto rounded-lg border border-border-default bg-surface-raised">
+        {(shown.length > 0 || adding) && (
+          <table className="w-full min-w-[48rem] table-fixed text-[15px]">
             <thead className="bg-surface-panel text-left text-[13px] uppercase tracking-wider text-text-muted">
               <tr>
-                <th className="px-4 py-2 font-medium">Task</th>
-                <th className="w-28 px-2 py-2 font-medium">Project</th>
-                <th className="w-32 px-2 py-2 font-medium">Status</th>
-                <th className="w-32 px-2 py-2 font-medium">Assignee</th>
-                <th className="w-24 px-2 py-2 font-medium">Start</th>
-                <th className="w-24 px-2 py-2 font-medium">Due</th>
+                {columns.shown.map((column) => (
+                  <th
+                    key={column.id}
+                    className={`${column.id === TITLE_COLUMN ? "px-4" : `${BACKLOG_WIDTHS[column.id] ?? "w-32"} truncate px-2`} py-2 font-medium`}
+                  >
+                    {column.label}
+                  </th>
+                ))}
               </tr>
             </thead>
             <tbody className="divide-y divide-border-default/60">
@@ -742,8 +817,10 @@ function Backlog({
                 <BacklogRow
                   key={task.id}
                   task={task}
+                  columns={columns.shown}
                   projects={projects}
                   people={people}
+                  customFields={customFields}
                   active={taskId === task.id}
                   onOpen={() => openTask(task.id)}
                   flow={flow}
@@ -751,18 +828,34 @@ function Backlog({
                   onStatus={onStatus}
                 />
               ))}
+              {adding && (
+                <NewTaskRow
+                  spaceId={spaceId}
+                  columns={columns.shown}
+                  fixedLayout
+                  defaults={newTask}
+                  projects={projects}
+                  people={people}
+                  customFields={customFields}
+                  onCreated={onCreated}
+                  onClose={() => setAdding(false)}
+                />
+              )}
             </tbody>
           </table>
-        </div>
-      )}
+        )}
+        {!adding && <AddTaskButton onClick={() => setAdding(true)} />}
+      </div>
     </div>
   );
 }
 
 function BacklogRow({
   task,
+  columns,
   projects,
   people,
+  customFields,
   active,
   onOpen,
   flow,
@@ -770,8 +863,10 @@ function BacklogRow({
   onStatus,
 }: {
   task: TaskItem;
+  columns: Column[];
   projects: ProjectOption[];
   people: Person[];
+  customFields: CustomFieldDef[];
   active: boolean;
   onOpen: () => void;
   flow: StatusFlow | null;
@@ -786,72 +881,123 @@ function BacklogRow({
       ? [...projects, { id: task.project_id, code: task.project_code ?? `#${task.project_id}`, name: "", color: null, folder_path: null }]
       : projects;
 
+  function render(id: string) {
+    switch (id) {
+      case TITLE_COLUMN:
+        return (
+          <td key={id} className="px-4 py-1.5">
+            <div className="flex min-w-0 items-center gap-2">
+              <button
+                type="button"
+                onClick={() => !active && onOpen()}
+                title="Open task details"
+                aria-current={active || undefined}
+                className="flex min-w-0 flex-1 items-center gap-2 text-left"
+              >
+                <span className={`truncate hover:underline ${task.status === "done" ? "line-through" : "text-text-primary"}`}>{task.title}</span>
+                {task.is_gantt_task && <Tag className={NEUTRAL_TAG}>gantt</Tag>}
+                {task.status === "archived" && <Tag className={NEUTRAL_TAG}>archived</Tag>}
+                <TagPills tags={task.tags} />
+              </button>
+              {/* Outside the button: a link can't sit inside a button. */}
+              {task.note_path && <NoteLink path={task.note_path} />}
+            </div>
+          </td>
+        );
+      case "project":
+        return (
+          <td key={id} className="px-2 py-1.5">
+            <select
+              aria-label={`Project of ${task.title}`}
+              value={task.project_id ?? NO_PROJECT_ID}
+              onChange={(e) => {
+                const projectId = Number(e.target.value);
+                onPatch(task, { project_id: projectId === NO_PROJECT_ID ? null : projectId });
+              }}
+              className={`${cell} w-full`}
+            >
+              <option value={NO_PROJECT_ID}>—</option>
+              {projectChoices.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.code}
+                </option>
+              ))}
+            </select>
+          </td>
+        );
+      case "status":
+        return (
+          <td key={id} className="px-2 py-1.5">
+            <select
+              aria-label={`Status of ${task.title}`}
+              value={task.status}
+              onChange={(e) => onStatus(task, e.target.value as TaskStatus)}
+              className={`${cell} w-full`}
+            >
+              {allowedStatuses(flow, task.status).map((value) => (
+                <option key={value} value={value}>
+                  {STATUS_LABELS[value]}
+                </option>
+              ))}
+            </select>
+          </td>
+        );
+      case "assignee":
+        return (
+          <td key={id} className="px-2 py-1.5">
+            <AssigneeSelect
+              ariaLabel={`Assignee of ${task.title}`}
+              value={task.assignee}
+              people={people}
+              emptyLabel="—"
+              onChange={(assignee) => assignee !== task.assignee && onPatch(task, { assignee })}
+              className={`${cell} w-full`}
+            />
+          </td>
+        );
+      case "priority":
+        return (
+          <td key={id} className="px-2 py-1.5">
+            <select
+              aria-label={`Priority of ${task.title}`}
+              value={task.priority}
+              onChange={(e) => onPatch(task, { priority: e.target.value as TaskPriority })}
+              className={`${cell} w-full`}
+            >
+              {(Object.keys(PRIORITY_LABELS) as TaskPriority[]).map((value) => (
+                <option key={value} value={value}>
+                  {PRIORITY_LABELS[value]}
+                </option>
+              ))}
+            </select>
+          </td>
+        );
+      case "start":
+        return (
+          <td key={id} className="px-2 py-1.5 font-mono text-xs text-text-muted">
+            {task.start_date ? formatDay(task.start_date) : "—"}
+          </td>
+        );
+      case "due":
+        return (
+          <td key={id} className={`px-2 py-1.5 font-mono text-xs ${overdue ? "text-accent" : "text-text-muted"}`}>
+            {task.deadline ? formatDay(task.deadline) : "—"}
+          </td>
+        );
+      default: {
+        const field = customFields.find((f) => `cf:${f.id}` === id);
+        return (
+          <td key={id} className="truncate px-2 py-1.5 text-[13px] text-text-muted">
+            {field ? formatCustomValue(field, task.custom_fields[field.id]) : "—"}
+          </td>
+        );
+      }
+    }
+  }
+
   return (
     <tr className={`${task.status === "done" || task.status === "archived" ? "text-text-muted" : "text-text-secondary"} ${active ? "bg-surface-active" : ""}`}>
-      <td className="px-4 py-1.5">
-        <div className="flex min-w-0 items-center gap-2">
-          <button
-            type="button"
-            onClick={() => !active && onOpen()}
-            title="Open task details"
-            aria-current={active || undefined}
-            className="flex min-w-0 flex-1 items-center gap-2 text-left"
-          >
-            <span className={`truncate hover:underline ${task.status === "done" ? "line-through" : "text-text-primary"}`}>{task.title}</span>
-            {task.is_gantt_task && <Tag className={NEUTRAL_TAG}>gantt</Tag>}
-            {task.status === "archived" && <Tag className={NEUTRAL_TAG}>archived</Tag>}
-            <TagPills tags={task.tags} />
-          </button>
-          {/* Outside the button: a link can't sit inside a button. */}
-          {task.note_path && <NoteLink path={task.note_path} />}
-        </div>
-      </td>
-      <td className="px-2 py-1.5">
-        <select
-          aria-label={`Project of ${task.title}`}
-          value={task.project_id ?? NO_PROJECT_ID}
-          onChange={(e) => {
-            const id = Number(e.target.value);
-            onPatch(task, { project_id: id === NO_PROJECT_ID ? null : id });
-          }}
-          className={`${cell} w-full`}
-        >
-          <option value={NO_PROJECT_ID}>—</option>
-          {projectChoices.map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.code}
-            </option>
-          ))}
-        </select>
-      </td>
-      <td className="px-2 py-1.5">
-        <select
-          aria-label={`Status of ${task.title}`}
-          value={task.status}
-          onChange={(e) => onStatus(task, e.target.value as TaskStatus)}
-          className={`${cell} w-full`}
-        >
-          {allowedStatuses(flow, task.status).map((value) => (
-            <option key={value} value={value}>
-              {STATUS_LABELS[value]}
-            </option>
-          ))}
-        </select>
-      </td>
-      <td className="px-2 py-1.5">
-        <AssigneeSelect
-          ariaLabel={`Assignee of ${task.title}`}
-          value={task.assignee}
-          people={people}
-          emptyLabel="—"
-          onChange={(assignee) => assignee !== task.assignee && onPatch(task, { assignee })}
-          className={`${cell} w-full`}
-        />
-      </td>
-      <td className="px-2 py-1.5 font-mono text-xs text-text-muted">{task.start_date ? formatDay(task.start_date) : "—"}</td>
-      <td className={`px-2 py-1.5 font-mono text-xs ${overdue ? "text-accent" : "text-text-muted"}`}>
-        {task.deadline ? formatDay(task.deadline) : "—"}
-      </td>
+      {columns.map((column) => render(column.id))}
     </tr>
   );
 }

@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 
 import type { CustomFieldDef } from "../lib/space";
 import { PRIORITY_LABELS, STATUS_LABELS } from "../lib/tasks";
+import MultiSelect, { type MultiOption } from "./MultiSelect";
 import { advancedFilterCount, NO_ADVANCED_FILTERS, type ViewFilters } from "../lib/views";
 
 // Filter values with a special meaning (see `_custom_field_matches` in backend/main.py).
@@ -94,15 +95,11 @@ export default function AdvancedFilters({
         </div>
 
         <div className="flex flex-wrap items-start gap-3 border-t border-border-default/60 pt-3">
-          <Labelled label="Priority">
-            <ChoiceSelect value={filters.priority} labels={PRIORITY_LABELS} onChange={(priority) => set({ priority })} />
+          <Labelled label="Priority" group>
+            <MultiSelect label="Priority" options={choices(PRIORITY_LABELS)} value={filters.priority} onChange={(priority) => set({ priority })} />
           </Labelled>
-          <Labelled label="Status">
-            <ChoiceSelect
-              value={filters.status}
-              labels={STATUS_LABELS}
-              onChange={(status) => set({ status })}
-            />
+          <Labelled label="Status" group>
+            <MultiSelect label="Status" options={choices(STATUS_LABELS)} value={filters.status} onChange={(status) => set({ status })} />
           </Labelled>
           <Labelled label="Gantt task">
             <YesNoSelect value={filters.is_gantt_task} onChange={(is_gantt_task) => set({ is_gantt_task })} />
@@ -146,12 +143,14 @@ export default function AdvancedFilters({
   );
 }
 
-function Labelled({ label, children }: { label: string; children: ReactNode }) {
+/** A filter with its name above it. A `group` (a multi-select) isn't a <label>, as it holds labels of its own. */
+function Labelled({ label, group, children }: { label: string; group?: boolean; children: ReactNode }) {
+  const Tag = group ? "div" : "label";
   return (
-    <label className="flex flex-col gap-1">
+    <Tag className="flex flex-col gap-1" role={group ? "group" : undefined} aria-label={group ? label : undefined}>
       <span className="text-[12px] font-semibold uppercase tracking-[0.06em]">{label}</span>
       {children}
-    </label>
+    </Tag>
   );
 }
 
@@ -185,18 +184,9 @@ function YesNoSelect({ value, onChange }: { value: boolean | null; onChange: (va
   );
 }
 
-/** Any, or one of `labels`' keys (priority, status). */
-function ChoiceSelect<T extends string>({ value, labels, onChange }: { value: T | null; labels: Record<T, string>; onChange: (value: T | null) => void }) {
-  return (
-    <select value={value ?? OFF} onChange={(e) => onChange(e.target.value === OFF ? null : (e.target.value as T))} className="field w-40 py-1 text-[13px]">
-      <option value={OFF}>Any</option>
-      {(Object.keys(labels) as T[]).map((key) => (
-        <option key={key} value={key}>
-          {labels[key]}
-        </option>
-      ))}
-    </select>
-  );
+/** `labels`' keys (priority, status) as multi-select options. */
+function choices<T extends string>(labels: Record<T, string>): MultiOption<T>[] {
+  return (Object.keys(labels) as T[]).map((value) => ({ value, label: labels[value] }));
 }
 
 /** The filter on one custom field; `null` is off. */

@@ -492,6 +492,25 @@ def test_field_filters(client):
     assert titles(client, has_note=False) == ["Weld", "Paint"]
     assert titles(client, priority="high", is_milestone=True, has_note=True) == ["Launch"]
     assert client.get("/api/tasks", params={"priority": "whenever"}).status_code == 422
+    assert titles(client, priority=["urgent", "high"]) == ["Weld", "Launch"]
+    assert titles(client, status=["in_progress", "archived"]) == ["Weld", "Old"]
+    assert client.get("/api/tasks", params={"status": ["todo", "whenever"]}).status_code == 422
+
+
+def test_multi_value_project_and_assignee_filters(client):
+    with database.SessionLocal() as db:
+        db.add_all([Project(code="C7801", name="Hull"), Project(code="C7802", name="Deck"), Project(code="C7803", name="Rig")])
+        db.commit()
+        hull, deck, rig = db.scalars(select(Project.id).order_by(Project.id)).all()
+    new_task(client, "Keel", project_id=hull, assignee="Jose")
+    new_task(client, "Hatch", project_id=deck, assignee="Ana")
+    new_task(client, "Mast", project_id=rig)
+
+    assert titles(client, project_id=[hull, deck]) == ["Keel", "Hatch"]
+    assert titles(client, project_id=rig) == ["Mast"]
+    assert titles(client, assignee=["Jose", "Ana"]) == ["Keel", "Hatch"]
+    assert titles(client, assignee=["Ana", ""]) == ["Hatch", "Mast"]
+    assert titles(client, assignee="") == ["Mast"]
 
 
 def test_saved_view_keeps_advanced_filters(client):
@@ -516,7 +535,7 @@ def test_saved_view_keeps_advanced_filters(client):
     assert saved["custom_fields"] == {"yard": "North", "signed": "true", "weight": "4.5"}
     assert (saved["has_deadline"], saved["has_start_date"]) == (True, False)
     assert (saved["due_after"], saved["due_before"]) == ("2026-10-01", "2026-10-31")
-    assert (saved["priority"], saved["status"]) == ("high", "blocked")
+    assert (saved["priority"], saved["status"]) == (["high"], ["blocked"])
     assert (saved["is_gantt_task"], saved["is_milestone"], saved["has_note"]) == (True, False, True)
     assert (saved["start_after"], saved["start_before"]) == ("2026-09-01", "2026-09-30")
     assert saved["gantt_color_by"] == "yard"

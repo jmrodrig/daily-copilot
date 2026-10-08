@@ -11,7 +11,7 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 import agent
@@ -1226,9 +1226,9 @@ def _parse_cf(params: list[str]) -> dict[str, str]:
 @app.get("/api/tasks")
 def list_tasks(
     space_id: int = spaces.DEFAULT_SPACE_ID,
-    project_id: int | None = None,
-    assignee: str | None = None,
-    status: Status | None = None,
+    project_id: list[int] | None = Query(default=None),
+    assignee: list[str] | None = Query(default=None),
+    status: list[Status] | None = Query(default=None),
     note_path: str | None = None,
     tag: str | None = None,
     include_archived: bool = False,
@@ -1237,7 +1237,7 @@ def list_tasks(
     has_start_date: bool | None = None,
     due_after: date | None = None,
     due_before: date | None = None,
-    priority: Priority | None = None,
+    priority: list[Priority] | None = Query(default=None),
     is_gantt_task: bool | None = None,
     is_milestone: bool | None = None,
     has_note: bool | None = None,
@@ -1248,7 +1248,8 @@ def list_tasks(
     """The tasks of a space for the Kanban, Backlog, Gantt and List views, earliest due date first.
 
     Filters: `project_id`, `status`, `note_path` (tasks linked to that note), `tag` (tasks with
-    that tag), and `assignee` (an empty `assignee=` means unassigned). Archived tasks are left out
+    that tag), and `assignee` (an empty `assignee=` means unassigned). `project_id`, `assignee`, `status`
+    and `priority` are repeatable and match any of the values given. Archived tasks are left out
     unless `include_archived` is set or `status=archived` asks for them.
 
     Advanced filters: `cf=<field id>:<value>` (repeatable; see `_custom_field_matches`; fields the space
@@ -1259,12 +1260,16 @@ def list_tasks(
     """
     custom_filters = _parse_cf(cf)
     query = select(Task).where(_in_space(_space_id_or_404(db, space_id)))
-    if project_id is not None:
-        query = query.where(Task.project_id == project_id)
-    if assignee is not None:
-        query = query.where(Task.assignee.is_(None) if not assignee.strip() else Task.assignee == assignee.strip())
-    if status is not None:
-        query = query.where(Task.status == status)
+    if project_id:
+        query = query.where(Task.project_id.in_(project_id))
+    if assignee:
+        names = {name.strip() for name in assignee}
+        matches = [Task.assignee.in_(names - {""})]
+        if "" in names:
+            matches.append(Task.assignee.is_(None))
+        query = query.where(or_(*matches))
+    if status:
+        query = query.where(Task.status.in_(status))
     elif not include_archived:
         query = query.where(Task.status != Status.ARCHIVED)
     if note_path is not None:
@@ -1281,8 +1286,8 @@ def list_tasks(
         query = query.where(Task.start_date >= start_after)
     if start_before is not None:
         query = query.where(Task.start_date <= start_before)
-    if priority is not None:
-        query = query.where(Task.priority == priority)
+    if priority:
+        query = query.where(Task.priority.in_(priority))
     if is_gantt_task is not None:
         query = query.where(Task.is_gantt_task.is_(is_gantt_task))
     if is_milestone is not None:
@@ -1448,7 +1453,8 @@ def get_view(view_id: int, db: Session = Depends(get_db)) -> schemas.TaskView:
 @app.post("/api/views", status_code=201)
 def create_view(request: schemas.TaskViewIn, db: Session = Depends(get_db)) -> schemas.TaskView:
     _space_id_or_404(db, request.space_id)
-    _check_project(db, request.filters.project_id)
+    for project_id in request.filters.project_id or []:
+        _check_project(db, project_id)
     set_source(db, VIEWS_SOURCE)
     view = TaskView(
         space_id=request.space_id,
@@ -1466,7 +1472,8 @@ def update_view(view_id: int, request: schemas.TaskViewUpdate, db: Session = Dep
     """Rename a view and/or replace its filters; fields left out are kept."""
     view = _get_view(db, view_id)
     if request.filters is not None:
-        _check_project(db, request.filters.project_id)
+        for project_id in request.filters.project_id or []:
+            _check_project(db, project_id)
     set_source(db, VIEWS_SOURCE)
     if request.name is not None:
         view.name = request.name

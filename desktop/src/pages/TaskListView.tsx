@@ -1,18 +1,30 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import BulkEditDialog from "../components/BulkEditDialog";
+import {
+  AddTaskButton,
+  ColumnPicker,
+  customColumn,
+  formatCustomValue,
+  NewTaskRow,
+  TITLE_COLUMN,
+  useColumns,
+  type Column,
+  type NewTaskDraft,
+} from "../components/TaskTable";
 import { formatDay, NEUTRAL_TAG, NoteLink, ProjectTag, Tag, TagPills } from "../components/TriageBoard";
 import { optionColor, tint } from "../lib/colors";
 import { message } from "../lib/api";
 import { personLabel, PersonBadge, usePeople, type Person } from "../lib/people";
-import { useSpace, type CustomFieldDef } from "../lib/space";
+import { type CustomFieldDef } from "../lib/space";
 import {
   allowedStatuses,
   bulkUpdateTasks,
   isOverdue,
+  PRIORITY_LABELS,
   STATUS_LABELS,
   useTaskPanel,
-  type CustomFieldValue,
+  type ProjectOption,
   type StatusFlow,
   type TaskItem,
   type TaskPatch,
@@ -35,37 +47,63 @@ function matches(task: TaskItem, words: string[]): boolean {
   return words.every((word) => text.includes(word));
 }
 
-function formatValue(field: CustomFieldDef, value: CustomFieldValue | undefined): string {
-  if (value === undefined) return "—";
-  if (field.type === "checkbox") return value ? "✓" : "—";
-  if (field.type === "date" && typeof value === "string") return formatDay(value);
-  return String(value);
-}
+const LIST_COLUMNS: Column[] = [
+  { id: TITLE_COLUMN, label: "Task" },
+  { id: "project", label: "Project" },
+  { id: "status", label: "Status" },
+  { id: "assignee", label: "Assignee" },
+  { id: "priority", label: "Priority" },
+  { id: "start", label: "Start" },
+  { id: "due", label: "Due" },
+];
+
+const LIST_WIDTHS: Record<string, string> = {
+  project: "w-28",
+  status: "w-32",
+  assignee: "w-32",
+  priority: "w-24",
+  start: "w-24",
+  due: "w-24",
+};
 
 /**
  * The List view: a plain table of tasks with a filter box and a checkbox per row. Ticking tasks shows a toolbar that
- * edits any of their fields, or archives them, in one go (`POST /api/tasks/bulk-update`).
+ * edits any of their fields, or archives them, in one go (`POST /api/tasks/bulk-update`). "Columns" picks the columns
+ * shown, and "Add task" adds a row at the bottom for a new task.
  */
 export default function TaskListView({
+  spaceId,
   tasks,
   flow,
+  projects,
   customFields,
+  newTask,
+  onCreated,
   onUpdated,
 }: {
+  spaceId: number;
   tasks: TaskItem[];
   flow: StatusFlow | null;
+  projects: ProjectOption[];
   customFields: CustomFieldDef[];
+  /** The new task row's fields, from the view's filters. */
+  newTask: NewTaskDraft;
+  onCreated: (task: TaskItem) => void;
   /** Called after a bulk update, so the view reloads its tasks. */
   onUpdated: () => void;
 }) {
   const { taskId, openTask } = useTaskPanel();
-  const people = usePeople(useSpace().spaceId);
+  const people = usePeople(spaceId);
   const me = people.find((p) => p.is_me)?.name;
   const [filter, setFilter] = useState("");
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [adding, setAdding] = useState(false);
+  const allColumns = [...LIST_COLUMNS, ...customFields.map(customColumn)];
+  // Priority and Start are hidden until picked, so the table looks as it did.
+  const columns = useColumns("copilot:list-columns", allColumns, (id) => id === "priority" || id === "start");
 
   const words = filter.toLowerCase().split(/\s+/).filter(Boolean);
   const shown = useMemo(() => tasks.filter((t) => matches(t, words)), [tasks, filter]);
@@ -132,6 +170,89 @@ export default function TaskListView({
     }
   }
 
+  function cell(task: TaskItem, id: string) {
+    const finished = task.status === "done" || task.status === "archived";
+    const active = taskId === task.id;
+    switch (id) {
+      case TITLE_COLUMN:
+        return (
+          <td key={id} className="px-2 py-1.5">
+            <div className="flex min-w-0 items-center gap-2">
+              <button
+                type="button"
+                onClick={() => !active && openTask(task.id)}
+                title="Open task details"
+                aria-current={active || undefined}
+                className="flex min-w-0 flex-1 items-center gap-2 text-left"
+              >
+                <span className={`truncate hover:underline ${finished ? "line-through" : "text-text-primary"}`}>{task.title}</span>
+                <TagPills tags={task.tags} />
+              </button>
+              {task.note_path && <NoteLink path={task.note_path} />}
+            </div>
+          </td>
+        );
+      case "project":
+        return (
+          <td key={id} className="px-2 py-1.5 font-mono text-xs">
+            {task.project_code ? <ProjectTag code={task.project_code} color={task.project_color} /> : "—"}
+          </td>
+        );
+      case "status":
+        return (
+          <td key={id} className="px-2 py-1.5">
+            {task.status === "archived" || task.status === "blocked" ? (
+              <Tag className={task.status === "blocked" ? "border-accent bg-accent/15 text-accent" : NEUTRAL_TAG}>{STATUS_LABELS[task.status]}</Tag>
+            ) : (
+              STATUS_LABELS[task.status]
+            )}
+          </td>
+        );
+      case "assignee":
+        return (
+          <td key={id} className="truncate px-2 py-1.5">
+            {(() => {
+              if (!task.assignee) return "—";
+              const person = people.find((p) => p.name === task.assignee);
+              if (person) return <PersonBadge person={person} />;
+              return task.assignee === me ? personLabel({ name: task.assignee, is_me: true }) : task.assignee;
+            })()}
+          </td>
+        );
+      case "priority":
+        return (
+          <td key={id} className={`px-2 py-1.5 ${task.priority === "urgent" ? "text-accent" : ""}`}>
+            {PRIORITY_LABELS[task.priority]}
+          </td>
+        );
+      case "start":
+        return (
+          <td key={id} className="px-2 py-1.5 font-mono text-xs text-text-muted">
+            {task.start_date ? formatDay(task.start_date) : "—"}
+          </td>
+        );
+      case "due":
+        return (
+          <td key={id} className={`px-2 py-1.5 font-mono text-xs ${isOverdue(task) ? "text-accent" : "text-text-muted"}`}>
+            {task.deadline ? formatDay(task.deadline) : "—"}
+          </td>
+        );
+      default: {
+        const field = customFields.find((f) => `cf:${f.id}` === id);
+        if (!field) return <td key={id} />;
+        return (
+          <td key={id} className="whitespace-nowrap px-2 py-1.5 text-text-muted">
+            {field.type === "dropdown" ? (
+              <DropdownCell field={field} task={task} disabled={busy} onChange={(value) => setField(task, field, value)} />
+            ) : (
+              formatCustomValue(field, task.custom_fields[field.id])
+            )}
+          </td>
+        );
+      }
+    }
+  }
+
   return (
     <div className="flex flex-col gap-2">
       <div className="flex flex-wrap items-center gap-2">
@@ -151,6 +272,9 @@ export default function TaskListView({
             {notice}
           </span>
         )}
+        <div className="ml-auto">
+          <ColumnPicker columns={allColumns} isShown={columns.isShown} onToggle={columns.toggle} />
+        </div>
       </div>
 
       {chosen.length > 0 && (
@@ -166,24 +290,20 @@ export default function TaskListView({
       )}
       {error && <p className="text-[15px] text-accent">{error}</p>}
 
-      {shown.length === 0 ? (
+      {shown.length === 0 && !adding && (
         <p className="panel text-center text-sm text-text-muted">No tasks match {tasks.length ? "this filter" : "these filters"}.</p>
-      ) : (
-        <div className="overflow-x-auto rounded-lg border border-border-default bg-surface-raised">
+      )}
+      <div className="overflow-x-auto rounded-lg border border-border-default bg-surface-raised">
+        {(shown.length > 0 || adding) && (
           <table className="w-full text-[15px]">
             <thead className="bg-surface-panel text-left text-[13px] uppercase tracking-wider text-text-muted">
               <tr>
                 <th className="w-10 px-3 py-2">
                   <SelectAll checked={allShownSelected} indeterminate={chosen.length > 0 && !allShownSelected} onChange={toggleAll} />
                 </th>
-                <th className="px-2 py-2 font-medium">Task</th>
-                <th className="w-28 px-2 py-2 font-medium">Project</th>
-                <th className="w-32 px-2 py-2 font-medium">Status</th>
-                <th className="w-32 px-2 py-2 font-medium">Assignee</th>
-                <th className="w-24 px-2 py-2 font-medium">Due</th>
-                {customFields.map((field) => (
-                  <th key={field.id} className="whitespace-nowrap px-2 py-2 font-medium">
-                    {field.name}
+                {columns.shown.map((column) => (
+                  <th key={column.id} className={`${LIST_WIDTHS[column.id] ?? ""} whitespace-nowrap px-2 py-2 font-medium`}>
+                    {column.label}
                   </th>
                 ))}
               </tr>
@@ -192,7 +312,6 @@ export default function TaskListView({
               {shown.map((task) => {
                 const active = taskId === task.id;
                 const finished = task.status === "done" || task.status === "archived";
-                const overdue = isOverdue(task);
                 return (
                   <tr
                     key={task.id}
@@ -201,61 +320,28 @@ export default function TaskListView({
                     <td className="px-3 py-1.5">
                       <input type="checkbox" aria-label={`Select ${task.title}`} checked={selected.has(task.id)} onChange={() => toggle(task.id)} />
                     </td>
-                    <td className="px-2 py-1.5">
-                      <div className="flex min-w-0 items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() => !active && openTask(task.id)}
-                          title="Open task details"
-                          aria-current={active || undefined}
-                          className="flex min-w-0 flex-1 items-center gap-2 text-left"
-                        >
-                          <span className={`truncate hover:underline ${finished ? "line-through" : "text-text-primary"}`}>{task.title}</span>
-                          <TagPills tags={task.tags} />
-                        </button>
-                        {task.note_path && <NoteLink path={task.note_path} />}
-                      </div>
-                    </td>
-                    <td className="px-2 py-1.5 font-mono text-xs">{task.project_code ? <ProjectTag code={task.project_code} color={task.project_color} /> : "—"}</td>
-                    <td className="px-2 py-1.5">
-                      {task.status === "archived" || task.status === "blocked" ? (
-                        <Tag className={task.status === "blocked" ? "border-accent bg-accent/15 text-accent" : NEUTRAL_TAG}>{STATUS_LABELS[task.status]}</Tag>
-                      ) : (
-                        STATUS_LABELS[task.status]
-                      )}
-                    </td>
-                    <td className="truncate px-2 py-1.5">
-                      {(() => {
-                        if (!task.assignee) return "—";
-                        const person = people.find((p) => p.name === task.assignee);
-                        if (person) return <PersonBadge person={person} />;
-                        return task.assignee === me ? personLabel({ name: task.assignee, is_me: true }) : task.assignee;
-                      })()}
-                    </td>
-                    <td className={`px-2 py-1.5 font-mono text-xs ${overdue ? "text-accent" : "text-text-muted"}`}>
-                      {task.deadline ? formatDay(task.deadline) : "—"}
-                    </td>
-                    {customFields.map((field) => (
-                      <td key={field.id} className="whitespace-nowrap px-2 py-1.5 text-text-muted">
-                        {field.type === "dropdown" ? (
-                          <DropdownCell
-                            field={field}
-                            task={task}
-                            disabled={busy}
-                            onChange={(value) => setField(task, field, value)}
-                          />
-                        ) : (
-                          formatValue(field, task.custom_fields[field.id])
-                        )}
-                      </td>
-                    ))}
+                    {columns.shown.map((column) => cell(task, column.id))}
                   </tr>
                 );
               })}
+              {adding && (
+                <NewTaskRow
+                  spaceId={spaceId}
+                  columns={columns.shown}
+                  leadingCells={1}
+                  defaults={newTask}
+                  projects={projects}
+                  people={people}
+                  customFields={customFields}
+                  onCreated={onCreated}
+                  onClose={() => setAdding(false)}
+                />
+              )}
             </tbody>
           </table>
-        </div>
-      )}
+        )}
+        {!adding && <AddTaskButton onClick={() => setAdding(true)} />}
+      </div>
     </div>
   );
 }

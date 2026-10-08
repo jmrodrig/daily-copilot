@@ -135,9 +135,9 @@ export function isOverdue(task: TaskItem): boolean {
 export function taskQuery(spaceId: number, filters: ViewFilters, includeArchived = false): string {
   const params = new URLSearchParams({ space_id: String(spaceId) });
   if (includeArchived) params.set("include_archived", "true");
-  if (filters.project_id !== null) params.set("project_id", String(filters.project_id));
+  for (const id of filters.project_id) params.append("project_id", String(id));
   // An empty assignee asks for unassigned tasks.
-  if (filters.assignee !== null) params.set("assignee", filters.assignee);
+  for (const name of filters.assignee) params.append("assignee", name);
   if (filters.tag !== null) params.set("tag", filters.tag);
   for (const [id, value] of Object.entries(filters.custom_fields)) params.append("cf", `${id}:${value}`);
   writeAdvancedParams(params, filters);

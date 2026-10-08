@@ -84,8 +84,13 @@ test('advanced filters are sent to the server and kept in the URL', async ({ pag
 test('priority, status, flag and start date filters are sent to the server and kept in the URL', async ({ page }) => {
   const { queries } = await setup(page, '/tasks/list');
   await page.getByText('Advanced filters').click();
-  await page.getByLabel('Priority').selectOption('high');
-  await page.getByLabel('Status').selectOption('blocked');
+  await page.getByRole('button', { name: 'Priority: Any' }).click();
+  await page.getByRole('option', { name: 'High' }).getByRole('checkbox').check();
+  await page.getByRole('option', { name: 'Urgent' }).getByRole('checkbox').check();
+  await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: 'Status: Any' }).click();
+  await page.getByRole('option', { name: 'Blocked' }).getByRole('checkbox').check();
+  await page.keyboard.press('Escape');
   await page.getByLabel('Gantt task').selectOption('true');
   await page.getByLabel('Milestone').selectOption('false');
   await page.getByLabel('Linked note').selectOption('true');
@@ -94,15 +99,119 @@ test('priority, status, flag and start date filters are sent to the server and k
   await expect
     .poll(() => queries.at(-1)?.toString())
     .toBe(
-      'space_id=1&priority=high&status=blocked&is_gantt_task=true&is_milestone=false&has_note=true&start_after=2026-09-01&start_before=2026-09-30',
+      'space_id=1&is_gantt_task=true&is_milestone=false&has_note=true&start_after=2026-09-01&start_before=2026-09-30&priority=high&priority=urgent&status=blocked',
     );
 
   await page.reload();
-  await expect(page.getByLabel('Status')).toHaveValue('blocked');
+  await expect(page.getByRole('button', { name: 'Priority: High, Urgent' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Status: Blocked' })).toBeVisible();
   await expect(page.locator('summary')).toHaveText('Advanced filters(7)');
+
+  // "Any" clears the picks.
+  await page.getByRole('button', { name: 'Priority: High, Urgent' }).click();
+  await page.getByRole('option', { name: 'Any' }).getByRole('checkbox').check();
+  await expect(page).not.toHaveURL(/priority/);
+  await expect(page.locator('summary')).toHaveText('Advanced filters(6)');
+  await page.keyboard.press('Escape');
 
   await page.getByRole('button', { name: 'Clear advanced filters' }).click();
   await expect(page).not.toHaveURL(/priority|status|is_gantt_task|is_milestone|has_note|start_after|start_before/);
+});
+
+test('several projects and assignees can be picked at once', async ({ page }) => {
+  const { queries } = await setup(page, '/tasks/backlog');
+  await page.getByRole('button', { name: 'Project: All projects' }).click();
+  await page.getByRole('option', { name: 'C7801 · Bridge' }).getByRole('checkbox').check();
+  await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: 'Assignee: Everyone' }).click();
+  await page.getByRole('option', { name: 'Unassigned' }).getByRole('checkbox').check();
+  await page.getByRole('option', { name: 'Jose (Me)' }).getByRole('checkbox').check();
+  await expect.poll(() => queries.at(-1)?.toString()).toBe('space_id=1&project_id=1&assignee=&assignee=Jose');
+  await expect(page).toHaveURL(/project=1&assignee=&assignee=Jose/);
+
+  // A click outside closes the list; the button sums up the picks.
+  await page.getByRole('heading', { name: 'Backlog' }).click();
+  await expect(page.getByRole('listbox')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Assignee: Unassigned, Jose (Me)' })).toBeVisible();
+});
+
+test('the list and backlog columns can be picked, and are remembered', async ({ page }) => {
+  await setup(page, '/tasks/list');
+  const headers = page.locator('thead th');
+  await expect(headers).toHaveText(['', 'Task', 'Project', 'Status', 'Assignee', 'Due', 'Yard', 'Hull no.']);
+
+  await page.getByRole('button', { name: 'Columns' }).click();
+  await expect(page.getByRole('option', { name: 'Task' }).getByRole('checkbox')).toBeDisabled();
+  await page.getByRole('option', { name: 'Project' }).getByRole('checkbox').uncheck();
+  await page.getByRole('option', { name: 'Priority' }).getByRole('checkbox').check();
+  await page.getByRole('option', { name: 'Hull no.' }).getByRole('checkbox').uncheck();
+  await expect(headers).toHaveText(['', 'Task', 'Status', 'Assignee', 'Priority', 'Due', 'Yard']);
+  await expect(page.locator('tr', { hasText: 'Weld keel' }).locator('td')).toHaveCount(7);
+
+  await page.reload();
+  await expect(headers).toHaveText(['', 'Task', 'Status', 'Assignee', 'Priority', 'Due', 'Yard']);
+
+  // The Backlog keeps its own choice.
+  await page.goto('http://localhost:5173/tasks/backlog');
+  await expect(headers).toHaveText(['Task', 'Project', 'Status', 'Assignee', 'Start', 'Due']);
+});
+
+test('a task added at the bottom of the list takes the view\'s filters', async ({ page }) => {
+  // Of several priorities picked, the first (in their usual order) is taken.
+  await setup(page, '/tasks/list?project=1&priority=urgent&priority=high&status=blocked&cf=yard%3ASouth&tag=weld');
+  const created: Record<string, unknown>[] = [];
+  await page.route('**/api/tasks', (route) => {
+    const body = route.request().postDataJSON();
+    created.push(body);
+    return route.fulfill({ status: 201, json: { ...TASK, id: 3, custom_fields: {}, ...body } });
+  });
+
+  // The old form at the top is gone.
+  await expect(page.getByPlaceholder('What needs doing?')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Add task' }).click();
+  const row = page.getByRole('row', { name: 'New task' });
+  await expect(row.getByLabel('New task project')).toHaveValue('1');
+  await expect(row.getByLabel('New task status')).toHaveValue('blocked');
+  await expect(row.getByLabel('New task Yard')).toHaveValue('South');
+  await row.getByLabel('New task title').fill('Grind welds');
+  await row.getByLabel('New task title').press('Enter');
+
+  await expect.poll(() => created.at(-1)).toEqual({
+    space_id: 1,
+    title: 'Grind welds',
+    project_id: 1,
+    assignee: null,
+    status: 'blocked',
+    priority: 'high',
+    start_date: null,
+    deadline: null,
+    tags: ['weld'],
+    custom_fields: { yard: 'South' },
+  });
+  await expect(page.locator('tbody tr', { hasText: 'Grind welds' })).toHaveCount(1);
+  // Open for the next one; Escape closes it.
+  await expect(row.getByLabel('New task title')).toHaveValue('');
+  await row.getByLabel('New task title').press('Escape');
+  await expect(page.getByRole('row', { name: 'New task' })).toHaveCount(0);
+});
+
+test('the backlog adds tasks from a row at the bottom', async ({ page }) => {
+  await setup(page, '/tasks/backlog');
+  let body: Record<string, unknown> | null = null;
+  await page.route('**/api/tasks', (route) => {
+    body = route.request().postDataJSON();
+    return route.fulfill({ status: 201, json: { ...TASK, id: 3, custom_fields: {}, ...body } });
+  });
+  await page.getByRole('button', { name: 'Add task' }).click();
+  const row = page.getByRole('row', { name: 'New task' });
+  await expect(row.getByLabel('New task status')).toHaveValue('backlog');
+  await row.getByLabel('New task title').fill('Order paint');
+  await page.getByRole('button', { name: 'Add task' }).click();
+  await expect.poll(() => body).toMatchObject({ title: 'Order paint', status: 'backlog', project_id: null, priority: 'normal' });
+  // Added after the other tasks, above the new task row.
+  await expect(page.locator('tbody tr').nth(2)).toHaveText(/Order paint/);
+  await page.getByRole('button', { name: 'Cancel' }).click();
+  await expect(page.getByRole('button', { name: 'Add task' })).toBeVisible();
 });
 
 test('text field filters apply on Enter', async ({ page }) => {
