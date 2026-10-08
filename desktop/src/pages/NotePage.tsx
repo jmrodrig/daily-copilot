@@ -10,7 +10,7 @@ import { getJson, message, sendJson } from "../lib/api";
 import { useSpace } from "../lib/space";
 import { useTitle } from "../lib/title";
 import { isOverdue, STATUS_LABELS, taskIdFromHref, useTaskChanges, useTaskPanel, type TaskItem } from "../lib/tasks";
-import MediaLightbox, { ExpandButton, isPdfUrl, MarkupOverlay } from "../components/MediaLightbox";
+import MediaLightbox, { ExpandButton, isPdfUrl, isTyping, MarkupOverlay } from "../components/MediaLightbox";
 import NoteEditor from "../components/NoteEditor";
 import { PillIcon, refKind, StatusTag, useTaskStatus } from "../components/referencePill";
 import { NOTE_COLUMN, NOTE_HTML_SCHEMA, layoutMedia, liftCellColors } from "../components/noteFormatting";
@@ -142,6 +142,22 @@ export default function NotePage() {
     const timer = window.setTimeout(() => void save(), AUTO_SAVE_DELAY);
     return () => window.clearTimeout(timer);
   }, [state, dirty, saving, savingTags, draftKey]);
+
+  // The latest `save`, for the key handler.
+  const saveRef = useRef(save);
+  saveRef.current = save;
+  // "e" edits a published note. Not while typing, or with a dialog (the lightbox) open over it.
+  useEffect(() => {
+    if (state !== "published") return;
+    const keydown = (e: KeyboardEvent) => {
+      if (e.key !== "e" || e.ctrlKey || e.metaKey || e.altKey || e.repeat || e.defaultPrevented) return;
+      if (isTyping(e.target) || document.querySelector("[aria-modal]")) return;
+      e.preventDefault();
+      void saveRef.current("draft");
+    };
+    window.addEventListener("keydown", keydown);
+    return () => window.removeEventListener("keydown", keydown);
+  }, [state]);
 
   /** Save the draft's title and body and/or switch the note's state (PUT /api/notes/file). */
   async function save(next?: NoteState) {

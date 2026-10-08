@@ -1383,7 +1383,7 @@ function transformStrokes(strokes: Stroke[], box: Box, handle: Handle, from: Poi
 }
 
 /** Whether a key's going to a field being typed in. */
-const isTyping = (target: EventTarget | null) =>
+export const isTyping = (target: EventTarget | null) =>
   target instanceof HTMLElement && (target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName));
 
 /** A tool's icon: a path in a 16 × 16 box, maybe dashed. */
