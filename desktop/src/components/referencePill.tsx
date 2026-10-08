@@ -1,10 +1,20 @@
 import { mergeAttributes, Node, type JSONContent } from "@tiptap/core";
 import { NodeViewWrapper, ReactNodeViewRenderer, type NodeViewProps } from "@tiptap/react";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
-import { notePath } from "../lib/space";
-import { taskIdFromHref, useTaskPanel, TASK_CHANGED, type TaskChange } from "../lib/tasks";
+import { getJson } from "../lib/api";
+import { notePath, useSpace } from "../lib/space";
+import {
+  statusColor,
+  STATUS_LABELS,
+  taskIdFromHref,
+  useTaskPanel,
+  TASK_CHANGED,
+  type TaskChange,
+  type TaskItem,
+  type TaskStatus,
+} from "../lib/tasks";
 
 /**
  * Inline reference pills, like Confluence's macros: a task, a note or a web page shown as an icon and its name.
@@ -104,6 +114,7 @@ function PillView({ node, selected, updateAttributes }: NodeViewProps) {
   const { openTask } = useTaskPanel();
 
   const taskId = kind === "task" ? taskIdFromHref(href) : null;
+  const status = useTaskStatus(taskId);
 
   useEffect(() => {
     if (taskId === null) return;
@@ -133,8 +144,53 @@ function PillView({ node, selected, updateAttributes }: NodeViewProps) {
       className={`reference-pill ${kind} ${selected ? "selected" : ""}`}
     >
       <PillIcon kind={kind} />
-      <span className="reference-pill-label">{label || href}</span>
+      <span className="reference-pill-label">
+        {status && <StatusDot status={status} />}
+        {label || href}
+      </span>
     </NodeViewWrapper>
+  );
+}
+
+/**
+ * The current status of the task a pill points to: fetched on mount and kept in step with `TASK_CHANGED` from any
+ * view. Null until it's known, and for a task that's gone.
+ */
+export function useTaskStatus(taskId: number | null): TaskStatus | null {
+  const [status, setStatus] = useState<TaskStatus | null>(null);
+  useEffect(() => {
+    setStatus(null);
+    if (taskId === null) return;
+    const controller = new AbortController();
+    getJson<TaskItem>(`/api/tasks/${taskId}`, controller.signal)
+      .then((task) => setStatus(task.status))
+      .catch(() => {});
+    const handle = (event: Event) => {
+      const change = (event as CustomEvent<TaskChange>).detail;
+      if (change.id !== taskId) return;
+      if (change.deleted) setStatus(null);
+      else if (change.task) setStatus(change.task.status);
+    };
+    window.addEventListener(TASK_CHANGED, handle);
+    return () => {
+      controller.abort();
+      window.removeEventListener(TASK_CHANGED, handle);
+    };
+  }, [taskId]);
+  return status;
+}
+
+/** A dot in the status's colour (the space's pick, else the default), in front of a task pill's name. */
+export function StatusDot({ status }: { status: TaskStatus }) {
+  const { space } = useSpace();
+  return (
+    <span
+      role="img"
+      aria-label={STATUS_LABELS[status]}
+      title={STATUS_LABELS[status]}
+      className="mr-1 inline-block h-2 w-2 shrink-0 rounded-full align-middle"
+      style={{ backgroundColor: statusColor(space?.status_colors, status) }}
+    />
   );
 }
 

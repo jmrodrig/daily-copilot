@@ -104,6 +104,19 @@ def test_space_preferences_round_trip(client):
     assert client.put("/api/spaces/1", json={"status_flow": {}}).json()["status_flow"] is None
 
 
+def test_space_status_colors(client):
+    assert client.get("/api/spaces").json()[0]["status_colors"] == {}
+
+    response = client.put("/api/spaces/1", json={"status_colors": {"done": "#0F0", "blocked": "#ef4444", "todo": ""}})
+
+    assert response.status_code == 200, response.text
+    colors = {"done": "#00ff00", "blocked": "#ef4444"}  # normalised; a blank colour falls back to the default
+    assert response.json()["status_colors"] == colors
+    assert client.get("/api/spaces").json()[0]["status_colors"] == colors
+    assert client.put("/api/spaces/1", json={"name": "Work"}).json()["status_colors"] == colors
+    assert client.put("/api/spaces/1", json={"status_colors": None}).json()["status_colors"] == {}
+
+
 @pytest.mark.parametrize(
     "payload",
     [
@@ -111,6 +124,9 @@ def test_space_preferences_round_trip(client):
         {"status_flow": {"todo": {"nope": False}}},
         {"status_flow": {"nope": {"todo": False}}},
         {"status_flow": {"todo": {"done": "maybe"}}},
+        {"status_colors": {"nope": "#ffffff"}},
+        {"status_colors": {"done": "green"}},
+        {"status_colors": ["#ffffff"]},
         {"custom_fields_schema": [{"id": "Has Spaces", "name": "x"}]},
         {"custom_fields_schema": [{"id": "a", "name": "A"}, {"id": "a", "name": "B"}]},
         {"custom_fields_schema": [{"id": "a", "name": "A", "type": "colour"}]},

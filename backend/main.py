@@ -791,7 +791,7 @@ def create_space(request: schemas.SpaceIn, db: Session = Depends(get_db)) -> sch
 
 @app.put("/api/spaces/{space_id}")
 def update_space(space_id: int, request: schemas.SpaceUpdate, db: Session = Depends(get_db)) -> schemas.Space:
-    """Rename a space and/or set its status flow and custom task fields; fields left out are kept.
+    """Rename a space and/or set its status flow, custom task fields and status colours; fields left out are kept.
 
     Replacing the custom fields keeps the tasks' values, except those of fields that were removed (and values
     that don't fit a field whose type changed); `renamed_options` carries renamed dropdown options over.

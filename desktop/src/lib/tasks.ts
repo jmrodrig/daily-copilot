@@ -85,6 +85,21 @@ export const STATUS_LABELS: Record<TaskStatus, string> = {
 
 export const PRIORITY_LABELS: Record<TaskPriority, string> = { low: "Low", normal: "Normal", high: "High", urgent: "Urgent" };
 
+/** Each status's colour (e.g. the dot on task pills) unless the space picks its own (`Space.status_colors`). */
+export const DEFAULT_STATUS_COLORS: Record<TaskStatus, string> = {
+  backlog: "#94a3b8",
+  todo: "#64748b",
+  in_progress: "#3b82f6",
+  blocked: "#ef4444",
+  done: "#22c55e",
+  archived: "#a8a29e",
+};
+
+/** A status's colour in a space: its own pick (`Space.status_colors`), else the default. */
+export function statusColor(colors: Record<string, string> | undefined, status: TaskStatus): string {
+  return colors?.[status] ?? DEFAULT_STATUS_COLORS[status];
+}
+
 /** Every status, in workflow order. */
 export const STATUSES = Object.keys(STATUS_LABELS) as TaskStatus[];
 

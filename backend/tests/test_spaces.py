@@ -94,6 +94,7 @@ def test_spaces_list_and_create(client):
         "name": "Default",
         "status_flow": None,
         "custom_fields_schema": [],
+        "status_colors": {},
         "created_at": None,
     }
 

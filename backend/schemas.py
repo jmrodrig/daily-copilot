@@ -715,6 +715,21 @@ def clean_status_flow(value: Any) -> StatusFlow | None:
     return flow or None
 
 
+def clean_status_colors(value: Any) -> dict[Status, str]:
+    """Stored status colours that parse: unknown statuses and bad colours are dropped; None means none."""
+    if not isinstance(value, dict):
+        return {}
+    colors: dict[Status, str] = {}
+    for status, color in value.items():
+        try:
+            color = clean_color(color)
+            if color is not None:
+                colors[Status(status)] = color
+        except ValueError:
+            continue
+    return colors
+
+
 def clean_custom_fields_schema(value: Any) -> list[CustomFieldDef]:
     """Stored custom field definitions that parse; None means none."""
     fields = []
@@ -745,6 +760,11 @@ class SpaceUpdate(BaseModel):
         description="Field id -> old dropdown option -> its new name: tasks holding the old option are moved to the new "
         "one. Only used together with `custom_fields_schema`",
     )
+    status_colors: dict[Status, str] | None = Field(
+        default=None,
+        description="Replaces the space's status colours: status -> its \"#rrggbb\" colour for task pills; "
+        "statuses left out (or a null/empty map) use the app's defaults",
+    )
 
     @field_validator("name")
     @classmethod
@@ -766,6 +786,16 @@ class SpaceUpdate(BaseModel):
     def _empty_is_none(cls, value: StatusFlow | None) -> StatusFlow | None:
         return value or None
 
+    @field_validator("status_colors", mode="before")
+    @classmethod
+    def _clean_status_colors(cls, value: Any) -> dict[Any, str] | None:
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            raise ValueError("status_colors must map statuses to hex codes")
+        colors = {status: clean_color(color) for status, color in value.items()}
+        return {status: color for status, color in colors.items() if color is not None}
+
     @field_validator("custom_fields_schema")
     @classmethod
     def _unique_ids(cls, value: list[CustomFieldDef] | None) -> list[CustomFieldDef]:
@@ -780,6 +810,7 @@ class Space(SpaceIn):
     id: int
     status_flow: StatusFlow | None = Field(default=None, description="See `SpaceUpdate.status_flow`")
     custom_fields_schema: list[CustomFieldDef] = Field(default_factory=list)
+    status_colors: dict[Status, str] = Field(default_factory=dict, description="See `SpaceUpdate.status_colors`")
     created_at: datetime | None = None
 
     @field_validator("status_flow", mode="before")
@@ -791,6 +822,11 @@ class Space(SpaceIn):
     @classmethod
     def _clean_fields(cls, value: Any) -> list[CustomFieldDef]:
         return clean_custom_fields_schema(value)
+
+    @field_validator("status_colors", mode="before")
+    @classmethod
+    def _clean_colors(cls, value: Any) -> dict[Status, str]:
+        return clean_status_colors(value)
 
 
 class FolderNode(BaseModel):

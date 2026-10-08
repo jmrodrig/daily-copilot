@@ -6,7 +6,7 @@ import { Tag } from "../components/TriageBoard";
 import { getJson, message, sendJson } from "../lib/api";
 import { pillStyle } from "../lib/colors";
 import { useSpace, type CustomFieldDef, type CustomFieldType, type Space } from "../lib/space";
-import { STATUS_LABELS, STATUSES, type ProjectOption, type ProjectUpdate, type StatusFlow, type TaskStatus } from "../lib/tasks";
+import { DEFAULT_STATUS_COLORS, statusColor, STATUS_LABELS, STATUSES, type ProjectOption, type ProjectUpdate, type StatusFlow, type TaskStatus } from "../lib/tasks";
 import { useTitle } from "../lib/title";
 
 export default function SpacePreferences() {
@@ -88,6 +88,13 @@ export default function SpacePreferences() {
       </section>
 
       {space && <StatusFlowEditor key={`flow-${space.id}`} space={space} onSave={(status_flow) => updateSpace(space.id, { status_flow })} />}
+      {space && (
+        <StatusColorsEditor
+          key={`colors-${space.id}`}
+          space={space}
+          onSave={(colors) => updateSpace(space.id, { status_colors: { ...space.status_colors, ...colors } })}
+        />
+      )}
       {space && (
         <CustomFieldsEditor
           key={`fields-${space.id}`}
@@ -250,6 +257,63 @@ function StatusFlowEditor({ space, onSave }: { space: Space; onSave: (flow: Stat
           }}
         >
           Allow every move
+        </button>
+      </div>
+    </section>
+  );
+}
+
+// --- Status colours ----------------------------------------------------------------
+
+/**
+ * The colour of each status, shown as the dot on task pills. Saves every status's colour, so a status set back to its
+ * default stays on it even if the defaults change.
+ */
+function StatusColorsEditor({ space, onSave }: { space: Space; onSave: (colors: Record<TaskStatus, string>) => Promise<unknown> }) {
+  const current = () => Object.fromEntries(STATUSES.map((s) => [s, statusColor(space.status_colors, s)])) as Record<TaskStatus, string>;
+  const [colors, setColors] = useState(current);
+  const { save, saving, status, touched } = useSaver(onSave);
+  const dirty = JSON.stringify(colors) !== JSON.stringify(current());
+
+  function pick(state: TaskStatus, color: string) {
+    touched();
+    setColors((prev) => ({ ...prev, [state]: color.toLowerCase() }));
+  }
+
+  return (
+    <section className="panel flex flex-col gap-3" aria-label="Status colors">
+      <div>
+        <h2 className="text-base font-semibold">Status colors</h2>
+        <p className="mt-1 text-[15px] text-text-muted">The colour of each status, shown as a dot on the task pills in notes.</p>
+      </div>
+      <ul className="grid grid-cols-2 gap-x-6 gap-y-2 sm:grid-cols-3">
+        {STATUSES.map((state) => (
+          <li key={state} className="flex items-center gap-2 text-[15px]">
+            <input
+              type="color"
+              aria-label={`Colour of ${STATUS_LABELS[state]}`}
+              value={colors[state]}
+              onChange={(e) => pick(state, e.target.value)}
+              className="h-7 w-9 shrink-0 cursor-pointer rounded border border-border-default bg-transparent p-0.5"
+            />
+            <span className="flex-1">{STATUS_LABELS[state]}</span>
+            {colors[state] !== DEFAULT_STATUS_COLORS[state] && (
+              <button
+                type="button"
+                className="text-xs text-text-muted hover:text-text-primary"
+                title="Back to the default colour"
+                onClick={() => pick(state, DEFAULT_STATUS_COLORS[state])}
+              >
+                Reset
+              </button>
+            )}
+          </li>
+        ))}
+      </ul>
+      {status}
+      <div className="flex gap-2">
+        <button type="button" className="btn-primary" disabled={!dirty || saving} onClick={() => save(colors)}>
+          {saving ? "Saving…" : "Save"}
         </button>
       </div>
     </section>

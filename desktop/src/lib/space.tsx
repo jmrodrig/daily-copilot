@@ -19,8 +19,15 @@ export type CustomFieldDef = {
   show_inline?: boolean;
 };
 
-// GET /api/spaces (see Space in backend/schemas.py).
-export type Space = { id: number; name: string; status_flow: StatusFlow | null; custom_fields_schema: CustomFieldDef[] };
+// GET /api/spaces (see Space in backend/schemas.py). `status_colors` holds the statuses whose colour the space changed
+// (see DEFAULT_STATUS_COLORS for the rest).
+export type Space = {
+  id: number;
+  name: string;
+  status_flow: StatusFlow | null;
+  custom_fields_schema: CustomFieldDef[];
+  status_colors: Record<string, string>;
+};
 
 /**
  * Body of `PUT /api/spaces/{id}`: fields left out are kept. With `custom_fields_schema`, `renamed_options` (field id ->
@@ -28,6 +35,7 @@ export type Space = { id: number; name: string; status_flow: StatusFlow | null; 
  */
 export type SpaceUpdate = Partial<Pick<Space, "name" | "status_flow" | "custom_fields_schema">> & {
   renamed_options?: Record<string, Record<string, string>>;
+  status_colors?: Record<string, string>;
 };
 
 type SpaceState = {

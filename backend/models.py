@@ -60,6 +60,9 @@ class Space(Versioned, Base):
     status_flow: Mapped[dict | None] = mapped_column(JSON, default=None)
     # The space's custom task fields: `schemas.CustomFieldDef` dicts. None only for rows from before them.
     custom_fields_schema: Mapped[list[dict] | None] = mapped_column(JSON, default=list)
+    # Status -> its "#rrggbb" colour for task pills (`schemas.clean_status_colors`); statuses left out (or None)
+    # use the app's defaults.
+    status_colors: Mapped[dict | None] = mapped_column(JSON, default=None)
     created_at: Mapped[dt.datetime] = mapped_column(server_default=func.now())
 
     def __repr__(self) -> str:
