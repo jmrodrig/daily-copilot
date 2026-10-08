@@ -328,9 +328,10 @@ function TaskBoard({
       : [...projects, { id: filters.project_id, code: `#${filters.project_id}`, name: `#${filters.project_id}`, color: null, folder_path: null }];
   // Likewise a tag that no task carries any more.
   const tagChoices = filters.tag === null || tags.includes(filters.tag) ? tags : [...tags, filters.tag];
-  // A task archived since the last load (e.g. in the task panel) leaves at once.
+  // A task archived since the last load (e.g. in the task panel) leaves at once, unless the status filter asks for them.
+  const keepArchived = includeArchived || filters.status === "archived";
   const visible =
-    tasks.state === "ok" ? (includeArchived ? tasks.tasks : tasks.tasks.filter((t) => t.status !== "archived")) : null;
+    tasks.state === "ok" ? (keepArchived ? tasks.tasks : tasks.tasks.filter((t) => t.status !== "archived")) : null;
 
   return (
     <div className="flex flex-col gap-5 px-9 py-7">

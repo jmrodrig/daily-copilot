@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import { sendJson } from "./api";
-import type { ViewFilters } from "./views";
+import { writeAdvancedParams, type ViewFilters } from "./views";
 
 // Shapes of the task engine endpoints (see TaskItem, ProjectOption etc. in backend/schemas.py).
 export type TaskStatus = "backlog" | "todo" | "in_progress" | "blocked" | "done" | "archived";
@@ -46,7 +46,21 @@ export type ProjectUpdate = { name?: string; description?: string; color?: strin
 
 /** Fields of `PATCH /api/tasks/{id}` and of a bulk update's `updates`; the PATCH response is the plain task row. */
 export type TaskPatch = Partial<
-  Pick<TaskItem, "title" | "description" | "status" | "priority" | "assignee" | "project_id" | "start_date" | "deadline" | "tags" | "note_path">
+  Pick<
+    TaskItem,
+    | "title"
+    | "description"
+    | "status"
+    | "priority"
+    | "assignee"
+    | "project_id"
+    | "start_date"
+    | "deadline"
+    | "tags"
+    | "note_path"
+    | "is_gantt_task"
+    | "is_milestone"
+  >
 > & {
   /** Merged into the task's custom fields; `null` clears a field. */
   custom_fields?: Record<string, CustomFieldValue | null>;
@@ -68,6 +82,8 @@ export const STATUS_LABELS: Record<TaskStatus, string> = {
   done: "Done",
   archived: "Archived",
 };
+
+export const PRIORITY_LABELS: Record<TaskPriority, string> = { low: "Low", normal: "Normal", high: "High", urgent: "Urgent" };
 
 /** Every status, in workflow order. */
 export const STATUSES = Object.keys(STATUS_LABELS) as TaskStatus[];
@@ -124,10 +140,7 @@ export function taskQuery(spaceId: number, filters: ViewFilters, includeArchived
   if (filters.assignee !== null) params.set("assignee", filters.assignee);
   if (filters.tag !== null) params.set("tag", filters.tag);
   for (const [id, value] of Object.entries(filters.custom_fields)) params.append("cf", `${id}:${value}`);
-  if (filters.has_deadline !== null) params.set("has_deadline", String(filters.has_deadline));
-  if (filters.has_start_date !== null) params.set("has_start_date", String(filters.has_start_date));
-  if (filters.due_after !== null) params.set("due_after", filters.due_after);
-  if (filters.due_before !== null) params.set("due_before", filters.due_before);
+  writeAdvancedParams(params, filters);
   return params.toString();
 }
 

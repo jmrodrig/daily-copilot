@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 
 import type { CustomFieldDef } from "../lib/space";
+import { PRIORITY_LABELS, STATUS_LABELS } from "../lib/tasks";
 import { advancedFilterCount, NO_ADVANCED_FILTERS, type ViewFilters } from "../lib/views";
 
 // Filter values with a special meaning (see `_custom_field_matches` in backend/main.py).
@@ -13,8 +14,9 @@ const OFF = " off";
 const IS = " is";
 
 /**
- * The collapsible "Advanced filters" of the task views: the space's custom fields, and whether tasks have (and when)
- * a due date or start date. Open at first when any of them is set.
+ * The collapsible "Advanced filters" of the task views: priority, status, whether tasks are Gantt tasks or milestones
+ * or linked to a note, whether they have (and when) a due date or start date, and the space's custom fields. Open at
+ * first when any of them is set.
  */
 export default function AdvancedFilters({
   filters,
@@ -73,6 +75,44 @@ export default function AdvancedFilters({
           <Labelled label="Start date">
             <PresenceSelect value={filters.has_start_date} onChange={(has_start_date) => set({ has_start_date })} what="a start date" />
           </Labelled>
+          <Labelled label="Start on or after">
+            <input
+              type="date"
+              value={filters.start_after ?? ""}
+              onChange={(e) => set({ start_after: e.target.value || null })}
+              className="field w-40 py-1 text-[13px]"
+            />
+          </Labelled>
+          <Labelled label="Start on or before">
+            <input
+              type="date"
+              value={filters.start_before ?? ""}
+              onChange={(e) => set({ start_before: e.target.value || null })}
+              className="field w-40 py-1 text-[13px]"
+            />
+          </Labelled>
+        </div>
+
+        <div className="flex flex-wrap items-start gap-3 border-t border-border-default/60 pt-3">
+          <Labelled label="Priority">
+            <ChoiceSelect value={filters.priority} labels={PRIORITY_LABELS} onChange={(priority) => set({ priority })} />
+          </Labelled>
+          <Labelled label="Status">
+            <ChoiceSelect
+              value={filters.status}
+              labels={STATUS_LABELS}
+              onChange={(status) => set({ status })}
+            />
+          </Labelled>
+          <Labelled label="Gantt task">
+            <YesNoSelect value={filters.is_gantt_task} onChange={(is_gantt_task) => set({ is_gantt_task })} />
+          </Labelled>
+          <Labelled label="Milestone">
+            <YesNoSelect value={filters.is_milestone} onChange={(is_milestone) => set({ is_milestone })} />
+          </Labelled>
+          <Labelled label="Linked note">
+            <PresenceSelect value={filters.has_note} onChange={(has_note) => set({ has_note })} what="a linked note" />
+          </Labelled>
         </div>
 
         {customFields.length > 0 && (
@@ -126,6 +166,35 @@ function PresenceSelect({ value, onChange, what }: { value: boolean | null; onCh
       <option value={OFF}>Any</option>
       <option value="true">Has {what}</option>
       <option value="false">No {what}</option>
+    </select>
+  );
+}
+
+/** Any / yes / no, for the task's Gantt task and milestone flags. */
+function YesNoSelect({ value, onChange }: { value: boolean | null; onChange: (value: boolean | null) => void }) {
+  return (
+    <select
+      value={value === null ? OFF : String(value)}
+      onChange={(e) => onChange(e.target.value === OFF ? null : e.target.value === "true")}
+      className="field w-40 py-1 text-[13px]"
+    >
+      <option value={OFF}>Any</option>
+      <option value="true">Yes</option>
+      <option value="false">No</option>
+    </select>
+  );
+}
+
+/** Any, or one of `labels`' keys (priority, status). */
+function ChoiceSelect<T extends string>({ value, labels, onChange }: { value: T | null; labels: Record<T, string>; onChange: (value: T | null) => void }) {
+  return (
+    <select value={value ?? OFF} onChange={(e) => onChange(e.target.value === OFF ? null : (e.target.value as T))} className="field w-40 py-1 text-[13px]">
+      <option value={OFF}>Any</option>
+      {(Object.keys(labels) as T[]).map((key) => (
+        <option key={key} value={key}>
+          {labels[key]}
+        </option>
+      ))}
     </select>
   );
 }

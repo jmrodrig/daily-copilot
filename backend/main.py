@@ -406,7 +406,20 @@ def _check_task_update(db: Session, task: Task, changes: dict[str, Any]) -> dict
 
 
 def _apply_task_update(task: Task, changes: dict[str, Any]) -> None:
-    keys = ("assignee", "title", "description", "priority", "project_id", "start_date", "deadline", "tags", "note_path", "custom_fields")
+    keys = (
+        "assignee",
+        "title",
+        "description",
+        "priority",
+        "project_id",
+        "start_date",
+        "deadline",
+        "tags",
+        "note_path",
+        "custom_fields",
+        "is_gantt_task",
+        "is_milestone",
+    )
     for key in keys:
         if key in changes:
             setattr(task, key, changes[key])
@@ -418,8 +431,8 @@ def _apply_task_update(task: Task, changes: dict[str, Any]) -> None:
 @app.patch("/api/tasks/{task_id}")
 def update_task(task_id: int, request: TaskUpdate, db: Session = Depends(get_db)) -> schemas.Task:
     """Change a task: claim or unclaim it (`assignee`), move it on the board (`status`), or edit its
-    title, dates, project, linked note (`note_path`; null unlinks) or custom fields (merged; a null
-    value clears one). Unsent fields are left alone."""
+    title, dates, project, linked note (`note_path`; null unlinks), Gantt flags or custom fields
+    (merged; a null value clears one). Unsent fields are left alone."""
     task = _get_task(db, task_id)
     changes = _check_task_update(db, task, request.model_dump(exclude_unset=True))
     set_source(db, TASK_UPDATE_SOURCE)
@@ -1224,6 +1237,12 @@ def list_tasks(
     has_start_date: bool | None = None,
     due_after: date | None = None,
     due_before: date | None = None,
+    priority: Priority | None = None,
+    is_gantt_task: bool | None = None,
+    is_milestone: bool | None = None,
+    has_note: bool | None = None,
+    start_after: date | None = None,
+    start_before: date | None = None,
     db: Session = Depends(get_db),
 ) -> list[TaskItem]:
     """The tasks of a space for the Kanban, Backlog, Gantt and List views, earliest due date first.
@@ -1234,7 +1253,9 @@ def list_tasks(
 
     Advanced filters: `cf=<field id>:<value>` (repeatable; see `_custom_field_matches`; fields the space
     no longer has are ignored), `has_deadline` / `has_start_date` (true: set, false: not set), and
-    `due_after` / `due_before` (due on or after / on or before that day; tasks without a due date are left out).
+    `due_after` / `due_before` (due on or after / on or before that day; tasks without a due date are left out),
+    `start_after` / `start_before` (likewise for the start date), `priority`, `is_gantt_task`, `is_milestone`, and
+    `has_note` (true: linked to a note, false: not linked).
     """
     custom_filters = _parse_cf(cf)
     query = select(Task).where(_in_space(_space_id_or_404(db, space_id)))
@@ -1256,6 +1277,18 @@ def list_tasks(
         query = query.where(Task.deadline >= due_after)
     if due_before is not None:
         query = query.where(Task.deadline <= due_before)
+    if start_after is not None:
+        query = query.where(Task.start_date >= start_after)
+    if start_before is not None:
+        query = query.where(Task.start_date <= start_before)
+    if priority is not None:
+        query = query.where(Task.priority == priority)
+    if is_gantt_task is not None:
+        query = query.where(Task.is_gantt_task.is_(is_gantt_task))
+    if is_milestone is not None:
+        query = query.where(Task.is_milestone.is_(is_milestone))
+    if has_note is not None:
+        query = query.where(Task.note_path.is_not(None) if has_note else Task.note_path.is_(None))
     query = query.order_by(Task.deadline.is_(None), Task.deadline, Task.start_date.is_(None), Task.start_date, Task.id)
     tasks = list(db.scalars(query))
     if tag is not None and tag.strip():

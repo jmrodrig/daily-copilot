@@ -222,6 +222,8 @@ class TaskUpdate(BaseModel):
         default=None,
         description="Merged into the task's custom fields (see `Space.custom_fields_schema`); a null value clears that field",
     )
+    is_gantt_task: bool | None = Field(default=None, description="True for shop floor Gantt tasks")
+    is_milestone: bool | None = Field(default=None, description="Zero-duration Gantt event")
 
     @field_validator("assignee")
     @classmethod
@@ -233,7 +235,7 @@ class TaskUpdate(BaseModel):
     def _clean_tags(cls, value: list[str] | None) -> list[str]:
         return clean_tags(value)
 
-    @field_validator("status", "title", "description", "priority", "custom_fields")
+    @field_validator("status", "title", "description", "priority", "custom_fields", "is_gantt_task", "is_milestone")
     @classmethod
     def _not_null(cls, value: Any) -> Any:
         if value is None:
@@ -985,6 +987,13 @@ class TaskViewFilters(BaseModel):
     has_start_date: bool | None = Field(default=None, description="True: only tasks with a start date; False: only without")
     due_after: date | None = Field(default=None, description="Only tasks due on or after this day")
     due_before: date | None = Field(default=None, description="Only tasks due on or before this day")
+    priority: Priority | None = Field(default=None, description="None means any priority")
+    status: Status | None = Field(default=None, description="None means any status but archived")
+    is_gantt_task: bool | None = Field(default=None, description="True: only shop floor Gantt tasks; False: only the others")
+    is_milestone: bool | None = Field(default=None, description="True: only milestones; False: only the others")
+    has_note: bool | None = Field(default=None, description="True: only tasks linked to a note; False: only unlinked")
+    start_after: date | None = Field(default=None, description="Only tasks starting on or after this day")
+    start_before: date | None = Field(default=None, description="Only tasks starting on or before this day")
 
     @field_validator("custom_fields", mode="before")
     @classmethod

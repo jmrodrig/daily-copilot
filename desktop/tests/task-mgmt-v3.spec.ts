@@ -81,6 +81,30 @@ test('advanced filters are sent to the server and kept in the URL', async ({ pag
   await expect(page).not.toHaveURL(/cf=|has_deadline|due_after/);
 });
 
+test('priority, status, flag and start date filters are sent to the server and kept in the URL', async ({ page }) => {
+  const { queries } = await setup(page, '/tasks/list');
+  await page.getByText('Advanced filters').click();
+  await page.getByLabel('Priority').selectOption('high');
+  await page.getByLabel('Status').selectOption('blocked');
+  await page.getByLabel('Gantt task').selectOption('true');
+  await page.getByLabel('Milestone').selectOption('false');
+  await page.getByLabel('Linked note').selectOption('true');
+  await page.getByLabel('Start on or after').fill('2026-09-01');
+  await page.getByLabel('Start on or before').fill('2026-09-30');
+  await expect
+    .poll(() => queries.at(-1)?.toString())
+    .toBe(
+      'space_id=1&priority=high&status=blocked&is_gantt_task=true&is_milestone=false&has_note=true&start_after=2026-09-01&start_before=2026-09-30',
+    );
+
+  await page.reload();
+  await expect(page.getByLabel('Status')).toHaveValue('blocked');
+  await expect(page.locator('summary')).toHaveText('Advanced filters(7)');
+
+  await page.getByRole('button', { name: 'Clear advanced filters' }).click();
+  await expect(page).not.toHaveURL(/priority|status|is_gantt_task|is_milestone|has_note|start_after|start_before/);
+});
+
 test('text field filters apply on Enter', async ({ page }) => {
   const { queries } = await setup(page, '/tasks/list');
   await page.getByText('Advanced filters').click();
@@ -122,4 +146,62 @@ test('a project colour is set from Space preferences', async ({ page }) => {
   await row.getByLabel('Hex colour of C7801').fill('#B7A3F2');
   await row.getByRole('button', { name: 'Save' }).click();
   await expect.poll(() => projectPuts.at(-1)).toEqual({ name: 'Bridge', color: '#b7a3f2' });
+});
+
+test('bulk edit sends only the ticked fields of the selected tasks', async ({ page }) => {
+  await setup(page, '/tasks/list');
+  const bulkBodies: Record<string, unknown>[] = [];
+  await page.route('**/api/tasks/bulk-update', (route) => {
+    bulkBodies.push(route.request().postDataJSON());
+    return route.fulfill({ json: TASKS });
+  });
+
+  await page.getByLabel('Select all shown tasks').check();
+  const toolbar = page.getByRole('toolbar', { name: 'Bulk actions' });
+  await expect(toolbar).toContainText('2 selected');
+  await expect(toolbar.locator('select')).toHaveCount(0);
+  await toolbar.getByRole('button', { name: 'Bulk edit…' }).click();
+
+  const dialog = page.getByRole('dialog', { name: 'Bulk edit' });
+  await expect(dialog).toContainText('Bulk edit 2 tasks');
+  const apply = dialog.getByRole('button', { name: 'Apply changes' });
+  await expect(apply).toBeDisabled();
+
+  await dialog.getByLabel('Change Priority').check();
+  await dialog.getByLabel('New priority').selectOption('high');
+  // Both tasks are due the same day, so the date starts there; "Clear date" empties it.
+  await dialog.getByLabel('Change Due date').check();
+  await expect(dialog.getByLabel('New due date')).toHaveValue('2026-10-20');
+  await dialog.getByRole('button', { name: 'Clear date' }).click();
+  await dialog.getByLabel('Change Gantt task').check();
+  await dialog.getByLabel('New gantt task value').selectOption('true');
+  await dialog.getByLabel('Change Yard').check();
+  await dialog.getByLabel('New Yard').selectOption('South');
+  await dialog.getByLabel('Change Hull no.').check();
+  // Ticked then unticked: left alone.
+  await dialog.getByLabel('Change Status').check();
+  await dialog.getByLabel('Change Status').uncheck();
+  await apply.click();
+
+  await expect(dialog).toHaveCount(0);
+  await expect.poll(() => bulkBodies.at(-1)).toEqual({
+    task_ids: [1, 2],
+    updates: { priority: 'high', deadline: null, is_gantt_task: true, custom_fields: { yard: 'South', hull: null } },
+  });
+  await expect(page.getByRole('status')).toHaveText('Bulk edit: 2 tasks.');
+});
+
+test('the bulk edit dialog closes on Escape without saving', async ({ page }) => {
+  await setup(page, '/tasks/list');
+  let posted = false;
+  await page.route('**/api/tasks/bulk-update', (route) => {
+    posted = true;
+    return route.fulfill({ json: TASKS });
+  });
+  await page.getByLabel('Select Weld keel').check();
+  await page.getByRole('button', { name: 'Bulk edit…' }).click();
+  await page.getByRole('dialog', { name: 'Bulk edit' }).getByLabel('Change Priority').check();
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  expect(posted).toBe(false);
 });

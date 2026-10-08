@@ -1,3 +1,5 @@
+import type { TaskPriority, TaskStatus } from "./tasks";
+
 // Shapes of the saved task view endpoints (see TaskView and TaskViewFilters in backend/schemas.py).
 export type ViewType = "kanban" | "backlog" | "gantt" | "list";
 
@@ -6,7 +8,9 @@ export type ViewType = "kanban" | "backlog" | "gantt" | "list";
  *
  * The advanced ones: `custom_fields` maps a field id to the value to match ("" for tasks without a value, "*" for
  * tasks with any; see `_custom_field_matches` in backend/main.py), `has_deadline` / `has_start_date` ask for tasks with
- * (true) or without (false) that date, and `due_after` / `due_before` ("YYYY-MM-DD") bound the due date, inclusive.
+ * (true) or without (false) that date, `due_after` / `due_before` and `start_after` / `start_before` ("YYYY-MM-DD") bound
+ * the due and start dates, inclusive, `priority` / `status` ask for that one, and `is_gantt_task` / `is_milestone` /
+ * `has_note` ask for tasks that are (true) or aren't (false) Gantt tasks, milestones, or linked to a note.
  */
 export type ViewFilters = {
   project_id: number | null;
@@ -17,18 +21,49 @@ export type ViewFilters = {
   has_start_date: boolean | null;
   due_after: string | null;
   due_before: string | null;
+  priority: TaskPriority | null;
+  status: TaskStatus | null;
+  is_gantt_task: boolean | null;
+  is_milestone: boolean | null;
+  has_note: boolean | null;
+  start_after: string | null;
+  start_before: string | null;
 };
 
 export type TaskView = { id: number; space_id: number; name: string; view_type: ViewType; filters: ViewFilters };
 
 export const VIEW_TYPES: Record<ViewType, string> = { kanban: "Kanban", backlog: "Backlog", gantt: "Gantt", list: "List" };
 
-export const NO_ADVANCED_FILTERS: Pick<ViewFilters, "custom_fields" | "has_deadline" | "has_start_date" | "due_after" | "due_before"> = {
+/** The advanced filters besides the custom fields: each is off when `null`, and sent to the server under its own name. */
+export const ADVANCED_FILTER_KEYS = [
+  "has_deadline",
+  "has_start_date",
+  "due_after",
+  "due_before",
+  "priority",
+  "status",
+  "is_gantt_task",
+  "is_milestone",
+  "has_note",
+  "start_after",
+  "start_before",
+] as const;
+
+type AdvancedFilterKey = (typeof ADVANCED_FILTER_KEYS)[number];
+
+export const NO_ADVANCED_FILTERS: Pick<ViewFilters, "custom_fields" | AdvancedFilterKey> = {
   custom_fields: {},
   has_deadline: null,
   has_start_date: null,
   due_after: null,
   due_before: null,
+  priority: null,
+  status: null,
+  is_gantt_task: null,
+  is_milestone: null,
+  has_note: null,
+  start_after: null,
+  start_before: null,
 };
 
 export const NO_FILTERS: ViewFilters = { project_id: null, assignee: null, tag: null, ...NO_ADVANCED_FILTERS };
@@ -44,7 +79,7 @@ export function viewPath(id: number): string {
 export function advancedFilterCount(filters: ViewFilters): number {
   return (
     Object.keys(filters.custom_fields).length +
-    [filters.has_deadline, filters.has_start_date, filters.due_after, filters.due_before].filter((f) => f !== null).length
+    ADVANCED_FILTER_KEYS.filter((key) => filters[key] !== null).length
   );
 }
 
@@ -59,22 +94,27 @@ export function sameFilters(a: ViewFilters, b: ViewFilters): boolean {
     a.assignee === b.assignee &&
     a.tag === b.tag &&
     sameCustomFields(a.custom_fields, b.custom_fields) &&
-    a.has_deadline === b.has_deadline &&
-    a.has_start_date === b.has_start_date &&
-    a.due_after === b.due_after &&
-    a.due_before === b.due_before
+    ADVANCED_FILTER_KEYS.every((key) => a[key] === b[key])
   );
 }
 
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
 
+// Kept here rather than imported, as tasks.ts imports this module.
+const PRIORITIES: readonly TaskPriority[] = ["low", "normal", "high", "urgent"];
+const STATUSES: readonly TaskStatus[] = ["backlog", "todo", "in_progress", "blocked", "done", "archived"];
+
 function flag(value: string | null): boolean | null {
   return value === "true" ? true : value === "false" ? false : null;
 }
 
+function oneOf<T extends string>(choices: readonly T[], value: string | null): T | null {
+  return choices.find((choice) => choice === value) ?? null;
+}
+
 /**
  * The filters of an unsaved view from its URL (`/tasks/:view?project=&assignee=&tag=&cf=<field id>:<value>&has_deadline=
- * &has_start_date=&due_after=&due_before=`), so a filtered view can be bookmarked or shared.
+ * &has_start_date=&due_after=&due_before=&priority=&status=&is_gantt_task=&is_milestone=&has_note=&start_after=&start_before=`), so a filtered view can be bookmarked or shared.
  */
 export function filtersFromParams(params: URLSearchParams): ViewFilters {
   const project = Number(params.get("project") ?? "");
@@ -96,6 +136,13 @@ export function filtersFromParams(params: URLSearchParams): ViewFilters {
     has_start_date: flag(params.get("has_start_date")),
     due_after: day("due_after"),
     due_before: day("due_before"),
+    priority: oneOf(PRIORITIES, params.get("priority")),
+    status: oneOf(STATUSES, params.get("status")),
+    is_gantt_task: flag(params.get("is_gantt_task")),
+    is_milestone: flag(params.get("is_milestone")),
+    has_note: flag(params.get("has_note")),
+    start_after: day("start_after"),
+    start_before: day("start_before"),
   };
 }
 
@@ -105,9 +152,15 @@ export function writeFilterParams(params: URLSearchParams, filters: ViewFilters)
   if (filters.assignee !== null) params.set("assignee", filters.assignee);
   if (filters.tag !== null) params.set("tag", filters.tag);
   for (const [id, value] of Object.entries(filters.custom_fields)) params.append("cf", `${id}:${value}`);
-  if (filters.has_deadline !== null) params.set("has_deadline", String(filters.has_deadline));
-  if (filters.has_start_date !== null) params.set("has_start_date", String(filters.has_start_date));
-  if (filters.due_after !== null) params.set("due_after", filters.due_after);
-  if (filters.due_before !== null) params.set("due_before", filters.due_before);
+  writeAdvancedParams(params, filters);
+  return params;
+}
+
+/** The advanced filters besides the custom fields, added to `params` (the URL and the server use the same names). */
+export function writeAdvancedParams(params: URLSearchParams, filters: ViewFilters): URLSearchParams {
+  for (const key of ADVANCED_FILTER_KEYS) {
+    const value = filters[key];
+    if (value !== null) params.set(key, String(value));
+  }
   return params;
 }

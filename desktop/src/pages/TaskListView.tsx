@@ -1,22 +1,21 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import BulkEditDialog from "../components/BulkEditDialog";
 import { formatDay, NEUTRAL_TAG, NoteLink, ProjectTag, Tag, TagPills } from "../components/TriageBoard";
 import { optionColor, tint } from "../lib/colors";
 import { message } from "../lib/api";
-import { byName, personLabel, PersonBadge, usePeople, type Person } from "../lib/people";
+import { personLabel, PersonBadge, usePeople, type Person } from "../lib/people";
 import { useSpace, type CustomFieldDef } from "../lib/space";
 import {
   allowedStatuses,
   bulkUpdateTasks,
   isOverdue,
   STATUS_LABELS,
-  STATUSES,
   useTaskPanel,
   type CustomFieldValue,
   type StatusFlow,
   type TaskItem,
   type TaskPatch,
-  type TaskStatus,
 } from "../lib/tasks";
 
 /** Every word of the filter must appear in the task's title, project, status, assignee, tags or custom field values. */
@@ -45,7 +44,7 @@ function formatValue(field: CustomFieldDef, value: CustomFieldValue | undefined)
 
 /**
  * The List view: a plain table of tasks with a filter box and a checkbox per row. Ticking tasks shows a toolbar that
- * changes their status or assignee, or archives them, in one go (`POST /api/tasks/bulk-update`).
+ * edits any of their fields, or archives them, in one go (`POST /api/tasks/bulk-update`).
  */
 export default function TaskListView({
   tasks,
@@ -155,7 +154,15 @@ export default function TaskListView({
       </div>
 
       {chosen.length > 0 && (
-        <BulkToolbar tasks={chosen} flow={flow} people={people} busy={busy} onApply={apply} onClear={() => setSelected(new Set())} />
+        <BulkToolbar
+          tasks={chosen}
+          flow={flow}
+          people={people}
+          customFields={customFields}
+          busy={busy}
+          onApply={apply}
+          onClear={() => setSelected(new Set())}
+        />
       )}
       {error && <p className="text-[15px] text-accent">{error}</p>}
 
@@ -297,14 +304,15 @@ function SelectAll({ checked, indeterminate, onChange }: { checked: boolean; ind
   return <input ref={ref} type="checkbox" aria-label="Select all shown tasks" checked={checked} onChange={onChange} />;
 }
 
-// The bulk assignee picker's "Nobody" choice: a value no person's name can be (names are trimmed).
-const UNASSIGN = " unassign";
-
-/** Actions for the ticked tasks. Only statuses the space's status flow allows for every one of them are offered. */
+/**
+ * Actions for the ticked tasks: "Bulk edit…" opens a dialog that changes any of their fields, and "Archive" archives
+ * them when the space's status flow allows it for every one.
+ */
 function BulkToolbar({
   tasks,
   flow,
   people,
+  customFields,
   busy,
   onApply,
   onClear,
@@ -312,13 +320,14 @@ function BulkToolbar({
   tasks: TaskItem[];
   flow: StatusFlow | null;
   people: Person[];
+  customFields: CustomFieldDef[];
   busy: boolean;
   onApply: (updates: TaskPatch, what: string) => void;
   onClear: () => void;
 }) {
-  const statuses = STATUSES.filter((s) => tasks.every((t) => allowedStatuses(flow, t.status).includes(s)));
-  const canArchive = statuses.includes("archived") && tasks.some((t) => t.status !== "archived");
-  const assignees = [...people].sort((a, b) => Number(b.is_me) - Number(a.is_me) || byName(a, b));
+  const [editing, setEditing] = useState(false);
+  const archivable = tasks.every((t) => allowedStatuses(flow, t.status).includes("archived"));
+  const canArchive = archivable && tasks.some((t) => t.status !== "archived");
 
   return (
     <div
@@ -327,48 +336,14 @@ function BulkToolbar({
       className="flex flex-wrap items-center gap-2 rounded-lg border border-accent/50 bg-accent/[0.08] px-3 py-2 text-xs text-text-secondary"
     >
       <span className="font-semibold text-text-primary">{tasks.length} selected</span>
-      <select
-        aria-label="Change status of the selected tasks"
-        value=""
-        disabled={busy}
-        onChange={(e) => {
-          const status = e.target.value as TaskStatus;
-          if (status) onApply({ status }, `Moved to ${STATUS_LABELS[status]}`);
-        }}
-        className="field w-auto py-1 text-[13px]"
-      >
-        <option value="">Change status…</option>
-        {statuses.map((s) => (
-          <option key={s} value={s}>
-            {STATUS_LABELS[s]}
-          </option>
-        ))}
-      </select>
-      <select
-        aria-label="Assign the selected tasks to"
-        value=""
-        disabled={busy}
-        onChange={(e) => {
-          const choice = e.target.value;
-          if (choice === UNASSIGN) onApply({ assignee: null }, "Unassigned");
-          else if (choice) onApply({ assignee: choice }, `Assigned to ${choice}`);
-        }}
-        title={people.length ? undefined : "Add people on the People page to assign tasks to them"}
-        className="field w-auto py-1 text-[13px]"
-      >
-        <option value="">Assign to…</option>
-        {assignees.map((person) => (
-          <option key={person.id} value={person.name}>
-            {personLabel(person)}
-          </option>
-        ))}
-        <option value={UNASSIGN}>Nobody (unassign)</option>
-      </select>
+      <button type="button" className="btn-primary min-h-7 px-2.5 text-xs" disabled={busy} onClick={() => setEditing(true)}>
+        Bulk edit…
+      </button>
       <button
         type="button"
         className="btn min-h-7 px-2.5 text-xs"
         disabled={busy || !canArchive}
-        title={statuses.includes("archived") ? undefined : "The space's status flow doesn't allow archiving every selected task"}
+        title={archivable ? undefined : "The space's status flow doesn't allow archiving every selected task"}
         onClick={() => onApply({ status: "archived" }, "Archived")}
       >
         Archive
@@ -377,6 +352,16 @@ function BulkToolbar({
         Clear selection
       </button>
       {busy && <span className="text-text-muted">Saving…</span>}
+      {editing && (
+        <BulkEditDialog
+          tasks={tasks}
+          flow={flow}
+          people={people}
+          customFields={customFields}
+          onApply={onApply}
+          onClose={() => setEditing(false)}
+        />
+      )}
     </div>
   );
 }

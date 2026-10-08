@@ -8,6 +8,7 @@ from sqlalchemy import select
 
 import database
 import main
+import spaces
 from models import HistoryRecord, Project, Task
 from schemas import Status, clean_status_flow
 
@@ -459,6 +460,38 @@ def test_date_filters(client):
     assert titles(client, due_after="2026-10-11") == ["Due later"]
     assert titles(client, due_before="2026-10-10") == ["Due soon"]
     assert titles(client, due_after="2026-10-01", due_before="2026-11-30") == ["Due soon"]
+    assert titles(client, start_after="2026-10-01") == ["Due soon"]
+    assert titles(client, start_after="2026-10-02") == []
+    assert titles(client, start_before="2026-10-01") == ["Due soon"]
+    assert titles(client, start_before="2026-09-30") == []
+
+
+def test_field_filters(client):
+    note = spaces.content_dir(1) / "Projects" / "Keel.md"
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text("# Keel", encoding="utf-8")
+    weld = new_task(client, "Weld", priority="urgent", status="in_progress", deadline="2026-10-10")
+    launch = new_task(client, "Launch", priority="high", deadline="2026-11-01", note_path="Projects/Keel.md")
+    with database.SessionLocal() as db:
+        # Gantt tasks and milestones come from the Gantt import, not the API.
+        db.get(Task, weld["id"]).is_gantt_task = True
+        db.get(Task, launch["id"]).is_milestone = True
+        db.commit()
+    new_task(client, "Paint")
+    new_task(client, "Old", status="archived")
+
+    assert titles(client, priority="urgent") == ["Weld"]
+    assert titles(client, priority="normal") == ["Paint"]
+    assert titles(client, status="in_progress") == ["Weld"]
+    assert titles(client, status="archived") == ["Old"]
+    assert titles(client, is_gantt_task=True) == ["Weld"]
+    assert titles(client, is_gantt_task=False) == ["Launch", "Paint"]
+    assert titles(client, is_milestone=True) == ["Launch"]
+    assert titles(client, is_milestone=False) == ["Weld", "Paint"]
+    assert titles(client, has_note=True) == ["Launch"]
+    assert titles(client, has_note=False) == ["Weld", "Paint"]
+    assert titles(client, priority="high", is_milestone=True, has_note=True) == ["Launch"]
+    assert client.get("/api/tasks", params={"priority": "whenever"}).status_code == 422
 
 
 def test_saved_view_keeps_advanced_filters(client):
@@ -468,6 +501,13 @@ def test_saved_view_keeps_advanced_filters(client):
         "has_start_date": False,
         "due_after": "2026-10-01",
         "due_before": "2026-10-31",
+        "priority": "high",
+        "status": "blocked",
+        "is_gantt_task": True,
+        "is_milestone": False,
+        "has_note": True,
+        "start_after": "2026-09-01",
+        "start_before": "2026-09-30",
     }
     view = client.post("/api/views", json={"space_id": 1, "name": "North yard", "view_type": "list", "filters": filters})
     assert view.status_code == 201, view.text
@@ -475,3 +515,6 @@ def test_saved_view_keeps_advanced_filters(client):
     assert saved["custom_fields"] == {"yard": "North", "signed": "true", "weight": "4.5"}
     assert (saved["has_deadline"], saved["has_start_date"]) == (True, False)
     assert (saved["due_after"], saved["due_before"]) == ("2026-10-01", "2026-10-31")
+    assert (saved["priority"], saved["status"]) == ("high", "blocked")
+    assert (saved["is_gantt_task"], saved["is_milestone"], saved["has_note"]) == (True, False, True)
+    assert (saved["start_after"], saved["start_before"]) == ("2026-09-01", "2026-09-30")

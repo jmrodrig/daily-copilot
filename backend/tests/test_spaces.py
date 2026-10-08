@@ -25,7 +25,20 @@ def client(monkeypatch):
 
 
 # The advanced filters of a saved view that sets none.
-NO_ADVANCED_FILTERS = {"custom_fields": {}, "has_deadline": None, "has_start_date": None, "due_after": None, "due_before": None}
+NO_ADVANCED_FILTERS = {
+    "custom_fields": {},
+    "has_deadline": None,
+    "has_start_date": None,
+    "due_after": None,
+    "due_before": None,
+    "priority": None,
+    "status": None,
+    "is_gantt_task": None,
+    "is_milestone": None,
+    "has_note": None,
+    "start_after": None,
+    "start_before": None,
+}
 
 
 def write(space_id, path, text):
