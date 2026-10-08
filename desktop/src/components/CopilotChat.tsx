@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import Markdown from "react-markdown";
 import { Link, useLocation, type Location } from "react-router-dom";
 import remarkGfm from "remark-gfm";
@@ -174,6 +174,26 @@ export default function CopilotChat({
     if (active) inputRef.current?.focus();
   }, [active]);
 
+  const multiline = input.includes("\n");
+  useLayoutEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    const adjust = () => {
+      el.style.height = "auto";
+      el.style.height = `${el.scrollHeight}px`;
+    };
+    adjust();
+    let lastWidth = el.offsetWidth;
+    const observer = new ResizeObserver(() => {
+      if (el.offsetWidth !== lastWidth) {
+        lastWidth = el.offsetWidth;
+        adjust();
+      }
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [input, multiline]);
+
   // The command menu is open while the input is a lone "/word" (no space yet).
   const menuItems = useMemo(() => {
     if (menuDismissed || !/^\/\S*$/.test(input)) return [];
@@ -181,7 +201,6 @@ export default function CopilotChat({
     return prompts.filter((p) => p.command.startsWith(typed));
   }, [input, prompts, menuDismissed]);
   const highlighted = Math.min(menuIndex, Math.max(menuItems.length - 1, 0));
-  const multiline = input.includes("\n");
 
   function changeInput(value: string) {
     setInput(value);

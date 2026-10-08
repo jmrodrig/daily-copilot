@@ -17,10 +17,9 @@ type Widths = Record<Pane, number>;
 // Pixel bounds for each resizable pane; the main view keeps at least MAIN_MIN.
 const PANES: Record<Pane, { initial: number; min: number; max: number }> = {
   left: { initial: 264, min: 240, max: 480 },
-  task: { initial: 400, min: 360, max: 800 },
-  chat: { initial: 320, min: 320, max: 720 },
+  task: { initial: 400, min: 360, max: 1200 },
+  chat: { initial: 320, min: 320, max: 1200 },
 };
-const MAIN_MIN = 400;
 const RAIL = 64; // a collapsed pane
 const KEY_STEP = 16;
 
@@ -107,8 +106,7 @@ export default function Layout() {
   /** Grows `pane` by `grow` pixels from its width at the start of the drag, taking the room from the main view. */
   function resizeAgainstMain(pane: Pane, grow: number) {
     const s = start.current;
-    const room = Math.max(0, s.main - MAIN_MIN);
-    setWidths((prev) => ({ ...prev, [pane]: clamp(pane, s[pane] + Math.min(grow, room)) }));
+    setWidths((prev) => ({ ...prev, [pane]: clamp(pane, s[pane] + grow) }));
   }
 
   /** Moves the task/chat border by `dx` pixels, trading width between the two. */
