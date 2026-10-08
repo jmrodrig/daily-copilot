@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type DragEvent, type FormEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type FormEvent, type ReactNode } from "react";
 import { NavLink, Navigate, useNavigate, useParams, useSearchParams } from "react-router-dom";
 
 import AdvancedFilters from "../components/AdvancedFilters";
@@ -40,6 +40,7 @@ import {
   type DateChange,
   type ProjectOption,
   type StatusFlow,
+  type TaskCreate,
   type TaskItem,
   type TaskPatch,
   type TaskPriority,
@@ -449,24 +450,21 @@ function TaskBoard({
 
       <AdvancedFilters filters={filters} customFields={customFields} onFilters={onFilters} />
 
-      {/* The Backlog and List add tasks from a row at the bottom of their table. */}
-      {(viewType === "kanban" || viewType === "gantt") && (
-        <NewTaskForm
-          spaceId={spaceId}
-          projects={projects}
-          people={people}
-          defaults={newTask}
-          onCreated={(task) =>
-            setTasks((prev) => (prev.state === "ok" ? { ...prev, tasks: [task, ...prev.tasks] } : prev))
-          }
-        />
-      )}
-
       {error && <p className="text-[15px] text-accent">{error}</p>}
       {tasks.state === "loading" && <p className="text-[15px] text-text-muted">Loading tasks…</p>}
       {tasks.state === "error" && <p className="text-[15px] text-text-secondary">Could not load the tasks ({tasks.message}).</p>}
       {visible && viewType === "kanban" && (
-        <Kanban tasks={visible} flow={flow} people={people} me={me} customFields={customFields} onStatus={changeStatus} />
+        <Kanban
+          spaceId={spaceId}
+          newTaskDefaults={newTask}
+          onCreated={addTask}
+          tasks={visible}
+          flow={flow}
+          people={people}
+          me={me}
+          customFields={customFields}
+          onStatus={changeStatus}
+        />
       )}
       {visible && viewType === "backlog" && (
         <Backlog
@@ -509,101 +507,6 @@ function TaskBoard({
   );
 }
 
-// --- New task -------------------------------------------------------------------
-
-function NewTaskForm({
-  spaceId,
-  projects,
-  people,
-  defaults,
-  onCreated,
-}: {
-  spaceId: number;
-  projects: ProjectOption[];
-  people: Person[];
-  /** The fields matching the view's filters (see `newTaskDefaults`). */
-  defaults: NewTaskDraft;
-  onCreated: (task: TaskItem) => void;
-}) {
-  const defaultProject = defaults.project_id === null ? "" : String(defaults.project_id);
-  const defaultStatus = defaults.status;
-  const [title, setTitle] = useState("");
-  const [project, setProject] = useState(defaultProject);
-  const [assignee, setAssignee] = useState<string | null>(defaults.assignee);
-  const [start, setStart] = useState("");
-  const [due, setDue] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => setProject(defaultProject), [defaultProject]);
-  useEffect(() => setAssignee(defaults.assignee), [defaults.assignee]);
-
-  async function submit(event: FormEvent) {
-    event.preventDefault();
-    if (!title.trim()) return;
-    setSaving(true);
-    setError(null);
-    try {
-      const task = await sendJson<TaskItem>("POST", "/api/tasks", {
-        space_id: spaceId,
-        title: title.trim(),
-        project_id: project ? Number(project) : null,
-        assignee,
-        start_date: start || null,
-        deadline: due || null,
-        status: defaultStatus,
-        priority: defaults.priority,
-        tags: defaults.tags,
-        custom_fields: defaults.custom_fields,
-      });
-      onCreated(task);
-      setTitle("");
-      setStart("");
-      setDue("");
-    } catch (err: unknown) {
-      setError(message(err));
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <form onSubmit={submit} className="flex flex-wrap items-end gap-2 rounded-lg border border-border-default bg-surface-raised p-3">
-      <label className="flex min-w-[220px] flex-1 flex-col gap-1 text-[13px] text-text-muted">
-        New task
-        <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="What needs doing?" className="field py-1.5" />
-      </label>
-      <label className="flex flex-col gap-1 text-[13px] text-text-muted">
-        Project
-        <select value={project} onChange={(e) => setProject(e.target.value)} className="field w-36 py-1.5">
-          <option value="">No project</option>
-          {projects.map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.code}
-            </option>
-          ))}
-        </select>
-      </label>
-      <label className="flex flex-col gap-1 text-[13px] text-text-muted">
-        Assignee
-        <AssigneeSelect value={assignee} people={people} onChange={setAssignee} className="field w-40 py-1.5" />
-      </label>
-      <label className="flex flex-col gap-1 text-[13px] text-text-muted">
-        Start
-        <input type="date" value={start} onChange={(e) => setStart(e.target.value)} className="field w-36 py-1.5" />
-      </label>
-      <label className="flex flex-col gap-1 text-[13px] text-text-muted">
-        Due
-        <input type="date" value={due} onChange={(e) => setDue(e.target.value)} className="field w-36 py-1.5" />
-      </label>
-      <button type="submit" className="btn-primary min-h-9" disabled={saving || !title.trim()}>
-        {saving ? "Adding…" : `Add to ${STATUS_LABELS[defaultStatus]}`}
-      </button>
-      {error && <p className="w-full text-xs text-accent">{error}</p>}
-    </form>
-  );
-}
-
 // --- Kanban -----------------------------------------------------------------------
 
 const DRAG_TYPE = "application/x-copilot-task";
@@ -612,7 +515,19 @@ type OnPatch = (task: TaskItem, patch: Omit<TaskPatch, "custom_fields">) => void
 
 type CardProps = { flow: StatusFlow | null; people: Person[]; me: string; customFields: CustomFieldDef[]; onStatus: OnStatus };
 
-function Kanban({ tasks, ...card }: { tasks: TaskItem[] } & CardProps) {
+function Kanban({
+  spaceId,
+  newTaskDefaults,
+  onCreated,
+  tasks,
+  ...card
+}: {
+  spaceId: number;
+  /** The new card's fields, from the view's filters; the column sets the status. */
+  newTaskDefaults: NewTaskDraft;
+  onCreated: (task: TaskItem) => void;
+  tasks: TaskItem[];
+} & CardProps) {
   const [over, setOver] = useState<TaskStatus | null>(null);
   const byId = useMemo(() => new Map(tasks.map((t) => [t.id, t])), [tasks]);
 
@@ -652,10 +567,99 @@ function Kanban({ tasks, ...card }: { tasks: TaskItem[] } & CardProps) {
                 <KanbanCard key={task.id} task={task} {...card} />
               ))}
             </ul>
+            {(status === "todo" || status === "in_progress") && (
+              <KanbanAddCard status={status} spaceId={spaceId} defaults={newTaskDefaults} onCreated={onCreated} />
+            )}
           </section>
         );
       })}
     </div>
+  );
+}
+
+/**
+ * The "+ Add task" footer of a Kanban column: Enter adds a task to the column and leaves the input open for the
+ * next one; Escape, or leaving it empty, closes it.
+ */
+function KanbanAddCard({
+  status,
+  spaceId,
+  defaults,
+  onCreated,
+}: {
+  status: TaskStatus;
+  spaceId: number;
+  defaults: NewTaskDraft;
+  onCreated: (task: TaskItem) => void;
+}) {
+  const [isEditing, setIsEditing] = useState(false);
+  const [title, setTitle] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const input = useRef<HTMLInputElement>(null);
+
+  // Disabling the input while saving drops its focus: take it back for the next task.
+  useEffect(() => {
+    if (isEditing && !saving) input.current?.focus();
+  }, [isEditing, saving]);
+
+  function close() {
+    setIsEditing(false);
+    setTitle("");
+    setError(null);
+  }
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    if (!title.trim() || saving) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const body: TaskCreate = { ...defaults, space_id: spaceId, status, title: title.trim() };
+      onCreated(await sendJson<TaskItem>("POST", "/api/tasks", body));
+      setTitle("");
+    } catch (err: unknown) {
+      setError(message(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (!isEditing) {
+    return (
+      <div className="px-2 pb-2">
+        <button
+          type="button"
+          onClick={() => setIsEditing(true)}
+          className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[13px] text-text-muted hover:bg-surface-raised hover:text-text-primary"
+        >
+          <span aria-hidden className="flex h-4 w-4 items-center justify-center rounded border border-border-strong font-mono text-[12px] leading-none">
+            +
+          </span>
+          Add task
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <form onSubmit={submit} className="px-2 pb-2">
+      <div className="rounded-md border border-border-default bg-surface-raised p-2">
+        <input
+          ref={input}
+          autoFocus
+          aria-label={`New ${STATUS_LABELS[status]} task title`}
+          value={title}
+          onChange={(e) => setTitle(e.target.value)}
+          onKeyDown={(e) => e.key === "Escape" && close()}
+          onBlur={() => !title.trim() && !saving && close()}
+          disabled={saving}
+          placeholder="What needs doing?"
+          className="field w-full py-1 text-[13px]"
+        />
+        {error && <p className="mt-1 text-xs text-accent">{error}</p>}
+      </div>
+    </form>
   );
 }
 
