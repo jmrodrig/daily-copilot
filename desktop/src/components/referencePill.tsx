@@ -145,7 +145,7 @@ function PillView({ node, selected, updateAttributes }: NodeViewProps) {
     >
       <PillIcon kind={kind} />
       <span className="reference-pill-label">
-        {status && <StatusDot status={status} />}
+        {status && <StatusTag status={status} />}
         {label || href}
       </span>
     </NodeViewWrapper>
@@ -180,17 +180,17 @@ export function useTaskStatus(taskId: number | null): TaskStatus | null {
   return status;
 }
 
-/** A dot in the status's colour (the space's pick, else the default), in front of a task pill's name. */
-export function StatusDot({ status }: { status: TaskStatus }) {
+/** The status as a bold `[IN_PROGRESS]` tag in its colour (the space's pick, else the default), in front of a task pill's name. */
+export function StatusTag({ status }: { status: TaskStatus }) {
   const { space } = useSpace();
   return (
     <span
-      role="img"
-      aria-label={STATUS_LABELS[status]}
       title={STATUS_LABELS[status]}
-      className="mr-1 inline-block h-2 w-2 shrink-0 rounded-full align-middle"
-      style={{ backgroundColor: statusColor(space?.status_colors, status) }}
-    />
+      className="mr-1 font-bold tracking-wide"
+      style={{ color: statusColor(space?.status_colors, status) }}
+    >
+      [{status.toUpperCase()}]
+    </span>
   );
 }
 

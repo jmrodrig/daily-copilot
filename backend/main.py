@@ -953,7 +953,7 @@ def create_note(request: NoteCreate, db: Session = Depends(get_db)) -> NoteFile:
     today = _today()
     title = (request.title or "").strip() or resolved.stem
     frontmatter: dict[str, Any] = {}
-    content = f"# {title}\n"
+    content = ""
     if request.template:
         try:
             template = file_layer.read_note(request.template, notes_dir=spaces.templates_dir(request.space_id))

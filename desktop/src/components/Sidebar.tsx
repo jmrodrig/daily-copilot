@@ -760,7 +760,7 @@ function FolderRow({ folder, ...props }: TreeProps & { folder: FolderNode }) {
           onClick={() => toggle(folder.path)}
           title={tags ? `${folder.path} (${tags})` : folder.path}
           className={`flex min-h-7 min-w-0 flex-1 items-center gap-1.5 rounded-md pl-1 pr-2 text-left text-[15px] ${
-            folder.is_project ? "font-semibold text-text-primary" : `text-text-secondary ${depth === 0 ? "font-semibold" : "font-medium"}`
+            folder.is_project ? "font-normal text-text-primary" : "font-normal text-text-secondary"
           }`}
         >
           <FolderIcon

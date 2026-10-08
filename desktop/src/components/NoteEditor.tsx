@@ -485,8 +485,9 @@ const ResizableImage = SizedImage.extend<ImageOptions>({
   addNodeView() {
     return ReactNodeViewRenderer(ImageView, {
       className: "note-image",
-      // The handles' drags and the expand button's clicks are the view's own, not a node drag or a click for the editor.
-      stopEvent: ({ event }) => event.target instanceof Element && !!event.target.closest("[data-resize-handle], [data-image-expand]"),
+      // The handles' drags, the expand button's clicks and the caption's typing are the view's own, not the editor's.
+      stopEvent: ({ event }) =>
+        event.target instanceof Element && !!event.target.closest("[data-resize-handle], [data-image-expand], [data-image-caption]"),
     });
   },
 });
@@ -496,6 +497,7 @@ const ResizableImage = SizedImage.extend<ImageOptions>({
  * and, when selected, with a handle on each side. Dragging one resizes it symmetrically, snapping to the layout
  * columns that fit the page and to its full width, which show as guide lines over it while it's dragged. Double-click
  * it, or its expand button on hover, to open it fullscreen, where it can be marked up while the note is editable.
+ * Its caption, below it, is its markdown title (`![alt](src "title")`), editable while it's selected.
  */
 function ImageView({ node, selected, editor, updateAttributes }: NodeViewProps) {
   const { src, alt, title } = node.attrs as { src: string; alt: string | null; title: string | null };
@@ -508,7 +510,10 @@ function ImageView({ node, selected, editor, updateAttributes }: NodeViewProps) 
   const [expanded, setExpanded] = useState(false);
   // Counted up as the lightbox closes, so the markup over the image is loaded again (it may have been changed there).
   const [opened, setOpened] = useState(0);
+  // Kept while the caption is typed in, which may move the editor's selection off the image.
+  const [captioning, setCaptioning] = useState(false);
   const shown = dragWidth ?? width;
+  const editable = editor.isEditable;
 
   function startResize(event: ReactPointerEvent, side: -1 | 1) {
     const column = columnRef.current?.getBoundingClientRect().width;
@@ -566,6 +571,20 @@ function ImageView({ node, selected, editor, updateAttributes }: NodeViewProps) 
         )}
         {dragWidth !== null && <span className="media-width-label">{widthLabel(dragWidth)}</span>}
       </span>
+      {editable && (selected || captioning || title) ? (
+        <input
+          data-image-caption
+          value={title ?? ""}
+          onChange={(e) => updateAttributes({ title: e.target.value || null })}
+          onFocus={() => setCaptioning(true)}
+          onBlur={() => setCaptioning(false)}
+          placeholder="Add a caption"
+          aria-label="Image caption"
+          className="mt-1.5 block w-full bg-transparent text-center text-xs text-text-secondary placeholder:text-text-muted focus:outline-none"
+        />
+      ) : (
+        title && <span className="mt-1.5 block text-center text-xs text-text-secondary">{title}</span>
+      )}
       {expanded && (
         <MediaLightbox
           src={src}

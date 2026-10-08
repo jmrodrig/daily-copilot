@@ -18,7 +18,7 @@ type Widths = Record<Pane, number>;
 const PANES: Record<Pane, { initial: number; min: number; max: number }> = {
   left: { initial: 264, min: 240, max: 480 },
   task: { initial: 400, min: 360, max: 1200 },
-  chat: { initial: 320, min: 320, max: 1200 },
+  chat: { initial: 400, min: 400, max: 1200 },
 };
 const RAIL = 64; // a collapsed pane
 const KEY_STEP = 16;

@@ -209,7 +209,7 @@ def test_create_folder_and_note_from_template(client, monkeypatch):
     assert client.post("/api/notes", json={"space_id": 1, "path": "x", "template": "missing.md"}).status_code == 404
 
     plain = client.post("/api/notes", json={"space_id": 1, "path": "Inbox/Idea.md"}).json()
-    assert plain["content"] == "# Idea\n"
+    assert plain["content"] == ""
     with database.SessionLocal() as db:
         record = db.scalars(select(HistoryRecord).where(HistoryRecord.entity_id == "Inbox/Idea.md")).one()
     assert record.source == "desktop"

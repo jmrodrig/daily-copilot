@@ -12,7 +12,7 @@ import { useTitle } from "../lib/title";
 import { isOverdue, STATUS_LABELS, taskIdFromHref, useTaskChanges, useTaskPanel, type TaskItem } from "../lib/tasks";
 import MediaLightbox, { ExpandButton, isPdfUrl, MarkupOverlay } from "../components/MediaLightbox";
 import NoteEditor from "../components/NoteEditor";
-import { PillIcon, refKind, StatusDot, useTaskStatus } from "../components/referencePill";
+import { PillIcon, refKind, StatusTag, useTaskStatus } from "../components/referencePill";
 import { NOTE_COLUMN, NOTE_HTML_SCHEMA, layoutMedia, liftCellColors } from "../components/noteFormatting";
 
 // GET /api/notes/file (see NoteFile in backend/schemas.py).
@@ -482,7 +482,7 @@ function TaskPillLink({ href, children }: { href: string; children: ReactNode })
     >
       <PillIcon kind="task" />
       <span className="reference-pill-label">
-        {status && <StatusDot status={status} />}
+        {status && <StatusTag status={status} />}
         {children}
       </span>
     </Link>
