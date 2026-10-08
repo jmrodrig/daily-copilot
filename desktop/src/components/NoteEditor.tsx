@@ -55,7 +55,8 @@ import {
  * images and files are uploaded to the space (a file is linked by name), and an image or a linked PDF opens fullscreen
  * to be marked up. Ctrl/Cmd+S saves. Typing `/` offers to insert a task or a link, and selected text can be turned into either:
  * each goes in as an inline pill (see referencePill), replacing the selected text. With `notePath`, a new task can be
- * linked to the note.
+ * linked to the note. Without `title` the title field is left out, and `compact` fits the editor into a narrow pane (the
+ * task panel's description) rather than a page.
  */
 export default function NoteEditor({
   spaceId,
@@ -67,19 +68,23 @@ export default function NoteEditor({
   onSave,
   onTaskCreated,
   disabled,
+  compact = false,
   children,
 }: {
   spaceId: number;
   notePath?: string;
-  title: string;
-  onTitleChange: (title: string) => void;
+  title?: string;
+  onTitleChange?: (title: string) => void;
   value: string;
   onChange: (value: string) => void;
   onSave: () => void;
   onTaskCreated?: (task: TaskRow) => void;
   disabled: boolean;
+  compact?: boolean;
   children?: ReactNode;
 }) {
+  // A page centres its text in a wide column; a narrow pane uses all of its width.
+  const column = compact ? "w-full" : NOTE_COLUMN;
   // The callbacks change on every render of the page; the editor's handlers read the latest ones.
   const onChangeRef = useRef(onChange);
   const onSaveRef = useRef(onSave);
@@ -128,7 +133,10 @@ export default function NoteEditor({
     content: value,
     contentType: "markdown",
     editorProps: {
-      attributes: { class: "note-body markdown min-h-64 text-[16px] leading-relaxed text-text-secondary focus:outline-none", spellcheck: "true" },
+      attributes: {
+        class: `note-body markdown ${compact ? "min-h-24 px-3 text-[15px]" : "min-h-64 text-[16px]"} leading-relaxed text-text-secondary focus:outline-none`,
+        spellcheck: "true",
+      },
       handleKeyDown: (_view, event) => {
         if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
           event.preventDefault();
@@ -264,22 +272,25 @@ export default function NoteEditor({
   }
 
   return (
-    <div className="flex flex-col">
-      <Toolbar 
-        editor={editor} 
-        status={uploads > 0 ? `Uploading ${uploads > 1 ? `${uploads} files` : "file"}…` : null} 
+    <div className={`flex flex-col ${compact ? "rounded-md border border-border-default" : ""}`}>
+      <Toolbar
+        editor={editor}
+        compact={compact}
+        status={uploads > 0 ? `Uploading ${uploads > 1 ? `${uploads} files` : "file"}…` : null}
         onAttach={(files) => editor && void insertFilesRef.current(files)}
       />
-      {uploadError && <p className={`${NOTE_COLUMN} pt-3 text-[15px] text-accent`}>{uploadError}</p>}
-      <TitleInput
-        value={title}
-        onChange={onTitleChange}
-        disabled={disabled}
-        onSave={() => onSaveRef.current()}
-        onDone={() => editor?.commands.focus("start")}
-      />
-      {children && <div className={`${NOTE_COLUMN} flex flex-col gap-5 pt-5`}>{children}</div>}
-      <EditorContent editor={editor} className="pt-4" />
+      {uploadError && <p className={`${column} pt-3 text-[15px] text-accent ${compact ? "px-3" : ""}`}>{uploadError}</p>}
+      {title !== undefined && onTitleChange && (
+        <TitleInput
+          value={title}
+          onChange={onTitleChange}
+          disabled={disabled}
+          onSave={() => onSaveRef.current()}
+          onDone={() => editor?.commands.focus("start")}
+        />
+      )}
+      {children && <div className={`${column} flex flex-col gap-5 pt-5`}>{children}</div>}
+      <EditorContent editor={editor} className={compact ? "pb-1" : "pt-4"} />
       {editor && (
         <BubbleMenuWrapper editor={editor} />
       )}
@@ -894,7 +905,19 @@ function AttachIcon() {
   );
 }
 
-function Toolbar({ editor, status, onAttach }: { editor: Editor | null; status: string | null; onAttach: (files: File[]) => void }) {
+const HEADING_LEVELS = [1, 2, 3] as const;
+
+function Toolbar({
+  editor,
+  compact,
+  status,
+  onAttach,
+}: {
+  editor: Editor | null;
+  compact: boolean;
+  status: string | null;
+  onAttach: (files: File[]) => void;
+}) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const active = useEditorState({
     editor,
@@ -907,6 +930,8 @@ function Toolbar({ editor, status, onAttach }: { editor: Editor | null; status: 
         orderedList: e.isActive("orderedList"),
         taskList: e.isActive("taskList"),
         table: e.isActive("table"),
+        // 0 for normal text (or any other block).
+        heading: HEADING_LEVELS.find((level) => e.isActive("heading", { level })) ?? 0,
         align: (ALIGNMENTS.find((a) => e.isActive({ textAlign: a })) ?? "left") as Alignment,
         // Only top-level blocks keep their alignment in markdown (see noteFormatting).
         alignable: e.state.selection.$from.depth === 1 && e.state.selection.$to.depth === 1,
@@ -924,8 +949,30 @@ function Toolbar({ editor, status, onAttach }: { editor: Editor | null; status: 
     <div
       role="toolbar"
       aria-label="Formatting"
-      className="sticky top-0 z-10 -mx-2 flex print:hidden min-h-11 flex-wrap items-center gap-0.5 border-b border-border-default bg-background px-2 py-1.5"
+      className={`sticky top-0 z-10 flex print:hidden flex-wrap items-center gap-0.5 border-b border-border-default bg-background ${
+        compact ? "rounded-t-md px-1 py-1" : "-mx-2 min-h-11 px-2 py-1.5"
+      }`}
     >
+      <select
+        aria-label="Text format"
+        title="Text format"
+        value={active.heading}
+        disabled={off}
+        onChange={(e) => {
+          const level = Number(e.target.value);
+          if (level === 0) chain().setParagraph().run();
+          else chain().toggleHeading({ level: level as (typeof HEADING_LEVELS)[number] }).run();
+        }}
+        className="h-8 rounded bg-transparent px-1.5 text-[14px] text-text-secondary hover:bg-surface-raised hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-40"
+      >
+        <option value={0}>Normal text</option>
+        {HEADING_LEVELS.map((level) => (
+          <option key={level} value={level}>
+            Heading {level}
+          </option>
+        ))}
+      </select>
+      <Divider />
       <ToolButton label="Bold (Ctrl+B)" on={active.bold} disabled={off} onClick={() => chain().toggleBold().run()}>
         <span className="font-bold">B</span>
       </ToolButton>

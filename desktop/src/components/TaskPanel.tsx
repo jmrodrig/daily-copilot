@@ -18,6 +18,7 @@ import {
   type TaskPriority,
   type TaskStatus,
 } from "../lib/tasks";
+import NoteEditor from "./NoteEditor";
 import { postStatusComment, useStatusChangePrompt } from "./StatusChangeDialog";
 import { OptionPill } from "./ColorPicker";
 import { ME, NEUTRAL_TAG, ProjectTag, Tag, TagPills } from "./TriageBoard";
@@ -473,14 +474,21 @@ function NumberField({
   );
 }
 
-/** Plain text, saved shortly after typing stops, and when the field loses focus (or on Ctrl+Enter). */
+/** Markdown, edited rendered as in a note; saved shortly after typing stops, when focus leaves it, and on Ctrl+S. */
 function DescriptionField({ task, onPatch }: { task: TaskItem; onPatch: (patch: TaskPatch) => Promise<boolean> }) {
   const [draft, setDraft] = useState(task.description);
   const [saving, setSaving] = useState(false);
+  // The editor parses its text once, so a description changed elsewhere remounts it.
+  const [version, setVersion] = useState(0);
   // As in TextField: an auto-save coming back doesn't overwrite what was typed since.
   const sentRef = useRef<string | null>(null);
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
   useEffect(() => {
-    if (task.description !== sentRef.current) setDraft(task.description);
+    if (task.description !== sentRef.current && task.description !== draftRef.current) {
+      setDraft(task.description);
+      setVersion((v) => v + 1);
+    }
     sentRef.current = null;
   }, [task.description]);
   const dirty = draft !== task.description;
@@ -501,19 +509,23 @@ function DescriptionField({ task, onPatch }: { task: TaskItem; onPatch: (patch: 
 
   return (
     <>
-      <textarea
+      <div
         aria-label="Description"
-        value={draft}
-        onChange={(e) => setDraft(e.target.value)}
-        onBlur={() => commit()}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) e.currentTarget.blur();
-          if (e.key === "Escape") setDraft(task.description);
+        role="group"
+        onBlur={(e) => {
+          if (!e.currentTarget.contains(e.relatedTarget)) void commit();
         }}
-        rows={Math.min(12, Math.max(3, draft.split("\n").length + 1))}
-        placeholder="Add a description…"
-        className="field resize-y py-2 text-[15px] leading-5"
-      />
+      >
+        <NoteEditor
+          key={`${task.id}-${version}`}
+          spaceId={task.space_id}
+          value={draft}
+          onChange={setDraft}
+          onSave={() => void commit()}
+          disabled={false}
+          compact
+        />
+      </div>
       <span className="h-4 text-[13px] text-text-muted">{saving ? "Saving…" : dirty ? "Unsaved" : ""}</span>
     </>
   );

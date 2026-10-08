@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 
 import { errorDetail, getJson } from "./api";
-import type { StatusFlow } from "./tasks";
+import type { ProjectOption, StatusFlow } from "./tasks";
 
 export type CustomFieldType = "text" | "number" | "date" | "checkbox" | "dropdown";
 
@@ -28,6 +28,8 @@ type SpaceState = {
   /** The active space: the sidebar, task views and Co-pilot only see this space. */
   spaceId: number;
   space: Space | undefined;
+  /** The active space's projects (reloaded with the tree), e.g. for their colours in the sidebar. */
+  projects: ProjectOption[];
   setSpaceId: (id: number) => void;
   createSpace: (name: string) => Promise<Space>;
   /** Rename a space and/or change its task preferences. */
@@ -51,6 +53,7 @@ export function SpaceProvider({ children }: { children: ReactNode }) {
   const [spaces, setSpaces] = useState<Space[]>([]);
   const [spaceId, setSpaceIdState] = useState(storedSpaceId);
   const [treeVersion, setTreeVersion] = useState(0);
+  const [projects, setProjects] = useState<ProjectOption[]>([]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -59,6 +62,15 @@ export function SpaceProvider({ children }: { children: ReactNode }) {
       .catch(() => {});
     return () => controller.abort();
   }, []);
+
+  // Marking a folder as Project or recolouring one refreshes the tree, so reload with it.
+  useEffect(() => {
+    const controller = new AbortController();
+    getJson<ProjectOption[]>(`/api/projects?space_id=${spaceId}`, controller.signal)
+      .then(setProjects)
+      .catch(() => {});
+    return () => controller.abort();
+  }, [spaceId, treeVersion]);
 
   // A stored space that no longer exists falls back to the first one.
   useEffect(() => {
@@ -105,13 +117,14 @@ export function SpaceProvider({ children }: { children: ReactNode }) {
       spaces,
       spaceId,
       space: spaces.find((s) => s.id === spaceId),
+      projects,
       setSpaceId,
       createSpace,
       updateSpace,
       treeVersion,
       refreshTree,
     }),
-    [spaces, spaceId, setSpaceId, createSpace, updateSpace, treeVersion, refreshTree],
+    [spaces, spaceId, projects, setSpaceId, createSpace, updateSpace, treeVersion, refreshTree],
   );
   return <SpaceContext.Provider value={value}>{children}</SpaceContext.Provider>;
 }

@@ -2,6 +2,7 @@ import {
   useEffect,
   useRef,
   useState,
+  type CSSProperties,
   type DragEvent,
   type FormEvent,
   type MouseEvent as ReactMouseEvent,
@@ -10,6 +11,7 @@ import {
 import { NavLink, useLocation, useNavigate } from "react-router-dom";
 
 import { getJson, message, sendJson } from "../lib/api";
+import { tint } from "../lib/colors";
 import { notePath, useSpace } from "../lib/space";
 import { VIEW_TYPES, VIEWS_CHANGED, viewPath, type TaskView, type ViewType } from "../lib/views";
 
@@ -738,6 +740,8 @@ function FolderRow({ folder, ...props }: TreeProps & { folder: FolderNode }) {
   const open = expanded.has(`${spaceId}:${folder.path}`);
   const hasChildren = folder.folders.length > 0 || folder.notes.length > 0;
   const tags = [folder.is_project && "Project", folder.is_reference && "Reference data"].filter(Boolean).join(", ");
+  const { projects } = useSpace();
+  const color = folder.is_project ? projects.find((p) => p.id === folder.project_id)?.color : null;
 
   return (
     <>
@@ -756,12 +760,21 @@ function FolderRow({ folder, ...props }: TreeProps & { folder: FolderNode }) {
           onClick={() => toggle(folder.path)}
           title={tags ? `${folder.path} (${tags})` : folder.path}
           className={`flex min-h-7 min-w-0 flex-1 items-center gap-1.5 rounded-md pl-1 pr-2 text-left text-[15px] ${
-            folder.is_project ? "font-semibold text-project-c7801" : `text-text-secondary ${depth === 0 ? "font-semibold" : "font-medium"}`
+            folder.is_project ? "font-semibold text-text-primary" : `text-text-secondary ${depth === 0 ? "font-semibold" : "font-medium"}`
           }`}
         >
-          <FolderIcon className={`h-3.5 w-3.5 shrink-0 ${folder.is_project ? "text-project-c7801" : "text-text-muted"}`} />
-          <span className="truncate">{folder.name}</span>
-          {folder.is_project && <Badge className="border-project-c7801/60 text-project-c7801">Project</Badge>}
+          <FolderIcon
+            className={`h-3.5 w-3.5 shrink-0 ${folder.is_project ? "" : "text-text-muted"}`}
+            style={color ? { color } : undefined}
+          />
+          <span className="truncate" style={color ? { color } : undefined}>
+            {folder.name}
+          </span>
+          {folder.is_project && (
+            <Badge className="border-border-strong text-text-secondary" style={color ? { color, borderColor: tint(color, 0.6) } : undefined}>
+              Project
+            </Badge>
+          )}
           {folder.is_reference && <Badge className="border-project-r5301/60 text-project-r5301">Ref</Badge>}
         </button>
       </TreeRow>
@@ -894,9 +907,9 @@ function InlineRename({
   );
 }
 
-function Badge({ className, children }: { className: string; children: string }) {
+function Badge({ className, style, children }: { className: string; style?: CSSProperties; children: string }) {
   return (
-    <span className={`shrink-0 rounded border px-1 font-mono text-[10px] font-normal uppercase leading-[14px] ${className}`}>
+    <span className={`shrink-0 rounded border px-1 font-mono text-[10px] font-normal uppercase leading-[14px] ${className}`} style={style}>
       {children}
     </span>
   );
@@ -1154,9 +1167,9 @@ function Chevron({ open }: { open: boolean }) {
   );
 }
 
-function FolderIcon({ className }: { className: string }) {
+function FolderIcon({ className, style }: { className: string; style?: CSSProperties }) {
   return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" aria-hidden="true" className={className}>
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" aria-hidden="true" className={className} style={style}>
       <path d="M3 6.5A1.5 1.5 0 0 1 4.5 5h4.6l2 2.5h8.4A1.5 1.5 0 0 1 21 9v8.5a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5z" />
     </svg>
   );

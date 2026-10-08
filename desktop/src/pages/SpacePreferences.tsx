@@ -584,6 +584,7 @@ function FieldRow({
 
 /** The space's projects (folders marked as Project): their names and colours for pills and Gantt bars. */
 function ProjectsEditor({ spaceId }: { spaceId: number }) {
+  const { refreshTree } = useSpace();
   const [projects, setProjects] = useState<ProjectOption[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -612,7 +613,13 @@ function ProjectsEditor({ spaceId }: { spaceId: number }) {
         <ul className="flex flex-col divide-y divide-border-default/60">
           {projects.map((project) => (
             <li key={project.id} className="py-2.5 first:pt-0 last:pb-0">
-              <ProjectRow project={project} onSaved={(next) => setProjects((prev) => prev && prev.map((p) => (p.id === next.id ? { ...p, ...next } : p)))} />
+              <ProjectRow
+                project={project}
+                onSaved={(next) => {
+                  setProjects((prev) => prev && prev.map((p) => (p.id === next.id ? { ...p, ...next } : p)));
+                  refreshTree(); // the sidebar shows project colours
+                }}
+              />
             </li>
           ))}
         </ul>

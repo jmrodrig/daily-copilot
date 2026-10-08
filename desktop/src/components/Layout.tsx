@@ -16,11 +16,11 @@ type Widths = Record<Pane, number>;
 
 // Pixel bounds for each resizable pane; the main view keeps at least MAIN_MIN.
 const PANES: Record<Pane, { initial: number; min: number; max: number }> = {
-  left: { initial: 264, min: 200, max: 480 },
-  task: { initial: 400, min: 280, max: 800 },
-  chat: { initial: 320, min: 260, max: 720 },
+  left: { initial: 264, min: 240, max: 480 },
+  task: { initial: 400, min: 360, max: 800 },
+  chat: { initial: 320, min: 320, max: 720 },
 };
-const MAIN_MIN = 360;
+const MAIN_MIN = 400;
 const RAIL = 64; // a collapsed pane
 const KEY_STEP = 16;
 
@@ -68,7 +68,7 @@ export default function Layout() {
   const leftRef = useRef<HTMLElement>(null);
   const taskRef = useRef<HTMLElement>(null);
   const chatRef = useRef<HTMLElement>(null);
-  // Rendered widths when a drag starts (panes shrink below their stored width in a narrow window).
+  // Rendered widths when a drag starts.
   const start = useRef<Widths & { main: number }>({ ...widths, main: 0 });
 
   const showTask = taskId !== null;
@@ -126,7 +126,8 @@ export default function Layout() {
   const dividerProps = { onStart: beginResize, onResizingChange: setResizing };
   // The pane next to the main view on the right: the task when one is open, else the chat if expanded.
   const rightOfMain: Pane | null = showTask ? "task" : chatOpen ? "chat" : null;
-  const paneStyle = (pane: Pane) => ({ width: widths[pane], minWidth: PANES[pane].min });
+  // Panes hold their dragged width when the window narrows: the row clips (overflow-hidden) rather than crushing them.
+  const paneStyle = (pane: Pane) => ({ width: widths[pane], minWidth: widths[pane] });
   const railStyle = { width: RAIL, minWidth: RAIL };
   // Animate collapse/expand, but not while a divider is dragged, so resizing tracks the pointer.
   const paneTransition = resizing ? "" : "transition-[width,min-width] duration-200 ease-out motion-reduce:transition-none";
@@ -156,7 +157,7 @@ export default function Layout() {
           onReset={() => reset("left")}
         />
       )}
-      <main ref={mainRef} className="min-w-[360px] flex-1 overflow-auto print:overflow-visible">
+      <main ref={mainRef} className="min-w-[400px] flex-1 overflow-auto print:overflow-visible">
         <Outlet />
       </main>
       {rightOfMain && (
