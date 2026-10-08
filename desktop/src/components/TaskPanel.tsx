@@ -285,8 +285,21 @@ function TextField({
   useLayoutEffect(() => {
     const el = textareaRef.current;
     if (!el) return;
-    el.style.height = "auto";
-    el.style.height = `${el.scrollHeight}px`;
+    const adjust = () => {
+      el.style.height = "auto";
+      el.style.height = `${el.scrollHeight}px`;
+    };
+    adjust();
+    if (!multiline) return;
+    let lastWidth = el.offsetWidth;
+    const observer = new ResizeObserver(() => {
+      if (el.offsetWidth !== lastWidth) {
+        lastWidth = el.offsetWidth;
+        adjust();
+      }
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
   }, [draft, multiline]);
 
   async function commit() {
