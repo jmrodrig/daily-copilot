@@ -399,6 +399,7 @@ function NoteImage({ node: _node, className, style, src, alt, title, ...props }:
       <img src={src} alt={alt ?? ""} title={title} {...props} onClick={() => setExpanded(true)} className="cursor-zoom-in" />
       <MarkupOverlay src={src} version={opened} />
       <ExpandButton onClick={() => setExpanded(true)} />
+      {title && <span className="mt-1.5 block text-center text-[14px] italic text-text-secondary">{title}</span>}
       {expanded && (
         <MediaLightbox
           src={src}

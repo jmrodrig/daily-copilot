@@ -580,10 +580,10 @@ function ImageView({ node, selected, editor, updateAttributes }: NodeViewProps) 
           onBlur={() => setCaptioning(false)}
           placeholder="Add a caption"
           aria-label="Image caption"
-          className="mt-1.5 block w-full bg-transparent text-center text-xs text-text-secondary placeholder:text-text-muted focus:outline-none"
+          className="mt-1.5 block w-full bg-transparent text-center text-[14px] italic text-text-secondary placeholder:text-text-muted focus:outline-none"
         />
       ) : (
-        title && <span className="mt-1.5 block text-center text-xs text-text-secondary">{title}</span>
+        title && <span className="mt-1.5 block text-center text-[14px] italic text-text-secondary">{title}</span>
       )}
       {expanded && (
         <MediaLightbox

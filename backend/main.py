@@ -954,6 +954,8 @@ def create_note(request: NoteCreate, db: Session = Depends(get_db)) -> NoteFile:
     title = (request.title or "").strip() or resolved.stem
     frontmatter: dict[str, Any] = {}
     content = ""
+    project = _folder_project_code(db, request.space_id, rel)
+    
     if request.template:
         try:
             template = file_layer.read_note(request.template, notes_dir=spaces.templates_dir(request.space_id))
@@ -964,10 +966,16 @@ def create_note(request: NoteCreate, db: Session = Depends(get_db)) -> NoteFile:
         values = {
             "title": title,
             "date": today.isoformat(),
-            "project": _folder_project_code(db, request.space_id, rel),
+            "project": project,
         }
         frontmatter = {key: _fill_frontmatter(value, values) for key, value in template["frontmatter"].items()}
         content = _fill_template(template["content"], values)
+        
+    if project:
+        tags = frontmatter.get("tags", [])
+        if isinstance(tags, list) and project not in tags:
+            frontmatter["tags"] = tags + [project]
+
     frontmatter.setdefault("created", today.isoformat())
     frontmatter.setdefault("state", NoteState.DRAFT.value)
     file_layer.write_note(rel, content, frontmatter, AccessMode.WRITE_DIRECTLY, notes_dir=root, source=DESKTOP_SOURCE)
