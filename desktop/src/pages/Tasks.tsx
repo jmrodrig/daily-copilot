@@ -3,7 +3,7 @@ import { NavLink, Navigate, useNavigate, useParams, useSearchParams } from "reac
 
 import AdvancedFilters from "../components/AdvancedFilters";
 import { OptionPill } from "../components/ColorPicker";
-import GanttChart, { type GanttProject } from "../components/GanttChart";
+import GanttChart, { type GanttDateChange, type GanttProject } from "../components/GanttChart";
 import PageHeader from "../components/PageHeader";
 import { postStatusComment, useStatusChangePrompt } from "../components/StatusChangeDialog";
 import { formatDay, ME, NEUTRAL_TAG, NoteLink, ProjectTag, Tag, TagPills } from "../components/TriageBoard";
@@ -16,11 +16,14 @@ import {
   announceTaskChange,
   BOARD_COLUMNS,
   boardColumn,
+  fromGanttDates,
   isOverdue,
   STATUS_LABELS,
   taskQuery,
+  updateTaskDates,
   useTaskChanges,
   useTaskPanel,
+  type DateChange,
   type ProjectOption,
   type StatusFlow,
   type TaskItem,
@@ -289,6 +292,33 @@ function TaskBoard({
     if ("project_id" in patch) setReload((n) => n + 1); // refresh the project code
   }, []);
 
+  /** New dates for several tasks (dragged on the Gantt, or a shifted timeline), shown at once. If saving fails the
+   * tasks are reloaded, as some of the changes may have been saved. Rejects on failure so the Gantt can drop its undo. */
+  const rescheduleTasks = useCallback(async (changes: DateChange[]) => {
+    const byId = new Map(changes.map((c) => [c.id, c]));
+    setTasks((prev) =>
+      prev.state === "ok"
+        ? {
+            ...prev,
+            tasks: prev.tasks.map((t) => {
+              const change = byId.get(t.id);
+              if (!change) return t;
+              const { id: _id, ...dates } = change;
+              return { ...t, ...dates };
+            }),
+          }
+        : prev,
+    );
+    setError(null);
+    try {
+      await updateTaskDates(changes);
+    } catch (err: unknown) {
+      setError(`Could not reschedule ${changes.length === 1 ? "the task" : `the ${changes.length} tasks`}: ${message(err)}`);
+      setReload((n) => n + 1);
+      throw err;
+    }
+  }, []);
+
   const { ask, dialog } = useStatusChangePrompt();
   const changeStatus: OnStatus = useCallback(
     async (task, status) => {
@@ -423,7 +453,16 @@ function TaskBoard({
       {visible && viewType === "backlog" && (
         <Backlog tasks={visible} projects={projects} people={people} flow={flow} onPatch={patchTask} onStatus={changeStatus} />
       )}
-      {visible && viewType === "gantt" && <TaskGantt tasks={visible} projects={projects} customFields={customFields} filters={filters} onFilters={onFilters} />}
+      {visible && viewType === "gantt" && (
+        <TaskGantt
+          tasks={visible}
+          projects={projects}
+          customFields={customFields}
+          filters={filters}
+          onFilters={onFilters}
+          onReschedule={rescheduleTasks}
+        />
+      )}
       {visible && viewType === "list" && (
         <TaskListView
           tasks={visible}
@@ -825,12 +864,14 @@ function TaskGantt({
   customFields,
   filters,
   onFilters,
+  onReschedule,
 }: {
   tasks: TaskItem[];
   projects: ProjectOption[];
   customFields: CustomFieldDef[];
   filters: ViewFilters;
   onFilters: (filters: ViewFilters) => void;
+  onReschedule: (changes: DateChange[]) => Promise<void>;
 }) {
   const groups = useMemo(() => {
     const byProject = new Map<number, GanttProject>();
@@ -874,6 +915,7 @@ function TaskGantt({
       onColorBy={(gantt_color_by) => onFilters({ ...filters, gantt_color_by })}
       activeTaskId={taskId}
       onTaskClick={openTask}
+      onReschedule={(changes: GanttDateChange[]) => onReschedule(changes.map(fromGanttDates))}
     />
   );
 }

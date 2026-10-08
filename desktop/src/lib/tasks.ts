@@ -158,6 +158,33 @@ export async function bulkUpdateTasks(taskIds: number[], updates: TaskPatch): Pr
   return tasks;
 }
 
+/** A task's new dates, e.g. after dragging it on the Gantt; a field left out is left as it is. */
+export type DateChange = { id: number; start_date?: string | null; deadline?: string | null };
+
+/** A Gantt chart's date change as a task's: the chart's `end_date` is the task's `deadline`. */
+export function fromGanttDates({ id, start_date, end_date }: { id: number; start_date?: string | null; end_date?: string | null }): DateChange {
+  const change: DateChange = { id };
+  if (start_date !== undefined) change.start_date = start_date;
+  if (end_date !== undefined) change.deadline = end_date;
+  return change;
+}
+
+/**
+ * Saves different dates for several tasks with `POST /api/tasks/bulk-update`: tasks getting the same dates share one
+ * request. Each request is all or nothing, but the requests are separate, so a failure can leave some tasks changed.
+ */
+export async function updateTaskDates(changes: DateChange[]): Promise<TaskItem[]> {
+  const groups = new Map<string, { ids: number[]; updates: TaskPatch }>();
+  for (const { id, ...updates } of changes) {
+    const key = JSON.stringify([updates.start_date, updates.deadline, "start_date" in updates, "deadline" in updates]);
+    const group = groups.get(key) ?? { ids: [] as number[], updates };
+    group.ids.push(id);
+    groups.set(key, group);
+  }
+  const results = await Promise.all([...groups.values()].map(({ ids, updates }) => bulkUpdateTasks(ids, updates)));
+  return results.flat();
+}
+
 export function announceTaskChange(change: TaskChange) {
   window.dispatchEvent(new CustomEvent<TaskChange>(TASK_CHANGED, { detail: change }));
 }

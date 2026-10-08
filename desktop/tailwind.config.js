@@ -53,9 +53,14 @@ export default {
       keyframes: {
         // Animates a pane from nothing to its own width; omitting `to` lets it end at the inline style.
         "pane-in": { from: { width: "0px", minWidth: "0px", opacity: "0" } },
+        // Toasts rise into place; `translate` keeps their -translate-x-1/2 centring intact.
+        "toast-in": { from: { opacity: "0", translate: "0 8px" } },
+        "dialog-in": { from: { opacity: "0", transform: "scale(0.98) translateY(-4px)" } },
       },
       animation: {
         "pane-in": "pane-in 200ms ease-out",
+        "toast-in": "toast-in 180ms ease-out",
+        "dialog-in": "dialog-in 160ms ease-out",
       },
     },
   },
