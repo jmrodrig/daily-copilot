@@ -994,6 +994,9 @@ class TaskViewFilters(BaseModel):
     has_note: bool | None = Field(default=None, description="True: only tasks linked to a note; False: only unlinked")
     start_after: date | None = Field(default=None, description="Only tasks starting on or after this day")
     start_before: date | None = Field(default=None, description="Only tasks starting on or before this day")
+    gantt_color_by: str | None = Field(
+        default=None, max_length=64, description='What the Gantt bars are coloured by: a dropdown field id, or None/"project"'
+    )
 
     @field_validator("custom_fields", mode="before")
     @classmethod

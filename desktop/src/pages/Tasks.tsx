@@ -423,7 +423,7 @@ function TaskBoard({
       {visible && viewType === "backlog" && (
         <Backlog tasks={visible} projects={projects} people={people} flow={flow} onPatch={patchTask} onStatus={changeStatus} />
       )}
-      {visible && viewType === "gantt" && <TaskGantt tasks={visible} projects={projects} customFields={customFields} />}
+      {visible && viewType === "gantt" && <TaskGantt tasks={visible} projects={projects} customFields={customFields} filters={filters} onFilters={onFilters} />}
       {visible && viewType === "list" && (
         <TaskListView
           tasks={visible}
@@ -819,7 +819,19 @@ function BacklogRow({
 
 // --- Gantt ------------------------------------------------------------------------
 
-function TaskGantt({ tasks, projects, customFields }: { tasks: TaskItem[]; projects: ProjectOption[]; customFields: CustomFieldDef[] }) {
+function TaskGantt({
+  tasks,
+  projects,
+  customFields,
+  filters,
+  onFilters,
+}: {
+  tasks: TaskItem[];
+  projects: ProjectOption[];
+  customFields: CustomFieldDef[];
+  filters: ViewFilters;
+  onFilters: (filters: ViewFilters) => void;
+}) {
   const groups = useMemo(() => {
     const byProject = new Map<number, GanttProject>();
     for (const task of tasks) {
@@ -854,5 +866,14 @@ function TaskGantt({ tasks, projects, customFields }: { tasks: TaskItem[]; proje
 
   const { taskId, openTask } = useTaskPanel();
   if (groups.length === 0) return <p className="panel text-center text-sm text-text-muted">No tasks match these filters.</p>;
-  return <GanttChart projects={groups} customFields={customFields} activeTaskId={taskId} onTaskClick={openTask} />;
+  return (
+    <GanttChart
+      projects={groups}
+      customFields={customFields}
+      colorBy={filters.gantt_color_by}
+      onColorBy={(gantt_color_by) => onFilters({ ...filters, gantt_color_by })}
+      activeTaskId={taskId}
+      onTaskClick={openTask}
+    />
+  );
 }

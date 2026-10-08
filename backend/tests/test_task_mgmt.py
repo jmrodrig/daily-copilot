@@ -508,6 +508,7 @@ def test_saved_view_keeps_advanced_filters(client):
         "has_note": True,
         "start_after": "2026-09-01",
         "start_before": "2026-09-30",
+        "gantt_color_by": "yard",
     }
     view = client.post("/api/views", json={"space_id": 1, "name": "North yard", "view_type": "list", "filters": filters})
     assert view.status_code == 201, view.text
@@ -518,3 +519,4 @@ def test_saved_view_keeps_advanced_filters(client):
     assert (saved["priority"], saved["status"]) == ("high", "blocked")
     assert (saved["is_gantt_task"], saved["is_milestone"], saved["has_note"]) == (True, False, True)
     assert (saved["start_after"], saved["start_before"]) == ("2026-09-01", "2026-09-30")
+    assert saved["gantt_color_by"] == "yard"

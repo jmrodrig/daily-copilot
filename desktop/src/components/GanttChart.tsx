@@ -111,18 +111,28 @@ type TaskClick = { onTaskClick?: (id: number) => void; activeTaskId?: number | n
 
 /**
  * `customFields` are the space's custom fields: when some are dropdowns, a "Colour by" control offers to colour the
- * bars by the option each task holds (options without a colour, and tasks without a value, are neutral).
+ * bars by the option each task holds (options without a colour, and tasks without a value, are neutral). The choice is
+ * kept by the chart unless `onColorBy` is given, in which case `colorBy` (a field id, or null for by project) is it.
  */
 export default function GanttChart({
   projects,
   customFields = [],
+  colorBy: controlledColorBy,
+  onColorBy,
   onTaskClick,
   activeTaskId = null,
-}: { projects: GanttProject[]; customFields?: CustomFieldDef[] } & TaskClick) {
+}: {
+  projects: GanttProject[];
+  customFields?: CustomFieldDef[];
+  colorBy?: string | null;
+  onColorBy?: (fieldId: string | null) => void;
+} & TaskClick) {
   const today = todayDay();
   const spans = projects.flatMap((p) => p.tasks.map(span)).filter((s): s is Span => s !== null);
   const dropdowns = customFields.filter((f) => f.type === "dropdown");
-  const [colorBy, setColorBy] = useState(BY_PROJECT);
+  const [ownColorBy, setOwnColorBy] = useState(BY_PROJECT);
+  const colorBy = onColorBy ? (controlledColorBy ?? BY_PROJECT) : ownColorBy;
+  const setColorBy = (value: string) => (onColorBy ? onColorBy(value === BY_PROJECT ? null : value) : setOwnColorBy(value));
   // A field removed since it was picked goes back to the project colours.
   const colorField = dropdowns.find((f) => f.id === colorBy) ?? null;
 
@@ -328,8 +338,10 @@ function TaskBar({
       title={`${task.name} · ${formatDay(span.start)} – ${formatDay(span.end)} · ${percent}%`}
       onClick={onClick}
     >
-      <div className={`relative h-5 overflow-hidden rounded-md border ${swatch.track.className}`} style={{ ...swatch.track.style, width }}>
-        <div className={`h-full ${swatch.fill.className}`} style={{ ...swatch.fill.style, width: `${percent}%` }} />
+      {/* The completed part is left hollow (the track shows through); the work still to do is filled. */}
+      <div className={`relative flex h-5 overflow-hidden rounded-md border ${swatch.track.className}`} style={{ ...swatch.track.style, width }}>
+        <div className="h-full shrink-0" style={{ width: `${percent}%` }} />
+        <div className={`h-full flex-1 ${swatch.fill.className}`} style={swatch.fill.style} />
       </div>
       <span className="font-mono text-xs text-text-muted">{percent}%</span>
     </div>

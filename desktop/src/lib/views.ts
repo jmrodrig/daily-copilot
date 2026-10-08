@@ -11,6 +11,9 @@ export type ViewType = "kanban" | "backlog" | "gantt" | "list";
  * (true) or without (false) that date, `due_after` / `due_before` and `start_after` / `start_before` ("YYYY-MM-DD") bound
  * the due and start dates, inclusive, `priority` / `status` ask for that one, and `is_gantt_task` / `is_milestone` /
  * `has_note` ask for tasks that are (true) or aren't (false) Gantt tasks, milestones, or linked to a note.
+ *
+ * `gantt_color_by` isn't a filter but how the Gantt colours its bars (a dropdown field id; `null` for by project), kept
+ * with the filters so a saved view and the URL remember it.
  */
 export type ViewFilters = {
   project_id: number | null;
@@ -28,6 +31,7 @@ export type ViewFilters = {
   has_note: boolean | null;
   start_after: string | null;
   start_before: string | null;
+  gantt_color_by: string | null;
 };
 
 export type TaskView = { id: number; space_id: number; name: string; view_type: ViewType; filters: ViewFilters };
@@ -66,7 +70,8 @@ export const NO_ADVANCED_FILTERS: Pick<ViewFilters, "custom_fields" | AdvancedFi
   start_before: null,
 };
 
-export const NO_FILTERS: ViewFilters = { project_id: null, assignee: null, tag: null, ...NO_ADVANCED_FILTERS };
+// `gantt_color_by` is left out of NO_ADVANCED_FILTERS, so clearing the advanced filters keeps the Gantt colours.
+export const NO_FILTERS: ViewFilters = { project_id: null, assignee: null, tag: null, ...NO_ADVANCED_FILTERS, gantt_color_by: null };
 
 /** Fired after a view is created, renamed, re-filtered or deleted, so the sidebar and the open view reload. */
 export const VIEWS_CHANGED = "copilot:views-changed";
@@ -93,6 +98,7 @@ export function sameFilters(a: ViewFilters, b: ViewFilters): boolean {
     a.project_id === b.project_id &&
     a.assignee === b.assignee &&
     a.tag === b.tag &&
+    a.gantt_color_by === b.gantt_color_by &&
     sameCustomFields(a.custom_fields, b.custom_fields) &&
     ADVANCED_FILTER_KEYS.every((key) => a[key] === b[key])
   );
@@ -114,7 +120,7 @@ function oneOf<T extends string>(choices: readonly T[], value: string | null): T
 
 /**
  * The filters of an unsaved view from its URL (`/tasks/:view?project=&assignee=&tag=&cf=<field id>:<value>&has_deadline=
- * &has_start_date=&due_after=&due_before=&priority=&status=&is_gantt_task=&is_milestone=&has_note=&start_after=&start_before=`), so a filtered view can be bookmarked or shared.
+ * &has_start_date=&due_after=&due_before=&priority=&status=&is_gantt_task=&is_milestone=&has_note=&start_after=&start_before=&gantt_color_by=`), so a filtered view can be bookmarked or shared.
  */
 export function filtersFromParams(params: URLSearchParams): ViewFilters {
   const project = Number(params.get("project") ?? "");
@@ -143,6 +149,7 @@ export function filtersFromParams(params: URLSearchParams): ViewFilters {
     has_note: flag(params.get("has_note")),
     start_after: day("start_after"),
     start_before: day("start_before"),
+    gantt_color_by: params.get("gantt_color_by") || null,
   };
 }
 
@@ -151,6 +158,7 @@ export function writeFilterParams(params: URLSearchParams, filters: ViewFilters)
   if (filters.project_id !== null) params.set("project", String(filters.project_id));
   if (filters.assignee !== null) params.set("assignee", filters.assignee);
   if (filters.tag !== null) params.set("tag", filters.tag);
+  if (filters.gantt_color_by !== null) params.set("gantt_color_by", filters.gantt_color_by);
   for (const [id, value] of Object.entries(filters.custom_fields)) params.append("cf", `${id}:${value}`);
   writeAdvancedParams(params, filters);
   return params;

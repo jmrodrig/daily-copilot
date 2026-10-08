@@ -38,6 +38,7 @@ NO_ADVANCED_FILTERS = {
     "has_note": None,
     "start_after": None,
     "start_before": None,
+    "gantt_color_by": None,
 }
 
 
