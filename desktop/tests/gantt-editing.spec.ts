@@ -94,11 +94,13 @@ test('Ctrl-click and Shift-click select tasks, which then drag together', async 
   await expect(page.getByRole('toolbar', { name: 'Gantt selection' })).not.toContainText('selected');
 });
 
-test('the grid cursor shifts future dates from the locked day', async ({ page }) => {
+test("the hover cursor's shift button shifts future dates from that day", async ({ page }) => {
   const { bulk } = await setup(page);
-  // Lock the cursor on 15 Oct, in Paint deck's row: Weld keel ended before, Paint deck is under way, Fit engine is later.
+  // Hover 15 Oct, in Paint deck's row: Weld keel ended before, Paint deck is under way, Fit engine is later.
   const paint = (await bar(page, 'Paint deck').boundingBox())!;
+  // There is no fixed cursor: clicking the grid doesn't lock one or add a toolbar shift button.
   await page.mouse.click(paint.x + 3 * DAY_PX + DAY_PX / 2, paint.y - 40);
+  await expect(page.getByRole('button', { name: /^Shift from/ })).toHaveCount(0);
   await page.screenshot({ path: 'test-results/gantt-cursor.png' });
   await page.getByRole('button', { name: 'Shift the timeline from 15 Oct' }).click();
 
@@ -124,7 +126,7 @@ test('shifting to today without "only future dates" moves every task', async ({ 
   const { bulk } = await setup(page);
   const keel = (await bar(page, 'Weld keel').boundingBox())!;
   // 1 Oct, Weld keel's start.
-  await page.mouse.click(keel.x + DAY_PX / 2, keel.y - 40);
+  await page.mouse.move(keel.x + DAY_PX / 2, keel.y - 40);
   await page.getByRole('button', { name: 'Shift the timeline from 1 Oct' }).click();
   const dialog = page.getByRole('dialog', { name: 'Shift the timeline' });
   await dialog.getByRole('button', { name: 'Shift to today' }).click();

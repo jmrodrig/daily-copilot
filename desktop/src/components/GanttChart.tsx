@@ -279,8 +279,8 @@ export default function GanttChart({
 
   // --- Grid cursor and timeline shifting ---
   const [hoverDay, setHoverDay] = useState<number | null>(null);
-  const [lockedDay, setLockedDay] = useState<number | null>(null);
-  const [shifting, setShifting] = useState(false);
+  // The day the shift dialog was opened from, while it is open.
+  const [shiftAnchor, setShiftAnchor] = useState<number | null>(null);
 
   // --- Dragging bars ---
   const scrollerRef = useRef<HTMLDivElement>(null);
@@ -378,15 +378,14 @@ export default function GanttChart({
     return drag && drag.moved && drag.ids.includes(task.id) ? dragSpan(base, drag.mode, drag.delta) : base;
   };
 
-  // Escape unlocks the cursor, then clears the selection; Ctrl/⌘+Z undoes the latest change while it's offered.
+  // Escape clears the selection; Ctrl/⌘+Z undoes the latest change while it's offered.
   useEffect(() => {
     if (!editable) return;
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
-      if (shifting || e.defaultPrevented || target?.closest("input:not([type=checkbox]):not([type=radio]), textarea, select, [contenteditable=true], [role=dialog]")) return;
+      if (shiftAnchor !== null || e.defaultPrevented || target?.closest("input:not([type=checkbox]):not([type=radio]), textarea, select, [contenteditable=true], [role=dialog]")) return;
       if (e.key === "Escape") {
-        if (lockedDay !== null) setLockedDay(null);
-        else if (selected.size > 0) setSelected(new Set());
+        if (selected.size > 0) setSelected(new Set());
       } else if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === "z" && toast?.inverse && !toast.saving) {
         e.preventDefault();
         undo();
@@ -394,7 +393,7 @@ export default function GanttChart({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [editable, shifting, lockedDay, selected, toast, undo]);
+  }, [editable, shiftAnchor, selected, toast, undo]);
 
   if (projects.length === 0) {
     return <p className="text-sm text-text-secondary">No projects yet. Import a Gantt with cli_import.py.</p>;
@@ -430,6 +429,8 @@ export default function GanttChart({
 
   const onGridMove = (e: ReactPointerEvent) => {
     if (!editable || drag || e.pointerType === "touch") return;
+    // Keep the cursor where it is while the pointer is on its own shift button.
+    if ((e.target as HTMLElement).closest("[data-gantt-cursor]")) return;
     const overTask = (e.target as HTMLElement).closest("[data-gantt-bar], [data-gantt-control]");
     setHoverDay(overTask ? null : dayAt(e.clientX));
   };
@@ -448,7 +449,6 @@ export default function GanttChart({
       return;
     }
     if (selected.size > 0) setSelected(new Set());
-    setLockedDay((prev) => (prev === day ? null : day));
   };
 
   const datedOrder = order.length;
@@ -491,14 +491,8 @@ export default function GanttChart({
                 </>
               ) : (
                 <span className="hidden text-text-muted md:inline">
-                  Drag bars to reschedule · <Kbd>Ctrl</Kbd>/<Kbd>Shift</Kbd>+click to select · click the grid to set a cursor
+                  Drag bars to reschedule · <Kbd>Ctrl</Kbd>/<Kbd>Shift</Kbd>+click to select · use the cursor's shift button to shift the timeline
                 </span>
-              )}
-              {lockedDay !== null && (
-                <button type="button" className="btn min-h-0 gap-1.5 px-2.5 py-1 text-xs" onClick={() => setShifting(true)}>
-                  <ShiftIcon />
-                  Shift from {formatDay(lockedDay)}…
-                </button>
               )}
             </div>
           )}
@@ -637,46 +631,25 @@ export default function GanttChart({
           {/* The grid cursor, over the bars but under the sticky labels. */}
           {editable && (
             <div className="pointer-events-none absolute inset-y-0 z-[5]" style={{ left: LABEL_W, width }}>
-              {hoverDay !== null && hoverDay !== lockedDay && (
+              {hoverDay !== null && (
                 <>
                   <div className="absolute inset-y-0 bg-text-primary/[0.04]" style={{ left: x(hoverDay), width: DAY_PX }} />
                   <div className="absolute inset-y-0 w-px bg-text-secondary/60" style={{ left: x(hoverDay) }} />
-                  <span
-                    className="absolute top-0.5 flex h-4 -translate-x-1/2 items-center whitespace-nowrap rounded border border-border-default bg-surface-panel px-1.5 font-mono text-[11px] leading-none text-text-secondary shadow-sm"
-                    style={{ left: x(hoverDay) }}
-                  >
-                    {formatDay(hoverDay, { weekday: true })}
-                  </span>
-                </>
-              )}
-              {lockedDay !== null && (
-                <>
-                  <div className="absolute inset-y-0 w-0.5 -translate-x-1/2 bg-accent shadow-[0_0_0_3px] shadow-accent/15" style={{ left: x(lockedDay) }} />
                   <div
                     data-gantt-control
-                    className="pointer-events-auto absolute top-0.5 flex h-4 -translate-x-1/2 items-center overflow-hidden rounded-full border border-accent bg-surface-panel font-mono text-[11px] leading-none shadow-md"
-                    style={{ left: x(lockedDay) }}
+                    data-gantt-cursor
+                    className="pointer-events-auto absolute top-0.5 flex h-4 -translate-x-1/2 items-center overflow-hidden whitespace-nowrap rounded-full border border-border-default bg-surface-panel font-mono text-[11px] leading-none text-text-secondary shadow-sm"
+                    style={{ left: x(hoverDay) }}
                   >
+                    <span className="px-1.5">{formatDay(hoverDay, { weekday: true })}</span>
                     <button
                       type="button"
-                      title={`Shift the timeline from ${formatDay(lockedDay, { weekday: true })}…`}
-                      aria-label={`Shift the timeline from ${formatDay(lockedDay)}`}
-                      onClick={() => setShifting(true)}
-                      className="flex h-full items-center gap-1 bg-accent px-2 font-semibold text-text-onAccent transition-colors hover:bg-accent-soft"
+                      title={`Shift the timeline from ${formatDay(hoverDay, { weekday: true })}…`}
+                      aria-label={`Shift the timeline from ${formatDay(hoverDay)}`}
+                      onClick={() => setShiftAnchor(hoverDay)}
+                      className="flex h-full items-center border-l border-border-default px-1.5 text-text-muted transition-colors hover:bg-accent hover:text-text-onAccent"
                     >
                       <ShiftIcon />
-                      {formatDay(lockedDay, { weekday: true })}
-                    </button>
-                    <button
-                      type="button"
-                      aria-label="Remove the cursor"
-                      title="Remove the cursor (Esc)"
-                      onClick={() => setLockedDay(null)}
-                      className="flex h-full items-center px-1.5 text-text-muted transition-colors hover:text-text-primary"
-                    >
-                      <svg aria-hidden width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
-                        <path d="M1.5 1.5l5 5M6.5 1.5l-5 5" />
-                      </svg>
                     </button>
                   </div>
                 </>
@@ -690,13 +663,13 @@ export default function GanttChart({
         <Unscheduled key={project.id} project={project} onTaskClick={onTaskClick} activeTaskId={activeTaskId} />
       ))}
 
-      {shifting && lockedDay !== null && (
+      {shiftAnchor !== null && (
         <GanttShiftDialog
-          reference={lockedDay}
+          reference={shiftAnchor}
           tasks={allTasks}
           selectedIds={selected}
           onApply={(shifted: ShiftedTask[], delta: number) => save(shifted.map((s) => s.change), `Shifted ${plural(shifted.length, "task")} · ${formatDelta(delta)}`)}
-          onClose={() => setShifting(false)}
+          onClose={() => setShiftAnchor(null)}
         />
       )}
 
