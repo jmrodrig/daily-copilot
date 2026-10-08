@@ -651,6 +651,7 @@ class CustomFieldDef(BaseModel):
         default_factory=dict,
         description='Dropdown option -> its "#rrggbb" colour, for pills and Gantt bars; options left out have none',
     )
+    show_inline: bool = Field(default=False, description="Show this field in the inline task creation card")
 
     @field_validator("name")
     @classmethod

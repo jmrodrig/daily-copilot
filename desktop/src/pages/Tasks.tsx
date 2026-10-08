@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type FormEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
 import { NavLink, Navigate, useNavigate, useParams, useSearchParams } from "react-router-dom";
 
 import AdvancedFilters from "../components/AdvancedFilters";
@@ -11,9 +11,11 @@ import {
   AddTaskButton,
   ColumnPicker,
   customColumn,
+  CustomFieldInput,
   formatCustomValue,
   NewTaskRow,
   newTaskDefaults,
+  ProjectPicker,
   TITLE_COLUMN,
   useColumns,
   type Column,
@@ -37,6 +39,7 @@ import {
   updateTaskDates,
   useTaskChanges,
   useTaskPanel,
+  type CustomFieldValue,
   type DateChange,
   type ProjectOption,
   type StatusFlow,
@@ -456,6 +459,7 @@ function TaskBoard({
       {visible && viewType === "kanban" && (
         <Kanban
           spaceId={spaceId}
+          projects={projects}
           newTaskDefaults={newTask}
           onCreated={addTask}
           tasks={visible}
@@ -517,12 +521,14 @@ type CardProps = { flow: StatusFlow | null; people: Person[]; me: string; custom
 
 function Kanban({
   spaceId,
+  projects,
   newTaskDefaults,
   onCreated,
   tasks,
   ...card
 }: {
   spaceId: number;
+  projects: ProjectOption[];
   /** The new card's fields, from the view's filters; the column sets the status. */
   newTaskDefaults: NewTaskDraft;
   onCreated: (task: TaskItem) => void;
@@ -568,7 +574,15 @@ function Kanban({
               ))}
             </ul>
             {(status === "todo" || status === "in_progress") && (
-              <KanbanAddCard status={status} spaceId={spaceId} defaults={newTaskDefaults} onCreated={onCreated} />
+              <KanbanAddCard
+                status={status}
+                spaceId={spaceId}
+                defaults={newTaskDefaults}
+                projects={projects}
+                people={card.people}
+                customFields={card.customFields}
+                onCreated={onCreated}
+              />
             )}
           </section>
         );
@@ -578,46 +592,82 @@ function Kanban({
 }
 
 /**
- * The "+ Add task" footer of a Kanban column: Enter adds a task to the column and leaves the input open for the
- * next one; Escape, or leaving it empty, closes it.
+ * The "+ Add task" footer of a Kanban column, opening a new card: its title, its project as a pill (click to change),
+ * its assignee and the custom fields the space shows on inline creation. Enter adds the task to the column and leaves
+ * the card open for the next one, keeping its fields; Escape, Cancel, or clicking elsewhere with no title closes it.
  */
 function KanbanAddCard({
   status,
   spaceId,
   defaults,
+  projects,
+  people,
+  customFields,
   onCreated,
 }: {
   status: TaskStatus;
   spaceId: number;
   defaults: NewTaskDraft;
+  projects: ProjectOption[];
+  people: Person[];
+  customFields: CustomFieldDef[];
   onCreated: (task: TaskItem) => void;
 }) {
   const [isEditing, setIsEditing] = useState(false);
-  const [title, setTitle] = useState("");
+  const [draft, setDraft] = useState<NewTaskDraft>(defaults);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const input = useRef<HTMLInputElement>(null);
+  const form = useRef<HTMLFormElement>(null);
+  const set = (change: Partial<NewTaskDraft>) => setDraft((prev) => ({ ...prev, ...change }));
+  const inlineFields = customFields.filter((f) => f.show_inline);
 
   // Disabling the input while saving drops its focus: take it back for the next task.
   useEffect(() => {
     if (isEditing && !saving) input.current?.focus();
   }, [isEditing, saving]);
 
+  // A click outside the card (its dropdowns included) with nothing typed puts it away.
+  const empty = !draft.title.trim();
+  useEffect(() => {
+    if (!isEditing || !empty) return;
+    const outside = (e: MouseEvent) => {
+      const target = e.target as Element;
+      if (!form.current?.contains(target) && !target.closest?.("[data-popover]")) close();
+    };
+    document.addEventListener("mousedown", outside);
+    return () => document.removeEventListener("mousedown", outside);
+  }, [isEditing, empty]);
+
+  function start() {
+    // From the view's filters as they are now.
+    setDraft(defaults);
+    setIsEditing(true);
+  }
+
   function close() {
     setIsEditing(false);
-    setTitle("");
     setError(null);
   }
 
-  async function submit(event: FormEvent) {
-    event.preventDefault();
-    if (!title.trim() || saving) return;
+  function setCustom(id: string, value: CustomFieldValue | null) {
+    setDraft((prev) => {
+      const custom_fields = { ...prev.custom_fields };
+      if (value === null) delete custom_fields[id];
+      else custom_fields[id] = value;
+      return { ...prev, custom_fields };
+    });
+  }
+
+  async function submit(event?: FormEvent) {
+    event?.preventDefault();
+    if (!draft.title.trim() || saving) return;
     setSaving(true);
     setError(null);
     try {
-      const body: TaskCreate = { ...defaults, space_id: spaceId, status, title: title.trim() };
+      const body: TaskCreate = { ...draft, space_id: spaceId, status, title: draft.title.trim() };
       onCreated(await sendJson<TaskItem>("POST", "/api/tasks", body));
-      setTitle("");
+      set({ title: "" });
     } catch (err: unknown) {
       setError(message(err));
     } finally {
@@ -625,12 +675,20 @@ function KanbanAddCard({
     }
   }
 
+  // Enter in a custom field's input adds the task too (the form would, but not from every input type).
+  const fieldKeys = (e: KeyboardEvent) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      submit();
+    }
+  };
+
   if (!isEditing) {
     return (
       <div className="px-2 pb-2">
         <button
           type="button"
-          onClick={() => setIsEditing(true)}
+          onClick={start}
           className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[13px] text-text-muted hover:bg-surface-raised hover:text-text-primary"
         >
           <span aria-hidden className="flex h-4 w-4 items-center justify-center rounded border border-border-strong font-mono text-[12px] leading-none">
@@ -643,21 +701,56 @@ function KanbanAddCard({
   }
 
   return (
-    <form onSubmit={submit} className="px-2 pb-2">
-      <div className="rounded-md border border-border-default bg-surface-raised p-2">
+    <form
+      ref={form}
+      onSubmit={submit}
+      aria-label={`New ${STATUS_LABELS[status]} task`}
+      // Escape left unhandled by a dropdown inside closes the card.
+      onKeyDown={(e) => e.key === "Escape" && close()}
+      className="px-2 pb-2"
+    >
+      <div className="flex flex-col gap-1.5 rounded-md border border-accent/50 bg-surface-raised p-2.5">
         <input
           ref={input}
           autoFocus
           aria-label={`New ${STATUS_LABELS[status]} task title`}
-          value={title}
-          onChange={(e) => setTitle(e.target.value)}
-          onKeyDown={(e) => e.key === "Escape" && close()}
-          onBlur={() => !title.trim() && !saving && close()}
+          value={draft.title}
+          onChange={(e) => set({ title: e.target.value })}
           disabled={saving}
           placeholder="What needs doing?"
-          className="field w-full py-1 text-[13px]"
+          className="w-full bg-transparent text-[15px] text-text-primary placeholder:text-text-muted focus:outline-none"
         />
-        {error && <p className="mt-1 text-xs text-accent">{error}</p>}
+        <div className="flex flex-wrap items-center gap-1.5">
+          <ProjectPicker value={draft.project_id} projects={projects} onChange={(project_id) => set({ project_id })} />
+          {inlineFields.map((field) => (
+            <CustomFieldInput
+              key={field.id}
+              named
+              field={field}
+              value={draft.custom_fields[field.id]}
+              onChange={(value) => setCustom(field.id, value)}
+              onKeyDown={fieldKeys}
+              className="min-w-0 max-w-full rounded border border-border-default bg-surface-panel px-1.5 py-0.5 text-[13px]"
+            />
+          ))}
+        </div>
+        <AssigneeSelect
+          ariaLabel={`New ${STATUS_LABELS[status]} task assignee`}
+          value={draft.assignee}
+          people={people}
+          onChange={(assignee) => set({ assignee })}
+          className="w-full rounded border border-border-default bg-surface-panel px-1.5 py-0.5 text-[13px]"
+        />
+        <div className="flex items-center gap-2 text-[12px] text-text-muted">
+          <button type="submit" className="btn-primary min-h-6 px-2 text-xs" disabled={saving || empty}>
+            {saving ? "Adding…" : "Add"}
+          </button>
+          <button type="button" className="btn min-h-6 px-2 text-xs" onClick={close}>
+            Cancel
+          </button>
+          <span className="truncate">Enter to add</span>
+        </div>
+        {error && <p className="text-xs text-accent">{error}</p>}
       </div>
     </form>
   );

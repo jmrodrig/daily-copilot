@@ -268,7 +268,7 @@ const FIELD_TYPES: Record<CustomFieldType, string> = {
 
 /** A dropdown option being edited: `original` is its saved name (null if new), so a rename carries tasks over. */
 type OptionDraft = { key: number; name: string; original: string | null; color: string | null };
-type FieldDraft = { id: string; name: string; type: CustomFieldType; options: OptionDraft[] };
+type FieldDraft = { id: string; name: string; type: CustomFieldType; options: OptionDraft[]; showInline: boolean };
 
 let nextOptionKey = 1;
 
@@ -282,6 +282,7 @@ function draftsOf(fields: CustomFieldDef[]): FieldDraft[] {
     name: f.name,
     type: f.type,
     options: f.options.map((o) => optionDraft(o, o, f.colors?.[o] ?? null)),
+    showInline: f.show_inline ?? false,
   }));
 }
 
@@ -305,6 +306,7 @@ function schemaOf(drafts: FieldDraft[]): CustomFieldDef[] {
       type: d.type,
       options: options.map((o) => o.name),
       colors: Object.fromEntries(options.filter((o) => o.color).map((o) => [o.name, o.color!])),
+      show_inline: d.showInline,
     };
   });
 }
@@ -362,7 +364,7 @@ function CustomFieldsEditor({ space, onSave }: { space: Space; onSave: (change: 
     if (!name.trim()) return;
     touched();
     const id = fieldId(name, new Set(drafts.map((f) => f.id)));
-    setDrafts((prev) => [...prev, { id, name: name.trim(), type, options: type === "dropdown" ? [optionDraft("", null, null)] : [] }]);
+    setDrafts((prev) => [...prev, { id, name: name.trim(), type, options: type === "dropdown" ? [optionDraft("", null, null)] : [], showInline: false }]);
     setEditing(id);
     setName("");
   }
@@ -489,6 +491,7 @@ function FieldRow({
               {o.name}
             </Tag>
           ))}
+        {field.showInline && <span className="text-xs text-text-muted">· On new task cards</span>}
         {invalid && <span className="text-xs text-accent">Incomplete</span>}
       </button>
 
@@ -521,6 +524,11 @@ function FieldRow({
               Remove
             </button>
           </div>
+          <label className="flex w-fit items-center gap-2 text-[14px] text-text-secondary">
+            <input type="checkbox" checked={field.showInline} onChange={(e) => onChange(() => ({ showInline: e.target.checked }))} />
+            Show in inline creation
+            <span className="text-xs text-text-muted">(the "Add task" card and the List view's new task row)</span>
+          </label>
           {typeChanged && (
             <p className="text-xs text-accent">
               Was {FIELD_TYPES[savedField.type]}: when you save, tasks' values that aren't valid for a {FIELD_TYPES[field.type].toLowerCase()} field are

@@ -92,9 +92,9 @@ def test_space_preferences_round_trip(client):
     flow = {"todo": {"in_progress": False, "archived": True}, "done": {}}
     assert space["status_flow"] == flow
     assert space["custom_fields_schema"] == [
-        {"id": "hull", "name": "Hull no.", "type": "text", "options": [], "colors": {}},
-        {"id": "weight", "name": "Weight", "type": "number", "options": [], "colors": {}},
-        {"id": "yard", "name": "Yard", "type": "dropdown", "options": ["North", "South"], "colors": {}},
+        {"id": "hull", "name": "Hull no.", "type": "text", "options": [], "colors": {}, "show_inline": False},
+        {"id": "weight", "name": "Weight", "type": "number", "options": [], "colors": {}, "show_inline": False},
+        {"id": "yard", "name": "Yard", "type": "dropdown", "options": ["North", "South"], "colors": {}, "show_inline": False},
     ]
     assert client.get("/api/spaces").json()[0]["status_flow"] == flow
 
@@ -382,6 +382,23 @@ def test_removed_dropdown_option_is_kept_without_a_rename(client, custom_fields)
         json={"custom_fields_schema": [{"id": "yard", "name": "Yard", "type": "dropdown", "options": ["South"]}]},
     )
     assert client.get(f"/api/tasks/{task['id']}").json()["custom_fields"] == {"yard": "North"}
+
+
+def test_custom_field_show_inline_is_saved(client):
+    response = client.put(
+        "/api/spaces/1",
+        json={
+            "custom_fields_schema": [
+                {"id": "hull", "name": "Hull", "type": "text", "show_inline": True},
+                {"id": "yard", "name": "Yard", "type": "dropdown", "options": ["North"]},
+            ]
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    hull, yard = client.get("/api/spaces").json()[0]["custom_fields_schema"]
+    assert hull["show_inline"] is True
+    assert yard["show_inline"] is False  # off unless asked for
 
 
 # --- Project colours ----------------------------------------------------------------

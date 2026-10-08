@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
 
+import Popover from "../components/Popover";
 import { getJson } from "./api";
 
 // Shape of GET /api/people (see Person in backend/schemas.py).
@@ -95,9 +96,14 @@ export function PersonBadge({ person }: { person: Pick<Person, "name" | "avatar_
   );
 }
 
+/** One choice of an `AssigneeSelect`: a person, nobody (`name` null), or a typed name not in People. */
+type AssigneeChoice = { key: string; name: string | null; person?: Person; note?: string };
+
 /**
- * Picks a task's assignee from the space's People ("Me" first). An assignee who isn't in People (typed before the
- * directory existed) stays selectable, so showing it doesn't change it.
+ * Picks a task's assignee: type to filter the space's People ("Me" first), or to assign a name that isn't in People.
+ * Arrow keys move through the list and Enter picks; leaving the field keeps what was typed (cleared means
+ * unassigned), Escape drops it. `onChange` gets the assignee's raw name, and only when it changes. An assignee who
+ * isn't in People (typed before the directory existed) stays listed, so showing it doesn't change it.
  */
 export function AssigneeSelect({
   value,
@@ -116,32 +122,136 @@ export function AssigneeSelect({
   className: string;
   disabled?: boolean;
 }) {
-  const ordered = [...people].sort((a, b) => Number(b.is_me) - Number(a.is_me) || byName(a, b));
+  const [open, setOpen] = useState(false);
+  // What's typed since the field was focused; null shows the current assignee.
+  const [query, setQuery] = useState<string | null>(null);
+  const [highlight, setHighlight] = useState(0);
+  const anchor = useRef<HTMLDivElement>(null);
+  const listId = useId();
+
+  const ordered = useMemo(() => [...people].sort((a, b) => Number(b.is_me) - Number(a.is_me) || byName(a, b)), [people]);
   const activePerson = people.find((p) => p.name === value);
-  const unknown = value && !activePerson ? value : null;
-  
+  const typed = (query ?? "").trim().slice(0, ASSIGNEE_MAX);
+  const needle = typed.toLowerCase();
+  const known = needle ? people.find((p) => p.name.toLowerCase() === needle || personLabel(p).toLowerCase() === needle) : undefined;
+
+  const choices: AssigneeChoice[] = needle
+    ? [
+        ...ordered.filter((p) => personLabel(p).toLowerCase().includes(needle)).map((p) => ({ key: `p${p.id}`, name: p.name, person: p })),
+        ...(known ? [] : [{ key: "new", name: typed, note: "not in People" }]),
+      ]
+    : [
+        { key: "none", name: null },
+        ...ordered.map((p) => ({ key: `p${p.id}`, name: p.name, person: p })),
+        ...(value && !activePerson ? [{ key: "unknown", name: value, note: "not in People" }] : []),
+      ];
+
+  function show() {
+    if (disabled) return;
+    setHighlight(Math.max(0, choices.findIndex((c) => c.name === value)));
+    setOpen(true);
+  }
+
+  function pick(name: string | null) {
+    setQuery(null);
+    setOpen(false);
+    if (name !== value) onChange(name);
+  }
+
+  /** Keeps what was typed: a person by name (in any case), a new name, or nobody if cleared. */
+  function commitTyped() {
+    if (query === null) setOpen(false);
+    else pick(typed ? (known?.name ?? typed) : null);
+  }
+
+  function keys(e: KeyboardEvent<HTMLInputElement>) {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      if (!open) return show();
+      const step = e.key === "ArrowDown" ? 1 : -1;
+      setHighlight((h) => (h + step + choices.length) % choices.length);
+    } else if (e.key === "Enter" && open) {
+      // Picks rather than submitting the form around it; the next Enter does that.
+      e.preventDefault();
+      e.stopPropagation();
+      const choice = choices[highlight];
+      if (choice) pick(choice.name);
+      else commitTyped();
+    } else if (e.key === "Escape" && (open || query !== null)) {
+      e.stopPropagation();
+      setQuery(null);
+      setOpen(false);
+    }
+  }
+
+  const text = query ?? (activePerson ? personLabel(activePerson) : (value ?? ""));
+  const showAvatar = activePerson && query === null;
+
   return (
-    <div className={`relative flex items-center ${className.includes("w-full") ? "w-full" : ""} ${className.includes("flex-1") ? "flex-1" : ""}`}>
-      {activePerson && (
+    <div ref={anchor} className={`relative flex items-center ${className.includes("w-full") ? "w-full" : ""} ${className.includes("flex-1") ? "flex-1" : ""}`}>
+      {showAvatar && (
         <div className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2">
           <Avatar person={activePerson} size="h-5 w-5 shrink-0 rounded-full" textClass="text-[9px]" />
         </div>
       )}
-      <select
+      <input
+        role="combobox"
         aria-label={ariaLabel}
-        value={value ?? ""}
+        aria-expanded={open}
+        aria-controls={listId}
+        aria-autocomplete="list"
+        aria-activedescendant={open && choices[highlight] ? `${listId}-${choices[highlight].key}` : undefined}
+        value={text}
+        placeholder={emptyLabel}
         disabled={disabled}
-        onChange={(e) => onChange(e.target.value || null)}
-        className={`${className} w-full ${value ? "text-text-primary" : "text-text-muted"} ${activePerson ? "pl-8" : ""}`}
-      >
-        <option value="">{emptyLabel}</option>
-        {ordered.map((person) => (
-          <option key={person.id} value={person.name} className={person.is_me ? "font-semibold" : undefined}>
-            {personLabel(person)}
-          </option>
+        maxLength={ASSIGNEE_MAX}
+        autoComplete="off"
+        title={value && !activePerson ? `${value} (not in People)` : undefined}
+        onFocus={(e) => {
+          e.target.select();
+          show();
+        }}
+        onClick={() => !open && show()}
+        onChange={(e) => {
+          setQuery(e.target.value);
+          setHighlight(0);
+          setOpen(true);
+        }}
+        onBlur={commitTyped}
+        onKeyDown={keys}
+        className={`${className} w-full ${value || query ? "text-text-primary" : "text-text-muted"} ${showAvatar ? "pl-8" : ""}`}
+      />
+      <Popover anchor={anchor} open={open} onClose={() => setOpen(false)} id={listId} label={ariaLabel}>
+        {choices.map((choice, index) => (
+          <div
+            key={choice.key}
+            id={`${listId}-${choice.key}`}
+            role="option"
+            aria-selected={choice.name === value}
+            // Keep the focus in the input, so picking doesn't first commit what was typed.
+            onMouseDown={(e) => e.preventDefault()}
+            onMouseEnter={() => setHighlight(index)}
+            onClick={() => pick(choice.name)}
+            className={`flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 ${index === highlight ? "bg-surface-raised text-text-primary" : "text-text-secondary"}`}
+          >
+            {choice.person ? (
+              <span className={choice.person.is_me ? "font-semibold" : undefined}>
+                <PersonBadge person={choice.person} />
+              </span>
+            ) : choice.key === "new" ? (
+              <span className="truncate">
+                Assign “{choice.name}” <span className="text-text-muted">({choice.note})</span>
+              </span>
+            ) : choice.name === null ? (
+              <span className="text-text-muted">{emptyLabel}</span>
+            ) : (
+              <span className="truncate">
+                {choice.name} <span className="text-text-muted">({choice.note})</span>
+              </span>
+            )}
+          </div>
         ))}
-        {unknown && <option value={unknown}>{unknown} (not in People)</option>}
-      </select>
+      </Popover>
     </div>
   );
 }

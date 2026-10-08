@@ -8,9 +8,16 @@ export type CustomFieldType = "text" | "number" | "date" | "checkbox" | "dropdow
 /**
  * One custom task field of a space; tasks keep its value under `id` (see CustomFieldDef in backend/schemas.py).
  * `options` are a dropdown's choices, in order, and `colors` maps some of them to a "#rrggbb" colour; both are
- * empty for the other types.
+ * empty for the other types. `show_inline` puts the field on the inline task creation card.
  */
-export type CustomFieldDef = { id: string; name: string; type: CustomFieldType; options: string[]; colors: Record<string, string> };
+export type CustomFieldDef = {
+  id: string;
+  name: string;
+  type: CustomFieldType;
+  options: string[];
+  colors: Record<string, string>;
+  show_inline?: boolean;
+};
 
 // GET /api/spaces (see Space in backend/schemas.py).
 export type Space = { id: number; name: string; status_flow: StatusFlow | null; custom_fields_schema: CustomFieldDef[] };

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 
 import { message, sendJson } from "../lib/api";
+import { optionColor, pillStyle } from "../lib/colors";
 import { AssigneeSelect, type Person } from "../lib/people";
 import type { CustomFieldDef } from "../lib/space";
 import {
@@ -15,7 +16,8 @@ import {
 } from "../lib/tasks";
 import type { ViewFilters } from "../lib/views";
 import { Dropdown, Row } from "./MultiSelect";
-import { formatDay } from "./TriageBoard";
+import Popover from "./Popover";
+import { formatDay, ProjectTag } from "./TriageBoard";
 
 // --- Columns ----------------------------------------------------------------------
 
@@ -200,16 +202,7 @@ export function NewTaskRow({
       );
     }
     if (id === "project") {
-      return (
-        <select aria-label="New task project" value={draft.project_id ?? ""} onChange={(e) => set({ project_id: e.target.value ? Number(e.target.value) : null })} className={cell}>
-          <option value="">—</option>
-          {projects.map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.code}
-            </option>
-          ))}
-        </select>
-      );
+      return <ProjectPicker value={draft.project_id} projects={projects} onChange={(project_id) => set({ project_id })} />;
     }
     if (id === "status") {
       return (
@@ -253,6 +246,9 @@ export function NewTaskRow({
     return field ? <CustomFieldInput field={field} value={draft.custom_fields[field.id]} onChange={(value) => setCustom(field.id, value)} onKeyDown={keys} className={cell} /> : null;
   }
 
+  // Fields asked for on inline creation whose column is hidden still get an input, above the actions.
+  const extraFields = customFields.filter((f) => f.show_inline && !columns.some((c) => c.id === `cf:${f.id}`));
+
   function setCustom(id: string, value: CustomFieldValue | null) {
     setDraft((prev) => {
       const custom_fields = { ...prev.custom_fields };
@@ -277,6 +273,21 @@ export function NewTaskRow({
       {/* The actions get a row of their own, as the title cell can be narrow. */}
       <tr className="!border-t-0 bg-surface-panel/60">
         <td colSpan={leadingCells + columns.length} className="px-4 pb-2">
+          {extraFields.length > 0 && (
+            <div className="mb-2 flex flex-wrap items-center gap-2">
+              {extraFields.map((field) => (
+                <CustomFieldInput
+                  key={field.id}
+                  named
+                  field={field}
+                  value={draft.custom_fields[field.id]}
+                  onChange={(value) => setCustom(field.id, value)}
+                  onKeyDown={keys}
+                  className="field w-auto px-2 py-1 text-[13px]"
+                />
+              ))}
+            </div>
+          )}
           <div className="flex flex-wrap items-center gap-2 text-xs text-text-muted">
             <button type="button" className="btn-primary min-h-7 px-2.5 text-xs" disabled={saving || !draft.title.trim()} onClick={save}>
               {saving ? "Adding…" : "Add task"}
@@ -293,27 +304,48 @@ export function NewTaskRow({
   );
 }
 
-function CustomFieldInput({
+/**
+ * A custom field's input for a new task. `named` shows the field's name (as the placeholder, the empty dropdown
+ * choice or the checkbox's label), for inputs without a column header above them.
+ */
+export function CustomFieldInput({
   field,
   value,
   onChange,
   onKeyDown,
   className,
+  named = false,
 }: {
   field: CustomFieldDef;
   value: CustomFieldValue | undefined;
   onChange: (value: CustomFieldValue | null) => void;
   onKeyDown: (e: KeyboardEvent) => void;
   className: string;
+  named?: boolean;
 }) {
   const label = `New task ${field.name}`;
   if (field.type === "checkbox") {
-    return <input type="checkbox" aria-label={label} checked={value === true} onChange={(e) => onChange(e.target.checked || null)} />;
+    const box = <input type="checkbox" aria-label={label} checked={value === true} onChange={(e) => onChange(e.target.checked || null)} />;
+    if (!named) return box;
+    return (
+      <label className="flex items-center gap-1.5 text-[13px] text-text-secondary">
+        {box}
+        {field.name}
+      </label>
+    );
   }
   if (field.type === "dropdown") {
+    const color = optionColor(field, value);
     return (
-      <select aria-label={label} value={typeof value === "string" ? value : ""} onChange={(e) => onChange(e.target.value || null)} className={className}>
-        <option value="">—</option>
+      <select
+        aria-label={label}
+        title={named ? field.name : undefined}
+        value={typeof value === "string" ? value : ""}
+        onChange={(e) => onChange(e.target.value || null)}
+        style={color ? pillStyle(color) : undefined}
+        className={`${className} ${named && typeof value !== "string" ? "text-text-muted" : ""}`}
+      >
+        <option value="">{named ? `${field.name}…` : "—"}</option>
         {field.options.map((option) => (
           <option key={option} value={option}>
             {option}
@@ -322,9 +354,11 @@ function CustomFieldInput({
       </select>
     );
   }
-  return (
+  const input = (
     <input
       aria-label={label}
+      title={named ? field.name : undefined}
+      placeholder={named ? field.name : undefined}
       type={field.type === "date" ? "date" : field.type === "number" ? "number" : "text"}
       value={value === undefined ? "" : String(value)}
       onChange={(e) => {
@@ -334,6 +368,77 @@ function CustomFieldInput({
       onKeyDown={onKeyDown}
       className={`${className} min-w-[90px]`}
     />
+  );
+  if (!named || field.type !== "date") return input;
+  // A date input shows no placeholder: name it beside.
+  return (
+    <label className="flex items-center gap-1.5 text-[13px] text-text-muted">
+      {field.name}
+      {input}
+    </label>
+  );
+}
+
+/** A new task's project as its coloured pill; clicking it lists the space's projects to pick another (or none). */
+export function ProjectPicker({ value, projects, onChange }: { value: number | null; projects: ProjectOption[]; onChange: (projectId: number | null) => void }) {
+  const [open, setOpen] = useState(false);
+  const button = useRef<HTMLButtonElement>(null);
+  const project = projects.find((p) => p.id === value);
+  const label = project ? (project.name !== project.code ? `${project.code} · ${project.name}` : project.code) : "No project";
+
+  function pick(projectId: number | null) {
+    setOpen(false);
+    button.current?.focus();
+    if (projectId !== value) onChange(projectId);
+  }
+
+  return (
+    <>
+      <button
+        ref={button}
+        type="button"
+        aria-label={`New task project: ${label}`}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        title={`${label} · click to change`}
+        onClick={() => setOpen((o) => !o)}
+        className="flex items-center gap-1 rounded hover:opacity-80 focus:outline-none focus-visible:ring-1 focus-visible:ring-accent/70"
+      >
+        <ProjectTag code={project?.code ?? null} color={project?.color} />
+        <svg aria-hidden viewBox="0 0 12 12" className="h-2.5 w-2.5 text-text-muted">
+          <path d="M2.5 4.5 6 8l3.5-3.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </button>
+      <Popover anchor={button} open={open} onClose={() => setOpen(false)} label="Projects" role="menu">
+        <div
+          onKeyDown={(e) => {
+            if (e.key === "Escape") {
+              e.stopPropagation();
+              pick(value);
+            }
+          }}
+        >
+          {[null, ...projects].map((p) => {
+            const id = p?.id ?? null;
+            return (
+              <button
+                key={id ?? "none"}
+                type="button"
+                role="menuitemradio"
+                aria-checked={id === value}
+                onClick={() => pick(id)}
+                className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-surface-raised focus:bg-surface-raised focus:outline-none ${
+                  id === value ? "text-text-primary" : "text-text-secondary"
+                }`}
+              >
+                <ProjectTag code={p?.code ?? null} color={p?.color} />
+                {p && p.name !== p.code && <span className="truncate">{p.name}</span>}
+              </button>
+            );
+          })}
+        </div>
+      </Popover>
+    </>
   );
 }
 
