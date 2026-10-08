@@ -136,3 +136,43 @@ test('shifting to today without "only future dates" moves every task', async ({ 
   await expect.poll(() => bulk.length).toBe(3);
   expect(bulk).toContainEqual({ task_ids: [1], updates: { start_date: '2026-10-08', deadline: '2026-10-17' } });
 });
+
+test('the task column can be resized by dragging its edge, within limits', async ({ page }) => {
+  await setup(page);
+  const header = page.getByText('Task', { exact: true }).locator('..');
+  const handle = page.getByRole('separator', { name: 'Resize the task column' });
+  await expect(header).toHaveCSS('width', '240px');
+  const before = (await bar(page, 'Weld keel').boundingBox())!;
+
+  let box = (await handle.boundingBox())!;
+  await dragBy(page, box.x + box.width / 2, box.y + 20, 100);
+  await expect(header).toHaveCSS('width', '340px');
+  await expect(handle).toHaveAttribute('aria-valuenow', '340');
+  // The timeline moves along with the column, and day lookups follow it.
+  const after = (await bar(page, 'Weld keel').boundingBox())!;
+  expect(Math.round(after.x - before.x)).toBe(100);
+  await page.mouse.move(after.x + DAY_PX / 2, after.y - 40);
+  await expect(page.getByRole('button', { name: 'Shift the timeline from 1 Oct' })).toBeVisible();
+
+  // It can't be dragged narrower than 150px or wider than 800px.
+  box = (await handle.boundingBox())!;
+  await dragBy(page, box.x + box.width / 2, box.y + 20, -400);
+  await expect(header).toHaveCSS('width', '150px');
+  box = (await handle.boundingBox())!;
+  await dragBy(page, box.x + box.width / 2, box.y + 20, 1000);
+  await expect(header).toHaveCSS('width', '800px');
+
+  // Escape cancels a drag; double-clicking resets the width; arrow keys nudge it.
+  box = (await handle.boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + 20);
+  await page.mouse.down();
+  await page.mouse.move(box.x - 200, box.y + 20, { steps: 4 });
+  await page.keyboard.press('Escape');
+  await page.mouse.up();
+  await expect(header).toHaveCSS('width', '800px');
+  await handle.dblclick();
+  await expect(header).toHaveCSS('width', '240px');
+  await handle.focus();
+  await page.keyboard.press('ArrowRight');
+  await expect(header).toHaveCSS('width', '256px');
+});

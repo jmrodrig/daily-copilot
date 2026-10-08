@@ -5,6 +5,7 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
@@ -42,7 +43,12 @@ export type GanttProject = {
 export type GanttDateChange = { id: number; start_date?: string | null; end_date?: string | null };
 
 const DAY_PX = 20;
-const LABEL_W = 240;
+// The task labels column: its default width, and how narrow or wide it can be dragged.
+const LABEL_DEFAULT_W = 240;
+const LABEL_MIN_W = 150;
+const LABEL_MAX_W = 800;
+// How much of the timeline stays in view, however wide the labels are dragged.
+const TIMELINE_MIN_W = 120;
 // Bars narrower than this many pixels are dragged whole; their edges are too small to grab.
 const HANDLE_PX = 6;
 // A press that moves less than this is a click, not a drag.
@@ -284,6 +290,7 @@ export default function GanttChart({
 
   // --- Dragging bars ---
   const scrollerRef = useRef<HTMLDivElement>(null);
+  const [labelW, setLabelW] = useState(LABEL_DEFAULT_W);
   const [drag, setDrag] = useState<Drag | null>(null);
   // Set after a drag ends, so the click that follows the release doesn't open the task.
   const suppressClick = useRef(false);
@@ -319,7 +326,7 @@ export default function GanttChart({
         const rect = scroller.getBoundingClientRect();
         const edge = 56;
         const right = lastX > startX ? lastX - (rect.right - edge) : 0;
-        const left = lastX < startX ? rect.left + LABEL_W + edge - lastX : 0;
+        const left = lastX < startX ? rect.left + labelW + edge - lastX : 0;
         const speed = right > 0 ? Math.min(1, right / edge) : left > 0 ? -Math.min(1, left / edge) : 0;
         if (speed !== 0) {
           scroller.scrollLeft += speed * 16;
@@ -372,6 +379,80 @@ export default function GanttChart({
     window.addEventListener("keydown", onKey, true);
   }
 
+  // --- Resizing the labels column ---
+  // While the column is dragged its width goes straight into the --gantt-label-w CSS variable, once a frame, so the
+  // chart isn't re-rendered on every pointer move; the final width is set in state when the drag ends.
+  const chartRef = useRef<HTMLDivElement>(null);
+  const [resizing, setResizing] = useState(false);
+
+  const clampLabelW = (w: number) => {
+    const room = (scrollerRef.current?.clientWidth ?? Infinity) - TIMELINE_MIN_W;
+    return Math.round(Math.max(LABEL_MIN_W, Math.min(w, LABEL_MAX_W, room)));
+  };
+
+  function beginResize(e: ReactPointerEvent) {
+    const chart = chartRef.current;
+    if (!chart || e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const startX = e.clientX;
+    const startW = labelW;
+    let next = startW;
+    let frame = 0;
+    setResizing(true);
+    setHoverDay(null);
+
+    const root = document.documentElement;
+    const previousCursor = root.style.cursor;
+    root.style.cursor = "col-resize";
+    root.style.userSelect = "none";
+
+    const paint = () => {
+      frame = 0;
+      chart.style.setProperty("--gantt-label-w", `${next}px`);
+    };
+    const onMove = (ev: PointerEvent) => {
+      if (ev.pointerId !== e.pointerId) return;
+      next = clampLabelW(startW + ev.clientX - startX);
+      if (!frame) frame = requestAnimationFrame(paint);
+    };
+    const finish = (commit: boolean) => {
+      cancelAnimationFrame(frame);
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onCancel);
+      window.removeEventListener("keydown", onKey, true);
+      root.style.cursor = previousCursor;
+      root.style.userSelect = "";
+      const final = commit ? next : startW;
+      chart.style.setProperty("--gantt-label-w", `${final}px`);
+      setLabelW(final);
+      setResizing(false);
+    };
+    const onUp = (ev: PointerEvent) => ev.pointerId === e.pointerId && finish(true);
+    const onCancel = (ev: PointerEvent) => ev.pointerId === e.pointerId && finish(false);
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key !== "Escape") return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      finish(false);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onCancel);
+    window.addEventListener("keydown", onKey, true);
+  }
+
+  /** Arrow keys on the column's resize handle widen or narrow it; Home/End take it to its narrowest or widest. */
+  function resizeByKey(e: ReactKeyboardEvent) {
+    const step = e.shiftKey ? 64 : 16;
+    const target =
+      e.key === "ArrowLeft" ? labelW - step : e.key === "ArrowRight" ? labelW + step : e.key === "Home" ? LABEL_MIN_W : e.key === "End" ? LABEL_MAX_W : null;
+    if (target === null) return;
+    e.preventDefault();
+    setLabelW(clampLabelW(target));
+  }
+
   /** Where a task is drawn: its dates, or where the drag in progress puts it. */
   const shown = (task: GanttTask): Span => {
     const base = span(task)!;
@@ -422,13 +503,13 @@ export default function GanttChart({
     if (!scroller) return null;
     const rect = scroller.getBoundingClientRect();
     const offset = clientX - rect.left;
-    if (offset < LABEL_W || offset > rect.width) return null;
-    const day = first + Math.floor((offset - LABEL_W + scroller.scrollLeft) / DAY_PX);
+    if (offset < labelW || offset > rect.width) return null;
+    const day = first + Math.floor((offset - labelW + scroller.scrollLeft) / DAY_PX);
     return day >= first && day < last ? day : null;
   };
 
   const onGridMove = (e: ReactPointerEvent) => {
-    if (!editable || drag || e.pointerType === "touch") return;
+    if (!editable || drag || resizing || e.pointerType === "touch") return;
     // Keep the cursor where it is while the pointer is on its own shift button.
     if ((e.target as HTMLElement).closest("[data-gantt-cursor]")) return;
     const overTask = (e.target as HTMLElement).closest("[data-gantt-bar], [data-gantt-control]");
@@ -498,165 +579,168 @@ export default function GanttChart({
           )}
         </div>
       )}
-      <div ref={scrollerRef} className="overflow-x-auto rounded-lg border border-border-default bg-surface-raised">
-        <div
-          className={`relative ${editable && !drag ? "[&_[data-grid]]:cursor-crosshair" : ""}`}
-          style={{ width: LABEL_W + width }}
-          onPointerMove={onGridMove}
-          onPointerLeave={() => setHoverDay(null)}
-          onClick={onGridClick}
-        >
-          {/* Weekends, week gridlines and the today marker, behind the rows. */}
-          <div className="pointer-events-none absolute inset-y-0" style={{ left: LABEL_W, width }}>
-            {weekends.map((day) => (
-              <div key={day} className="absolute inset-y-0 bg-text-primary/[0.025]" style={{ left: x(day), width: DAY_PX }} />
-            ))}
-            {weeks.map((day) => (
-              <div key={day} className="absolute inset-y-0 border-l border-border-default/60" style={{ left: x(day) }} />
-            ))}
-            <div className="absolute inset-y-0 border-l border-dashed border-accent" style={{ left: x(today) }} />
-          </div>
-
-          <div className="flex h-10 border-b border-border-default">
-            <div
-              className="sticky left-0 z-10 flex shrink-0 items-center gap-2 border-r border-border-default bg-surface-raised pl-3 text-xs text-text-muted"
-              style={{ width: LABEL_W }}
-            >
-              {editable && datedOrder > 0 && (
-                <TriCheckbox
-                  label="Select all tasks"
-                  checked={selectedCount === datedOrder}
-                  indeterminate={selectedCount > 0 && selectedCount < datedOrder}
-                  onChange={(on) => setSelected(on ? new Set(order) : new Set())}
-                />
-              )}
-              <span className="font-mono uppercase tracking-wide">Task</span>
-            </div>
-            <div data-grid className="relative font-mono text-xs text-text-muted" style={{ width }}>
-              {weeks.map((day) => (
-                <span key={day} className="absolute bottom-1.5 pl-1.5" style={{ left: x(day) }}>
-                  {formatDay(day)}
-                </span>
+      <div ref={chartRef} className="relative" style={{ "--gantt-label-w": `${labelW}px` } as CSSProperties}>
+        <div ref={scrollerRef} className="overflow-x-auto rounded-lg border border-border-default bg-surface-raised">
+          <div
+            className={`relative ${editable && !drag && !resizing ? "[&_[data-grid]]:cursor-crosshair" : ""}`}
+            style={{ width: `calc(var(--gantt-label-w) + ${width}px)` }}
+            onPointerMove={onGridMove}
+            onPointerLeave={() => setHoverDay(null)}
+            onClick={onGridClick}
+          >
+            {/* Weekends, week gridlines and the today marker, behind the rows. */}
+            <div className="pointer-events-none absolute inset-y-0" style={{ left: "var(--gantt-label-w)", width }}>
+              {weekends.map((day) => (
+                <div key={day} className="absolute inset-y-0 bg-text-primary/[0.025]" style={{ left: x(day), width: DAY_PX }} />
               ))}
-              <span className="absolute top-1 pl-1 text-[12px] text-accent" style={{ left: x(today) }}>
-                TODAY
-              </span>
+              {weeks.map((day) => (
+                <div key={day} className="absolute inset-y-0 border-l border-border-default/60" style={{ left: x(day) }} />
+              ))}
+              <div className="absolute inset-y-0 border-l border-dashed border-accent" style={{ left: x(today) }} />
             </div>
-          </div>
 
-          {projects.map((project) => {
-            const swatch = projectSwatch(project);
-            const dated = project.tasks.filter((t) => span(t) !== null);
-            const milestones = dated.filter((t) => t.is_milestone);
-            const bars = dated.filter((t) => !t.is_milestone);
-            const projectSelected = dated.filter((t) => selected.has(t.id)).length;
-            return (
-              <div key={project.id} className="border-b border-border-default last:border-b-0">
-                <Row
-                  label={
-                    <span className="flex min-w-0 items-center gap-2 pl-3">
-                      {editable && dated.length > 0 && (
-                        <TriCheckbox
-                          label={`Select the tasks of ${project.code}`}
-                          checked={projectSelected === dated.length}
-                          indeterminate={projectSelected > 0 && projectSelected < dated.length}
-                          onChange={(on) => setMany(dated.map((t) => t.id), on)}
-                        />
-                      )}
-                      <ProjectLabel project={project} dot={swatch.dot} />
-                    </span>
-                  }
-                  width={width}
-                >
-                  {milestones.map((m) => (
-                    <Milestone
-                      key={m.id}
-                      task={m}
-                      day={shown(m).start}
-                      x={x}
-                      active={m.id === activeTaskId}
-                      selected={selected.has(m.id)}
-                      clickable={!!onTaskClick || editable}
-                      dragging={!!dragged?.ids.includes(m.id)}
-                      ghostDay={dragged?.ids.includes(m.id) ? span(m)!.start : null}
-                      onPointerDown={editable ? (e) => beginDrag(e, m, "move") : undefined}
-                      onClick={(e) => !suppressClick.current && clickTask(m.id, modifiers(e))}
-                    />
-                  ))}
-                </Row>
-                {bars.map((task) => (
+            <div className="flex h-10 border-b border-border-default">
+              <div
+                className="sticky left-0 z-10 flex shrink-0 items-center gap-2 border-r border-border-default bg-surface-raised pl-3 text-xs text-text-muted"
+                style={{ width: "var(--gantt-label-w)" }}
+              >
+                {editable && datedOrder > 0 && (
+                  <TriCheckbox
+                    label="Select all tasks"
+                    checked={selectedCount === datedOrder}
+                    indeterminate={selectedCount > 0 && selectedCount < datedOrder}
+                    onChange={(on) => setSelected(on ? new Set(order) : new Set())}
+                  />
+                )}
+                <span className="font-mono uppercase tracking-wide">Task</span>
+              </div>
+              <div data-grid className="relative font-mono text-xs text-text-muted" style={{ width }}>
+                {weeks.map((day) => (
+                  <span key={day} className="absolute bottom-1.5 pl-1.5" style={{ left: x(day) }}>
+                    {formatDay(day)}
+                  </span>
+                ))}
+                <span className="absolute top-1 pl-1 text-[12px] text-accent" style={{ left: x(today) }}>
+                  TODAY
+                </span>
+              </div>
+            </div>
+
+            {projects.map((project) => {
+              const swatch = projectSwatch(project);
+              const dated = project.tasks.filter((t) => span(t) !== null);
+              const milestones = dated.filter((t) => t.is_milestone);
+              const bars = dated.filter((t) => !t.is_milestone);
+              const projectSelected = dated.filter((t) => selected.has(t.id)).length;
+              return (
+                <div key={project.id} className="border-b border-border-default last:border-b-0">
                   <Row
-                    key={task.id}
-                    taskId={task.id}
                     label={
-                      <TaskLabel
-                        task={task}
-                        editable={editable}
-                        selected={selected.has(task.id)}
-                        active={task.id === activeTaskId}
-                        clickable={!!onTaskClick || editable}
-                        onCheck={(e) => checkTask(task.id, e)}
-                        onClick={(e) => clickTask(task.id, modifiers(e))}
-                      />
+                      <span className="flex min-w-0 items-center gap-2 pl-3">
+                        {editable && dated.length > 0 && (
+                          <TriCheckbox
+                            label={`Select the tasks of ${project.code}`}
+                            checked={projectSelected === dated.length}
+                            indeterminate={projectSelected > 0 && projectSelected < dated.length}
+                            onChange={(on) => setMany(dated.map((t) => t.id), on)}
+                          />
+                        )}
+                        <ProjectLabel project={project} dot={swatch.dot} />
+                      </span>
                     }
                     width={width}
-                    active={task.id === activeTaskId}
-                    selected={selected.has(task.id)}
-                    hoverable={editable}
                   >
-                    <TaskBar
-                      task={task}
-                      span={shown(task)}
-                      ghost={dragged?.ids.includes(task.id) ? span(task) : null}
-                      x={x}
-                      swatch={barSwatch(project, task)}
-                      selected={selected.has(task.id)}
-                      editable={editable}
-                      drag={dragged?.ids.includes(task.id) ? dragged : null}
-                      dragCount={dragged?.ids.length ?? 0}
-                      onPointerDown={(e, mode) => beginDrag(e, task, mode)}
-                      onClick={
-                        onTaskClick || editable ? (e) => !suppressClick.current && clickTask(task.id, modifiers(e)) : undefined
-                      }
-                    />
+                    {milestones.map((m) => (
+                      <Milestone
+                        key={m.id}
+                        task={m}
+                        day={shown(m).start}
+                        x={x}
+                        active={m.id === activeTaskId}
+                        selected={selected.has(m.id)}
+                        clickable={!!onTaskClick || editable}
+                        dragging={!!dragged?.ids.includes(m.id)}
+                        ghostDay={dragged?.ids.includes(m.id) ? span(m)!.start : null}
+                        onPointerDown={editable ? (e) => beginDrag(e, m, "move") : undefined}
+                        onClick={(e) => !suppressClick.current && clickTask(m.id, modifiers(e))}
+                      />
+                    ))}
                   </Row>
-                ))}
-                {dated.length === 0 && (
-                  <Row label={<span className="pl-4 text-text-muted">No dated tasks</span>} width={width} />
+                  {bars.map((task) => (
+                    <Row
+                      key={task.id}
+                      taskId={task.id}
+                      label={
+                        <TaskLabel
+                          task={task}
+                          editable={editable}
+                          selected={selected.has(task.id)}
+                          active={task.id === activeTaskId}
+                          clickable={!!onTaskClick || editable}
+                          onCheck={(e) => checkTask(task.id, e)}
+                          onClick={(e) => clickTask(task.id, modifiers(e))}
+                        />
+                      }
+                      width={width}
+                      active={task.id === activeTaskId}
+                      selected={selected.has(task.id)}
+                      hoverable={editable}
+                    >
+                      <TaskBar
+                        task={task}
+                        span={shown(task)}
+                        ghost={dragged?.ids.includes(task.id) ? span(task) : null}
+                        x={x}
+                        swatch={barSwatch(project, task)}
+                        selected={selected.has(task.id)}
+                        editable={editable}
+                        drag={dragged?.ids.includes(task.id) ? dragged : null}
+                        dragCount={dragged?.ids.length ?? 0}
+                        onPointerDown={(e, mode) => beginDrag(e, task, mode)}
+                        onClick={
+                          onTaskClick || editable ? (e) => !suppressClick.current && clickTask(task.id, modifiers(e)) : undefined
+                        }
+                      />
+                    </Row>
+                  ))}
+                  {dated.length === 0 && (
+                    <Row label={<span className="pl-4 text-text-muted">No dated tasks</span>} width={width} />
+                  )}
+                </div>
+              );
+            })}
+
+            {/* The grid cursor, over the bars but under the sticky labels. */}
+            {editable && (
+              <div className="pointer-events-none absolute inset-y-0 z-[5]" style={{ left: "var(--gantt-label-w)", width }}>
+                {hoverDay !== null && (
+                  <>
+                    <div className="absolute inset-y-0 bg-text-primary/[0.04]" style={{ left: x(hoverDay), width: DAY_PX }} />
+                    <div className="absolute inset-y-0 w-px bg-text-secondary/60" style={{ left: x(hoverDay) }} />
+                    <div
+                      data-gantt-control
+                      data-gantt-cursor
+                      className="pointer-events-auto absolute top-0.5 flex h-4 -translate-x-1/2 items-center overflow-hidden whitespace-nowrap rounded-full border border-border-default bg-surface-panel font-mono text-[11px] leading-none text-text-secondary shadow-sm"
+                      style={{ left: x(hoverDay) }}
+                    >
+                      <span className="px-1.5">{formatDay(hoverDay, { weekday: true })}</span>
+                      <button
+                        type="button"
+                        title={`Shift the timeline from ${formatDay(hoverDay, { weekday: true })}…`}
+                        aria-label={`Shift the timeline from ${formatDay(hoverDay)}`}
+                        onClick={() => setShiftAnchor(hoverDay)}
+                        className="flex h-full items-center border-l border-border-default px-1.5 text-text-muted transition-colors hover:bg-accent hover:text-text-onAccent"
+                      >
+                        <ShiftIcon />
+                      </button>
+                    </div>
+                  </>
                 )}
               </div>
-            );
-          })}
-
-          {/* The grid cursor, over the bars but under the sticky labels. */}
-          {editable && (
-            <div className="pointer-events-none absolute inset-y-0 z-[5]" style={{ left: LABEL_W, width }}>
-              {hoverDay !== null && (
-                <>
-                  <div className="absolute inset-y-0 bg-text-primary/[0.04]" style={{ left: x(hoverDay), width: DAY_PX }} />
-                  <div className="absolute inset-y-0 w-px bg-text-secondary/60" style={{ left: x(hoverDay) }} />
-                  <div
-                    data-gantt-control
-                    data-gantt-cursor
-                    className="pointer-events-auto absolute top-0.5 flex h-4 -translate-x-1/2 items-center overflow-hidden whitespace-nowrap rounded-full border border-border-default bg-surface-panel font-mono text-[11px] leading-none text-text-secondary shadow-sm"
-                    style={{ left: x(hoverDay) }}
-                  >
-                    <span className="px-1.5">{formatDay(hoverDay, { weekday: true })}</span>
-                    <button
-                      type="button"
-                      title={`Shift the timeline from ${formatDay(hoverDay, { weekday: true })}…`}
-                      aria-label={`Shift the timeline from ${formatDay(hoverDay)}`}
-                      onClick={() => setShiftAnchor(hoverDay)}
-                      className="flex h-full items-center border-l border-border-default px-1.5 text-text-muted transition-colors hover:bg-accent hover:text-text-onAccent"
-                    >
-                      <ShiftIcon />
-                    </button>
-                  </div>
-                </>
-              )}
-            </div>
-          )}
+            )}
+          </div>
         </div>
+        <LabelResizer width={labelW} resizing={resizing} onPointerDown={beginResize} onKeyDown={resizeByKey} onReset={() => setLabelW(clampLabelW(LABEL_DEFAULT_W))} />
       </div>
 
       {projects.map((project) => (
@@ -703,7 +787,7 @@ function Row({
         className={`sticky left-0 z-10 flex shrink-0 items-center border-r border-border-default pr-3 text-sm ${
           active ? "bg-surface-active" : "bg-surface-raised"
         }`}
-        style={{ width: LABEL_W }}
+        style={{ width: "var(--gantt-label-w)" }}
       >
         <span className={`pointer-events-none absolute inset-0 transition-colors ${tint}`} />
         {selected && <span className="pointer-events-none absolute inset-y-0 left-0 w-0.5 bg-accent" />}
@@ -712,6 +796,49 @@ function Row({
       <div data-grid className={`relative transition-colors ${tint}`} style={{ width }}>
         {children}
       </div>
+    </div>
+  );
+}
+
+/**
+ * The grip on the labels column's right edge, over the chart's full height. It sits outside the horizontally scrolling
+ * part, so it stays on the column's edge (which is sticky) however far the timeline is scrolled.
+ */
+function LabelResizer({
+  width,
+  resizing,
+  onPointerDown,
+  onKeyDown,
+  onReset,
+}: {
+  width: number;
+  resizing: boolean;
+  onPointerDown: (e: ReactPointerEvent) => void;
+  onKeyDown: (e: ReactKeyboardEvent) => void;
+  onReset: () => void;
+}) {
+  return (
+    <div
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Resize the task column"
+      aria-valuenow={width}
+      aria-valuemin={LABEL_MIN_W}
+      aria-valuemax={LABEL_MAX_W}
+      tabIndex={0}
+      title="Drag to resize the task column (double-click to reset)"
+      // Centred on the column's border: 1px of the chart's border, then the column, whose last pixel is its border.
+      className="group/resizer absolute inset-y-0 z-20 flex w-[9px] cursor-col-resize touch-none justify-center outline-none"
+      style={{ left: "calc(var(--gantt-label-w) - 4px)" }}
+      onPointerDown={onPointerDown}
+      onKeyDown={onKeyDown}
+      onDoubleClick={onReset}
+    >
+      <span
+        className={`h-full w-[2px] transition-colors ${
+          resizing ? "bg-accent" : "bg-transparent group-hover/resizer:bg-accent/60 group-focus-visible/resizer:bg-accent"
+        }`}
+      />
     </div>
   );
 }
