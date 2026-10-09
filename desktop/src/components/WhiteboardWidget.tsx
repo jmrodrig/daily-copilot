@@ -7,8 +7,8 @@ import { WhiteboardBlock } from "./noteFormatting";
 import WhiteboardView from "./WhiteboardView";
 
 /** The square-cornered arrows of a fullscreen button, out or in, in a 16 × 16 box. */
-const EXPAND_ICON = "M9.5 2.5h4v4 M13.5 2.5L9 7 M6.5 13.5h-4v-4 M2.5 13.5L7 9";
-const COLLAPSE_ICON = "M13.5 6.5h-4v-4 M9.5 6.5L14 2 M2.5 9.5h4v4 M6.5 9.5L2 14";
+export const EXPAND_ICON = "M9.5 2.5h4v4 M13.5 2.5L9 7 M6.5 13.5h-4v-4 M2.5 13.5L7 9";
+export const COLLAPSE_ICON = "M13.5 6.5h-4v-4 M9.5 6.5L14 2 M2.5 9.5h4v4 M6.5 9.5L2 14";
 const TRASH_ICON = "M2.5 4.5h11 M6 4.5V3h4v1.5 M4 4.5l.7 9h6.6l.7-9 M6.8 7v4.5 M9.2 7v4.5";
 
 /**

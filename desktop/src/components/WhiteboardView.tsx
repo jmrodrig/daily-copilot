@@ -24,6 +24,7 @@ import {
   HANDLE_CURSORS,
   HANDLE_SIZE,
   INKS,
+  insideLoop,
   isEraser,
   isShape,
   isTyping,
@@ -34,6 +35,7 @@ import {
   OPPOSITE,
   PDF_RENDER_DELAY,
   PDF_SCALE,
+  ROTATE_OFFSET,
   selectionBox,
   selectionHandle,
   SIZES,
@@ -46,6 +48,7 @@ import {
   type Comment,
   type Corner,
   type Eraser,
+  type Handle,
   type Point,
   type Stroke,
   type TextEntry,
@@ -65,9 +68,9 @@ import {
 
 /** The view: screen pixels per world unit, and where the world's origin is on the stage, from its top left. */
 type View = { zoom: number; x: number; y: number };
-/** A drag of a floating element: moving it, or scaling it (keeping its shape) from the corner opposite the one
- * dragged; as it was when the drag started, and whether it's moved yet (a click doesn't). */
-type ElementDrag = { pointerId: number; id: string; handle: "move" | Corner; from: Point; original: FloatingElement; moved: boolean };
+/** A drag of a floating element: moving it, turning it about its center, or scaling it (keeping its shape) from the
+ * corner opposite the one dragged; as it was when the drag started, and whether it's moved yet (a click doesn't). */
+type ElementDrag = { pointerId: number; id: string; handle: Handle; from: Point; original: FloatingElement; moved: boolean };
 
 const MIN_ZOOM = 0.05;
 const MAX_ZOOM = 8;
@@ -95,14 +98,44 @@ const FIT_PADDING = 48;
 /** The tools' keys (E picks the eraser last used). */
 const SHORTCUTS: Record<string, Tool> = { v: "select", p: "draw", e: "lasso-erase", r: "rect", o: "circle", l: "line", a: "arrow", t: "text", c: "comment", h: "pan" };
 
+/** A floating element's box as it would be upright (before it's turned by its `angle`), and its center. */
 const elementBox = (e: FloatingElement): Box => ({ left: e.x, top: e.y, right: e.x + e.w, bottom: e.y + e.h });
+const elementCenter = (e: FloatingElement): Point => ({ x: e.x + e.w / 2, y: e.y + e.h / 2 });
+
+/** A point turned by `angle` (radians) about `center`. */
+function turn(point: Point, center: Point, angle: number): Point {
+  if (!angle) return point;
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+  const dx = point.x - center.x;
+  const dy = point.y - center.y;
+  return { x: center.x + dx * cos - dy * sin, y: center.y + dx * sin + dy * cos };
+}
+
+/** A world point in a floating element's own frame (turned back about its center), to test against its upright box. */
+const toElementFrame = (e: FloatingElement, point: Point): Point => turn(point, elementCenter(e), -(e.angle ?? 0));
+
+/** The box around a floating element as it's shown, turned. */
+function elementBounds(e: FloatingElement): Box {
+  if (!e.angle) return elementBox(e);
+  const corners = Object.values(boxCorners(elementBox(e))).map((p) => turn(p, elementCenter(e), e.angle ?? 0));
+  return {
+    left: Math.min(...corners.map((p) => p.x)),
+    top: Math.min(...corners.map((p) => p.y)),
+    right: Math.max(...corners.map((p) => p.x)),
+    bottom: Math.max(...corners.map((p) => p.y)),
+  };
+}
+
+/** An angle brought into (-π, π], so an element turned round and round doesn't save ever larger ones. */
+const normalizeAngle = (angle: number) => Math.atan2(Math.sin(angle), Math.cos(angle));
 const isPdfFile = (file: File) => file.type === "application/pdf" || /\.pdf$/i.test(file.name);
 const isImageFile = (file: File) => file.type.startsWith("image/");
 
 /** The box around everything on a board, or null for an empty one. */
 function contentBounds(doc: WhiteboardDoc): Box | null {
   const boxes: Box[] = [
-    ...doc.elements.map(elementBox),
+    ...doc.elements.map(elementBounds),
     ...(doc.strokes.length ? [selectionBox(doc.strokes)] : []),
     ...doc.comments.map((c) => ({ left: c.x, top: c.y, right: c.x, bottom: c.y })),
   ];
@@ -538,7 +571,8 @@ export default function WhiteboardView({
   function elementAt(point: Point): FloatingElement | null {
     let top: FloatingElement | null = null;
     for (const e of doc.elements) {
-      if (point.x >= e.x && point.x <= e.x + e.w && point.y >= e.y && point.y <= e.y + e.h && (!top || e.z > top.z)) top = e;
+      const p = toElementFrame(e, point);
+      if (p.x >= e.x && p.x <= e.x + e.w && p.y >= e.y && p.y <= e.y + e.h && (!top || e.z > top.z)) top = e;
     }
     return top;
   }
@@ -660,7 +694,7 @@ export default function WhiteboardView({
    * always pans. */
   const draws = (e: ReactPointerEvent) => editable && activeTool !== "pan" && (e.pointerType === "pen" || e.pointerType === "mouse");
 
-  function startElementDrag(element: FloatingElement, handle: "move" | Corner, from: Point, pointerId: number) {
+  function startElementDrag(element: FloatingElement, handle: Handle, from: Point, pointerId: number) {
     elementDrag.current = { pointerId, id: element.id, handle, from, original: element, moved: false };
     setBusy(true);
   }
@@ -670,8 +704,9 @@ export default function WhiteboardView({
   function selectDown(point: Point, pointerId: number) {
     const { zoom } = view;
     if (selectedElement) {
-      const handle = selectionHandle(elementBox(selectedElement), point, zoom, false);
-      if (handle && handle !== "rotate") return startElementDrag(selectedElement, handle, point, pointerId);
+      // Its handles turn with it: the point's turned back to meet them on its upright box.
+      const handle = selectionHandle(elementBox(selectedElement), toElementFrame(selectedElement, point), zoom);
+      if (handle) return startElementDrag(selectedElement, handle, point, pointerId);
     }
     if (selection.length) {
       const box = selectionBox(selection);
@@ -804,12 +839,23 @@ export default function WhiteboardView({
       let next: FloatingElement;
       if (drag.handle === "move") {
         next = { ...o, x: o.x + point.x - drag.from.x, y: o.y + point.y - drag.from.y };
+      } else if (drag.handle === "rotate") {
+        // Turned about its center by as far as the pointer has gone round it.
+        const c = elementCenter(o);
+        const angle = (o.angle ?? 0) + Math.atan2(point.y - c.y, point.x - c.x) - Math.atan2(drag.from.y - c.y, drag.from.x - c.x);
+        next = { ...o, angle: normalizeAngle(angle) };
       } else {
-        // Scaled evenly, so an image or a page keeps its shape, from the corner opposite the one dragged.
+        // Scaled evenly, so an image or a page keeps its shape, from the corner opposite the one dragged: worked out
+        // in its own (upright) frame, then its new center's turned back, so that corner stays put on the board.
         const box = elementBox(o);
-        const scale = cornerScale(box, drag.handle, drag.from, point, MIN_ELEMENT_SIDE / view.zoom / Math.min(o.w, o.h));
+        const c = elementCenter(o);
+        const min = MIN_ELEMENT_SIDE / view.zoom / Math.min(o.w, o.h);
+        const scale = cornerScale(box, drag.handle, toElementFrame(o, drag.from), toElementFrame(o, point), min);
         const anchor = boxCorners(box)[OPPOSITE[drag.handle]];
-        next = { ...o, x: anchor.x + (o.x - anchor.x) * scale, y: anchor.y + (o.y - anchor.y) * scale, w: o.w * scale, h: o.h * scale };
+        const center = turn({ x: anchor.x + (c.x - anchor.x) * scale, y: anchor.y + (c.y - anchor.y) * scale }, c, o.angle ?? 0);
+        const w = o.w * scale;
+        const h = o.h * scale;
+        next = { ...o, x: center.x - w / 2, y: center.y - h / 2, w, h };
       }
       setElements((all) => all.map((el) => (el.id === drag.id ? next : el)));
       return;
@@ -856,8 +902,8 @@ export default function WhiteboardView({
   /** The cursor over a point with the select tool. */
   function hoverCursor(point: Point): string | null {
     if (selectedElement) {
-      const handle = selectionHandle(elementBox(selectedElement), point, view.zoom, false);
-      if (handle && handle !== "rotate") return HANDLE_CURSORS[handle];
+      const handle = selectionHandle(elementBox(selectedElement), toElementFrame(selectedElement, point), view.zoom);
+      if (handle) return HANDLE_CURSORS[handle];
     }
     if (selection.length) {
       const handle = selectionHandle(selectionBox(selection), point, view.zoom);
@@ -889,13 +935,27 @@ export default function WhiteboardView({
     const lassoing = selecting.current;
     if (lassoing?.pointerId === e.pointerId) {
       selecting.current = null;
-      // A lasso picks (or the lasso eraser deletes) the strokes it wholly encloses; one that encloses nothing (a
-      // click) just clears its outline.
+      // A lasso picks (or the lasso eraser deletes) the strokes it wholly encloses and the floating elements whose
+      // centers it encloses; one that encloses nothing (a click) just clears its outline. Strokes or one element are
+      // picked, not both: the strokes, if it caught any, else the topmost element.
       if (lassoing.points.length < 3) return redraw();
       const inside = new Set(doc.strokes.filter((s) => lassoed(s, lassoing.points)));
-      if (!lassoing.erase) setSelected(inside);
-      else if (inside.size) setStrokes((all) => all.filter((s) => !inside.has(s)));
-      else redraw();
+      const caught = doc.elements.filter((el) => insideLoop(elementCenter(el), lassoing.points));
+      if (!lassoing.erase) {
+        const top = caught.reduce<FloatingElement | null>((a, b) => (!a || b.z > a.z ? b : a), null);
+        setSelected(inside);
+        setSelectedId(inside.size || !top ? null : top.id);
+        if (!inside.size) redraw();
+      } else if (inside.size || caught.length) {
+        const gone = new Set(caught.map((el) => el.id));
+        setDoc((d) => ({
+          ...d,
+          strokes: inside.size ? d.strokes.filter((s) => !inside.has(s)) : d.strokes,
+          elements: gone.size ? normalizeZ(d.elements.filter((el) => !gone.has(el.id))) : d.elements,
+        }));
+        if (selectedId && gone.has(selectedId)) setSelectedId(null);
+        if (!inside.size) redraw();
+      } else redraw();
       return;
     }
     const current = drawing.current;
@@ -952,6 +1012,9 @@ export default function WhiteboardView({
       aria-roledescription="whiteboard"
       onKeyDown={keyDown}
       onKeyUp={keyUp}
+      // A press held to draw mustn't start the browser's (or the note editor's) own drag of the board.
+      draggable={false}
+      onDragStart={preventDrag}
       onBlur={(e) => {
         // Keys let go elsewhere never come up here.
         if (rootRef.current?.contains(e.relatedTarget as Node | null)) return;
@@ -1047,6 +1110,8 @@ export default function WhiteboardView({
         onPointerUp={pointerUp}
         onPointerCancel={pointerUp}
         onPointerLeave={() => setHover(null)}
+        draggable={false}
+        onDragStart={preventDrag}
         onDoubleClick={() => (!editable || tool === "pan") && fit()}
         onDragOver={dragOver}
         onDragLeave={() => setDropping(false)}
@@ -1058,7 +1123,7 @@ export default function WhiteboardView({
             <div
               key={element.id}
               className="absolute overflow-hidden shadow-lg shadow-black/40"
-              style={{ left: element.x, top: element.y, width: element.w, height: element.h }}
+              style={{ left: element.x, top: element.y, width: element.w, height: element.h, transform: rotation(element) }}
             >
               {element.kind === "pdf" ? (
                 <PdfPage src={element.src} page={element.page ?? 0} width={element.w} zoom={view.zoom} />
@@ -1080,9 +1145,31 @@ export default function WhiteboardView({
                 top: selectedElement.y,
                 width: selectedElement.w,
                 height: selectedElement.h,
+                transform: rotation(selectedElement),
                 outline: `${2 / view.zoom}px solid var(--dc-accent)`,
               }}
             >
+              {/* The rotate handle, on a stalk above the top's middle. */}
+              <span
+                className="absolute"
+                style={{
+                  left: selectedElement.w / 2 - 0.75 / view.zoom,
+                  top: -ROTATE_OFFSET / view.zoom,
+                  width: 1.5 / view.zoom,
+                  height: ROTATE_OFFSET / view.zoom,
+                  background: "var(--dc-accent)",
+                }}
+              />
+              <span
+                className="absolute rounded-full border border-neutral-900 bg-white"
+                style={{
+                  width: handleSize,
+                  height: handleSize,
+                  borderWidth: 1.5 / view.zoom,
+                  left: selectedElement.w / 2 - handleSize / 2,
+                  top: -ROTATE_OFFSET / view.zoom - handleSize / 2,
+                }}
+              />
               {(["nw", "ne", "se", "sw"] as Corner[]).map((corner) => (
                 <span
                   key={corner}
@@ -1216,6 +1303,15 @@ export default function WhiteboardView({
   );
 }
 
+/** A floating element's CSS turn, about its box's center. */
+const rotation = (e: FloatingElement) => (e.angle ? `rotate(${e.angle}rad)` : undefined);
+
+/** Stops a native drag starting from the board: a press held to draw would otherwise pick it up. */
+function preventDrag(e: ReactDragEvent) {
+  e.preventDefault();
+  e.stopPropagation();
+}
+
 /** The blueprint grid, as the stage's background: minor lines every cell and major ones every `GRID_MAJOR`, moving
  * and scaling with the view, coarsening as it zooms out so the lines never crowd. */
 function gridStyle(view: View): CSSProperties {
@@ -1264,12 +1360,16 @@ function ElementToolbar({
   const [pageDraft, setPageDraft] = useState(String(page + 1));
   useEffect(() => setPageDraft(String(page + 1)), [page]);
 
-  const top = element.y * view.zoom + view.y;
-  const bottom = (element.y + element.h) * view.zoom + view.y;
+  // Clear of the element as it's turned, and of its rotate handle, so it never covers the handle.
+  const bounds = elementBounds(element);
+  const handle = turn({ x: element.x + element.w / 2, y: element.y - ROTATE_OFFSET / view.zoom }, elementCenter(element), element.angle ?? 0);
+  const handleReach = HANDLE_SIZE / view.zoom;
+  const top = Math.min(bounds.top, handle.y - handleReach) * view.zoom + view.y;
+  const bottom = Math.max(bounds.bottom, handle.y + handleReach) * view.zoom + view.y;
   const above = top > 52;
   // Kept on the stage, roughly half its own width in from either side.
   const half = element.kind === "pdf" ? 230 : 130;
-  const center = Math.min(Math.max((element.x + element.w / 2) * view.zoom + view.x, half), Math.max(half, stageWidth - half));
+  const center = Math.min(Math.max(((bounds.left + bounds.right) / 2) * view.zoom + view.x, half), Math.max(half, stageWidth - half));
 
   function commitPage() {
     const next = Number(pageDraft);

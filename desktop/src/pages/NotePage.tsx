@@ -16,7 +16,8 @@ import NoteEditor from "../components/NoteEditor";
 import { PillIcon, refKind, StatusTag, useTaskStatus } from "../components/referencePill";
 import { NOTE_COLUMN, NOTE_HTML_SCHEMA, layoutMedia, liftCellColors } from "../components/noteFormatting";
 import WhiteboardView from "../components/WhiteboardView";
-import { WhiteboardFrame } from "../components/WhiteboardWidget";
+import { COLLAPSE_ICON, EXPAND_ICON, WhiteboardFrame } from "../components/WhiteboardWidget";
+import { Segment, ToolIcon } from "../components/markupUi";
 
 // GET /api/notes/file (see NoteFile in backend/schemas.py).
 type NoteFile = { path: string; frontmatter: Record<string, unknown>; content: string };
@@ -75,6 +76,9 @@ export default function NotePage() {
   // Tags are saved on their own, straight away; the body's auto-save waits for them.
   const [savingTags, setSavingTags] = useState(false);
   const [tagError, setTagError] = useState<string | null>(null);
+  // A whiteboard page's board, filling the window (over the sidebar and the page) till Escape or its button.
+  const [boardFullscreen, setBoardFullscreen] = useState(false);
+  useEffect(() => setBoardFullscreen(false), [path]);
   // The title and body that last failed to save: auto-save waits for another edit rather than retrying them.
   const failedRef = useRef<string | null>(null);
   // The draft's unsaved changes, saved when the page moves to another note (or closes) before auto-save has.
@@ -334,7 +338,22 @@ export default function NotePage() {
           spaceId={spaceId}
           captureWheel
           onSave={() => dirty && void save()}
-          className="min-h-[360px] flex-1 rounded-lg border border-border-default"
+          // Fullscreen in place (not a remount), so the board keeps its view and its Undo.
+          onEscape={boardFullscreen ? () => setBoardFullscreen(false) : undefined}
+          toolbarEnd={
+            <Segment
+              on={false}
+              label={boardFullscreen ? "Exit fullscreen (Esc)" : "Fullscreen"}
+              onClick={() => setBoardFullscreen(!boardFullscreen)}
+            >
+              <ToolIcon path={boardFullscreen ? COLLAPSE_ICON : EXPAND_ICON} />
+            </Segment>
+          }
+          className={
+            boardFullscreen
+              ? "fixed inset-0 z-50"
+              : "min-h-[360px] flex-1 rounded-lg border border-border-default"
+          }
         />
       </div>
     );

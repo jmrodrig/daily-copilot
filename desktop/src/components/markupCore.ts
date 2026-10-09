@@ -304,7 +304,7 @@ function outline(stroke: Stroke, segments = 8): Point[] {
 }
 
 /** Whether a point is inside a loop (ray casting: a ray from it crosses the loop's edges an odd number of times). */
-function insideLoop({ x, y }: Point, loop: Point[]): boolean {
+export function insideLoop({ x, y }: Point, loop: Point[]): boolean {
   let inside = false;
   for (let i = 0, j = loop.length - 1; i < loop.length; j = i++) {
     const a = loop[i];

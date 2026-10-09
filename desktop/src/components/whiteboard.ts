@@ -21,6 +21,8 @@ export type FloatingElement = {
   w: number;
   h: number;
   z: number;
+  /** How far it's turned about its center, in radians (clockwise on screen). */
+  angle?: number;
 };
 
 export type WhiteboardState = {
@@ -63,6 +65,7 @@ export function parseWhiteboard(json: string): WhiteboardDoc {
       w: Math.max(1, finite(e.w, 320)),
       h: Math.max(1, finite(e.h, 240)),
       z: finite(e.z, i),
+      ...(finite(e.angle, 0) ? { angle: finite(e.angle, 0) } : {}),
     }));
   const markup = raw.markup && typeof raw.markup === "object" ? raw.markup : { strokes: [], comments: [] };
   const strokes = [

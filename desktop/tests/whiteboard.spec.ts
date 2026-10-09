@@ -42,7 +42,7 @@ function threePagePdf(): Buffer {
 
 type Board = {
   grid: boolean;
-  elements: { id: string; kind: "image" | "pdf"; src: string; page?: number; x: number; y: number; w: number; h: number; z: number }[];
+  elements: { id: string; kind: "image" | "pdf"; src: string; page?: number; x: number; y: number; w: number; h: number; z: number; angle?: number }[];
   markup: { strokes: { type: string; points: unknown[] }[]; comments: unknown[] };
 };
 
@@ -84,6 +84,14 @@ async function drag(page: Page, from: { x: number; y: number }, to: { x: number;
   await page.mouse.move(from.x, from.y);
   await page.mouse.down();
   await page.mouse.move(to.x, to.y, { steps: 8 });
+  await page.mouse.up();
+}
+
+/** Drag a closed loop through the points, back to the first. */
+async function loop(page: Page, points: { x: number; y: number }[]) {
+  await page.mouse.move(points[0].x, points[0].y);
+  await page.mouse.down();
+  for (const p of [...points.slice(1), points[0]]) await page.mouse.move(p.x, p.y, { steps: 6 });
   await page.mouse.up();
 }
 
@@ -150,6 +158,52 @@ test("floating elements are picked, dragged, scaled, restacked and deleted", asy
   // Delete removes it.
   await page.keyboard.press("Delete");
   await expect.poll(() => lastBoard(saves).elements.map((e) => e.id), { timeout: 8000 }).toEqual(["b"]);
+  expect(errors).toEqual([]);
+});
+
+test("a floating element is turned from its rotate handle, and picked and erased with a lasso", async ({ page }) => {
+  const content = JSON.stringify(board({ elements: [{ id: "a", kind: "image", src: "/files/a.png", x: 0, y: 0, w: 200, h: 100, z: 0 }] }));
+  const { errors, saves } = await openNote(page, { state: "draft", type: "whiteboard" }, content);
+  await page.getByRole("button", { name: /^Select/ }).click();
+
+  // Fitted at 100%, centered on the image (0..200 × 0..100).
+  const box = await stageBox(page);
+  const origin = { x: box.x + box.width / 2 - 100, y: box.y + box.height / 2 - 50 };
+  const at = (x: number, y: number) => ({ x: origin.x + x, y: origin.y + y });
+
+  // Pick it, then drag its rotate handle (24px above its top's middle) round to its right: a quarter turn.
+  await page.mouse.click(at(100, 50).x, at(100, 50).y);
+  await expect(page.getByRole("toolbar", { name: "Image" })).toBeVisible();
+  await drag(page, at(100, -24), at(250, 50));
+  await expect.poll(() => saves.length && lastBoard(saves).elements[0].angle, { timeout: 8000 }).toBeCloseTo(Math.PI / 2, 1);
+  // Turned about its center, which stays put.
+  expect([lastBoard(saves).elements[0].x, lastBoard(saves).elements[0].y]).toEqual([0, 0]);
+  // Now upright it's 100 wide and 200 tall: a press on what was its right end, off its new shape, picks nothing.
+  await page.mouse.click(at(190, 50).x, at(190, 50).y);
+  await expect(page.getByRole("toolbar", { name: "Image" })).toHaveCount(0);
+
+  // A lasso around its center picks it.
+  const around = [at(-80, -80), at(280, -80), at(280, 180), at(-80, 180)];
+  await loop(page, around);
+  await expect(page.getByRole("toolbar", { name: "Image" })).toBeVisible();
+
+  // The lasso eraser deletes it.
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("e");
+  await loop(page, around);
+  await expect.poll(() => lastBoard(saves).elements, { timeout: 8000 }).toEqual([]);
+  expect(errors).toEqual([]);
+});
+
+test("a whiteboard note's board goes fullscreen and back", async ({ page }) => {
+  const { errors } = await openNote(page, { state: "draft", type: "whiteboard" }, JSON.stringify(board()));
+  const before = await stageBox(page);
+  await page.getByRole("button", { name: "Fullscreen" }).click();
+  const viewport = page.viewportSize()!;
+  await expect.poll(async () => (await stageBox(page)).width).toBe(viewport.width);
+  await page.keyboard.press("Escape");
+  await expect.poll(async () => (await stageBox(page)).width).toBe(before.width);
+  await expect(page.getByRole("button", { name: "Fullscreen", exact: true })).toBeVisible();
   expect(errors).toEqual([]);
 });
 
