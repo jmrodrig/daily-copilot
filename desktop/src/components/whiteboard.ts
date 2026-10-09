@@ -111,17 +111,25 @@ export function normalizeZ(elements: FloatingElement[]): FloatingElement[] {
     .map((e, z) => (e.z === z ? e : { ...e, z }));
 }
 
-/** The elements with one moved a step forward (+1) or back (-1) in the stack, or right to the front or back. */
-export function restack(elements: FloatingElement[], id: string, move: "forward" | "backward" | "front" | "back"): FloatingElement[] {
-  const order = normalizeZ(elements);
-  const from = order.findIndex((e) => e.id === id);
-  if (from < 0) return elements;
-  const to =
-    move === "forward" ? Math.min(order.length - 1, from + 1) : move === "backward" ? Math.max(0, from - 1) : move === "front" ? order.length - 1 : 0;
-  if (to === from) return elements;
-  const [moved] = order.splice(from, 1);
-  order.splice(to, 0, moved);
-  return order.map((e, z) => (e.z === z ? e : { ...e, z }));
+/** The elements with those picked (by id) moved a step forward or back in the stack, each past the next one not
+ * picked, or right to the front or back; the picked keep their order among themselves. */
+export function restack(elements: FloatingElement[], ids: Set<string>, move: "forward" | "backward" | "front" | "back"): FloatingElement[] {
+  let order = normalizeZ(elements);
+  const picked = (e: FloatingElement) => ids.has(e.id);
+  if (move === "front") order = [...order.filter((e) => !picked(e)), ...order.filter(picked)];
+  else if (move === "back") order = [...order.filter(picked), ...order.filter((e) => !picked(e))];
+  else if (move === "forward") {
+    // From the top down, so a run of picked ones at the front stays there.
+    for (let i = order.length - 2; i >= 0; i--) {
+      if (picked(order[i]) && !picked(order[i + 1])) [order[i], order[i + 1]] = [order[i + 1], order[i]];
+    }
+  } else {
+    for (let i = 1; i < order.length; i++) {
+      if (picked(order[i]) && !picked(order[i - 1])) [order[i], order[i - 1]] = [order[i - 1], order[i]];
+    }
+  }
+  const next = order.map((e, z) => (e.z === z ? e : { ...e, z }));
+  return next.every((e, i) => e === elements[i]) && next.length === elements.length ? elements : next;
 }
 
 /**

@@ -14,15 +14,15 @@ import {
 import { message, uploadFile } from "../lib/api";
 import MediaLightbox from "./MediaLightbox";
 import {
-  boxCorners,
-  cornerScale,
+  boxCenter,
   distance,
   drawLassoOutline,
   drawSelection,
   drawStrokes,
   ERASER_MIN_REACH,
+  frameBounds,
+  frameCenter,
   HANDLE_CURSORS,
-  HANDLE_SIZE,
   INKS,
   insideLoop,
   isEraser,
@@ -32,21 +32,21 @@ import {
   MAX_CANVAS_AREA,
   midpoint,
   newId,
-  OPPOSITE,
   PDF_RENDER_DELAY,
   PDF_SCALE,
-  ROTATE_OFFSET,
   selectionBox,
+  selectionExtent,
+  selectionFrame,
   selectionHandle,
   SIZES,
   textFont,
   textSize,
   textWidth,
   touches,
-  transformStrokes,
+  transformGroup,
+  turnAbout,
   type Box,
   type Comment,
-  type Corner,
   type Eraser,
   type Handle,
   type Point,
@@ -68,9 +68,10 @@ import {
 
 /** The view: screen pixels per world unit, and where the world's origin is on the stage, from its top left. */
 type View = { zoom: number; x: number; y: number };
-/** A drag of a floating element: moving it, turning it about its center, or scaling it (keeping its shape) from the
- * corner opposite the one dragged; as it was when the drag started, and whether it's moved yet (a click doesn't). */
-type ElementDrag = { pointerId: number; id: string; handle: Handle; from: Point; original: FloatingElement; moved: boolean };
+/** A drag transforming the selection, its strokes and floating elements together: as well as the strokes', the
+ * elements as they were when it started, how far the box they were in was turned, the least it may scale them by (so
+ * none gets too small to grab), and whether it's moved yet (a click doesn't). */
+type GroupTransform = Transform & { boxAngle: number; elements: FloatingElement[]; min: number; moved: boolean };
 
 const MIN_ZOOM = 0.05;
 const MAX_ZOOM = 8;
@@ -86,7 +87,7 @@ const HISTORY_LIMIT = 100;
 
 /** How far a drag goes, in screen pixels, before it moves anything: a click on the selection shouldn't nudge it. */
 const DRAG_THRESHOLD = 3;
-/** The least a floating element's shorter side is scaled down to, in screen pixels at the zoom it's resized at. */
+/** The least a floating element's shorter side is scaled down to (unless it's already smaller), in screen pixels at the zoom it's resized at. */
 const MIN_ELEMENT_SIDE = 24;
 /** A pinned PDF page's render's longest side, in device pixels. */
 const MAX_PDF_SIDE = 4096;
@@ -98,44 +99,18 @@ const FIT_PADDING = 48;
 /** The tools' keys (E picks the eraser last used). */
 const SHORTCUTS: Record<string, Tool> = { v: "select", p: "draw", e: "lasso-erase", r: "rect", o: "circle", l: "line", a: "arrow", t: "text", c: "comment", h: "pan" };
 
-/** A floating element's box as it would be upright (before it's turned by its `angle`), and its center. */
-const elementBox = (e: FloatingElement): Box => ({ left: e.x, top: e.y, right: e.x + e.w, bottom: e.y + e.h });
-const elementCenter = (e: FloatingElement): Point => ({ x: e.x + e.w / 2, y: e.y + e.h / 2 });
-
-/** A point turned by `angle` (radians) about `center`. */
-function turn(point: Point, center: Point, angle: number): Point {
-  if (!angle) return point;
-  const cos = Math.cos(angle);
-  const sin = Math.sin(angle);
-  const dx = point.x - center.x;
-  const dy = point.y - center.y;
-  return { x: center.x + dx * cos - dy * sin, y: center.y + dx * sin + dy * cos };
-}
-
 /** A world point in a floating element's own frame (turned back about its center), to test against its upright box. */
-const toElementFrame = (e: FloatingElement, point: Point): Point => turn(point, elementCenter(e), -(e.angle ?? 0));
+const toElementFrame = (e: FloatingElement, point: Point): Point => turnAbout(point, frameCenter(e), -(e.angle ?? 0));
 
-/** The box around a floating element as it's shown, turned. */
-function elementBounds(e: FloatingElement): Box {
-  if (!e.angle) return elementBox(e);
-  const corners = Object.values(boxCorners(elementBox(e))).map((p) => turn(p, elementCenter(e), e.angle ?? 0));
-  return {
-    left: Math.min(...corners.map((p) => p.x)),
-    top: Math.min(...corners.map((p) => p.y)),
-    right: Math.max(...corners.map((p) => p.x)),
-    bottom: Math.max(...corners.map((p) => p.y)),
-  };
-}
-
-/** An angle brought into (-π, π], so an element turned round and round doesn't save ever larger ones. */
-const normalizeAngle = (angle: number) => Math.atan2(Math.sin(angle), Math.cos(angle));
+/** A world point in the selection's frame (turned back about its box's center), to test against its handles. */
+const toSelectionFrame = (frame: { box: Box; angle: number }, point: Point): Point => turnAbout(point, boxCenter(frame.box), -frame.angle);
 const isPdfFile = (file: File) => file.type === "application/pdf" || /\.pdf$/i.test(file.name);
 const isImageFile = (file: File) => file.type.startsWith("image/");
 
 /** The box around everything on a board, or null for an empty one. */
 function contentBounds(doc: WhiteboardDoc): Box | null {
   const boxes: Box[] = [
-    ...doc.elements.map(elementBounds),
+    ...doc.elements.map(frameBounds),
     ...(doc.strokes.length ? [selectionBox(doc.strokes)] : []),
     ...doc.comments.map((c) => ({ left: c.x, top: c.y, right: c.x, bottom: c.y })),
   ];
@@ -158,9 +133,10 @@ function contentBounds(doc: WhiteboardDoc): Box | null {
  * `onChange`. A `value` that changes from outside (anything but the last JSON handed out) is loaded afresh. With a
  * `spaceId`, images and PDFs can be inserted (the toolbar's button, a drop or a paste): they're uploaded to the space.
  *
- * With the Select tool, a click picks a floating element (or a stroke): it can then be dragged, scaled from its
- * corners, restacked, deleted or, for a PDF, turned to another page, from the mini-toolbar over it. A loop around
- * strokes picks them, as in the lightbox. Ctrl/Cmd+Z and Ctrl/Cmd+Shift+Z undo and redo.
+ * With the Select tool, a click picks a stroke or a floating element, and a loop picks the strokes and elements it
+ * goes round: whatever's picked is dragged, turned and scaled from its corners together. Picked elements can be
+ * restacked or deleted from the mini-toolbar over them, and one alone opened or, for a PDF, turned to another page.
+ * Ctrl/Cmd+Z and Ctrl/Cmd+Shift+Z undo and redo.
  */
 export default function WhiteboardView({
   value,
@@ -240,23 +216,24 @@ export default function WhiteboardView({
   const shiftFrom = useRef<Tool | null>(null);
   const activeTool: Tool = !editable || spaceHeld ? "pan" : tool;
 
-  // The strokes picked (those of them still on the board), and the floating element picked.
+  // The strokes and the floating elements (by id) picked, those of them still on the board, and the box their
+  // handles go round.
   const [selected, setSelected] = useState<Set<Stroke>>(() => new Set());
   const selection = doc.strokes.filter((s) => selected.has(s));
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const selectedElement = doc.elements.find((e) => e.id === selectedId) ?? null;
+  const [selectedElements, setSelectedElements] = useState<Set<string>>(() => new Set());
+  const pickedElements = doc.elements.filter((e) => selectedElements.has(e.id));
+  const frame = selectionFrame(selection, pickedElements);
   // The cursor over the selection's handles.
   const [hover, setHover] = useState<string | null>(null);
 
   // Pointers down panning (one) or pinching (two), where they last were; the stroke being drawn; the stroke
-  // eraser's drag; the lasso being drawn; the drag transforming the picked strokes; and the drag of an element.
+  // eraser's drag; the lasso being drawn; and the drag transforming what's picked.
   const pointers = useRef(new Map<number, Point>());
   const [panning, setPanning] = useState(false);
   const drawing = useRef<{ pointerId: number; stroke: Stroke } | null>(null);
   const erasing = useRef<{ pointerId: number; reach: number } | null>(null);
   const selecting = useRef<{ pointerId: number; points: Point[]; erase: boolean } | null>(null);
-  const transforming = useRef<(Transform & { moved: boolean }) | null>(null);
-  const elementDrag = useRef<ElementDrag | null>(null);
+  const transforming = useRef<GroupTransform | null>(null);
 
   const [textEntry, setTextEntry] = useState<TextEntry | null>(null);
   const textEntryRef = useRef(textEntry);
@@ -325,7 +302,7 @@ export default function WhiteboardView({
   const setComments = (update: (comments: Comment[]) => Comment[]) => setDoc((d) => ({ ...d, comments: update(d.comments) }));
 
   /** Whether a drag is under way, during which the history can't move. */
-  const dragging = () => !!(drawing.current || erasing.current || selecting.current || transforming.current || elementDrag.current);
+  const dragging = () => !!(drawing.current || erasing.current || selecting.current || transforming.current);
 
   function undo() {
     if (busy || dragging()) return;
@@ -353,7 +330,7 @@ export default function WhiteboardView({
 
   function dropSelection() {
     setSelected(new Set());
-    setSelectedId(null);
+    setSelectedElements(new Set());
     setHover(null);
   }
 
@@ -364,15 +341,15 @@ export default function WhiteboardView({
   }
 
   function deleteSelection() {
-    if (selectedElement) {
-      const id = selectedElement.id;
-      setElements((all) => all.filter((e) => e.id !== id));
-      setSelectedId(null);
-    } else if (selection.length) {
-      const gone = new Set(selection);
-      setStrokes((all) => all.filter((s) => !gone.has(s)));
-      setSelected(new Set());
-    }
+    const strokes = new Set(selection);
+    const elements = new Set(pickedElements.map((e) => e.id));
+    setDoc((d) => ({
+      ...d,
+      strokes: strokes.size ? d.strokes.filter((s) => !strokes.has(s)) : d.strokes,
+      elements: elements.size ? normalizeZ(d.elements.filter((e) => !elements.has(e.id))) : d.elements,
+    }));
+    setSelected(new Set());
+    setSelectedElements(new Set());
   }
 
   // ---- The view ----
@@ -513,7 +490,7 @@ export default function WhiteboardView({
     else if (newComment || expanded) {
       setNewComment(null);
       setExpanded(null);
-    } else if ((selectedElement || selection.length) && !dragging()) dropSelection();
+    } else if (frame && !dragging()) dropSelection();
     else if (onEscape) onEscape();
     else return false;
     return true;
@@ -530,7 +507,7 @@ export default function WhiteboardView({
     else if (mod && key === "y") redo();
     else if (mod && key === "s") onSave?.();
     else if (e.key === "Delete" || e.key === "Backspace") {
-      if (!(selectedElement || selection.length) || dragging()) handled = false;
+      if (!frame || dragging()) handled = false;
       else deleteSelection();
     } else if (e.key === " ") {
       if (!e.repeat) setSpaceHeld(true);
@@ -614,7 +591,7 @@ export default function WhiteboardView({
         setDoc((d) => ({ ...d, elements: normalizeZ([...d.elements, { ...element, z: d.elements.length }]) }));
         setTool("select");
         setSelected(new Set());
-        setSelectedId(element.id);
+        setSelectedElements(new Set([element.id]));
       } catch (err) {
         setError(`Could not add ${file.name} (${message(err)}).`);
       } finally {
@@ -641,16 +618,17 @@ export default function WhiteboardView({
   }
 
   function restackSelected(move: "forward" | "backward" | "front" | "back") {
-    if (selectedElement) setElements((all) => restack(all, selectedElement.id, move));
+    const ids = new Set(pickedElements.map((e) => e.id));
+    if (ids.size) setElements((all) => restack(all, ids, move));
   }
 
   // ---- Drawing ----
 
-  // The canvas shows the strokes, over the elements: redrawn whole when they or the view change. Before paint, so a
-  // pan or zoom doesn't flash it blank.
-  useLayoutEffect(redraw, [doc.strokes, selected, view, stageSize, busy]);
+  // The canvas shows the strokes, over the elements, and the selection's box: redrawn whole when they or the view
+  // change. Before paint, so a pan or zoom doesn't flash it blank.
+  useLayoutEffect(redraw, [doc.strokes, doc.elements, selected, selectedElements, view, stageSize, busy]);
 
-  /** Redraw the canvas whole, with the stroke being drawn, the lasso being drawn and the picked strokes' box. */
+  /** Redraw the canvas whole, with the stroke being drawn, the lasso being drawn and the selection's box. */
   function redraw() {
     const canvas = canvasRef.current;
     const context = canvas?.getContext("2d");
@@ -662,9 +640,10 @@ export default function WhiteboardView({
     const current = drawing.current?.stroke;
     drawStrokes(context, current ? [...doc.strokes, current] : doc.strokes);
     if (selecting.current) drawLassoOutline(context, selecting.current.points, view.zoom);
+    // While it's turned, the box it started in is drawn turned with it (the box around it now would grow and shrink).
     const transform = transforming.current;
-    if (transform?.handle === "rotate") drawSelection(context, transform.box, view.zoom, transform.angle);
-    else if (selection.length) drawSelection(context, selectionBox(selection), view.zoom, 0);
+    if (transform?.handle === "rotate") drawSelection(context, transform.box, view.zoom, transform.boxAngle + transform.angle);
+    else if (frame) drawSelection(context, frame.box, view.zoom, frame.angle);
   }
 
   // The canvas covers the stage in device pixels, within a canvas's limits.
@@ -694,45 +673,37 @@ export default function WhiteboardView({
    * always pans. */
   const draws = (e: ReactPointerEvent) => editable && activeTool !== "pan" && (e.pointerType === "pen" || e.pointerType === "mouse");
 
-  function startElementDrag(element: FloatingElement, handle: Handle, from: Point, pointerId: number) {
-    elementDrag.current = { pointerId, id: element.id, handle, from, original: element, moved: false };
+  /** Start a drag of the selection's `handle`: the strokes and elements given, in the selection's box (as `frame`). */
+  function startTransform(strokes: Stroke[], elements: FloatingElement[], frame: { box: Box; angle: number }, handle: Handle, from: Point, pointerId: number) {
+    const smallest = Math.min(...elements.map((e) => Math.min(e.w, e.h)));
+    const min = elements.length ? Math.min(1, MIN_ELEMENT_SIDE / view.zoom / smallest) : 0;
+    transforming.current = { pointerId, handle, from, box: frame.box, boxAngle: frame.angle, originals: strokes, current: strokes, elements, angle: 0, min, moved: false };
     setBusy(true);
   }
 
-  /** The select tool's press: on the picked element's or strokes' handles, transform them; on a stroke or an
-   * element, pick it (and drag it); anywhere else, drop the selection and start a lasso. */
+  /** Pick just one stroke or element, and start dragging it. */
+  function pickAndDrag(strokes: Stroke[], elements: FloatingElement[], from: Point, pointerId: number) {
+    setSelected(new Set(strokes));
+    setSelectedElements(new Set(elements.map((e) => e.id)));
+    const picked = selectionFrame(strokes, elements);
+    if (picked) startTransform(strokes, elements, picked, "move", from, pointerId);
+  }
+
+  /** The select tool's press: on the selection's handles, transform all of it; on a stroke or an element, pick it
+   * (and drag it); anywhere else, drop the selection and start a lasso. */
   function selectDown(point: Point, pointerId: number) {
     const { zoom } = view;
-    if (selectedElement) {
+    if (frame) {
       // Its handles turn with it: the point's turned back to meet them on its upright box.
-      const handle = selectionHandle(elementBox(selectedElement), toElementFrame(selectedElement, point), zoom);
-      if (handle) return startElementDrag(selectedElement, handle, point, pointerId);
-    }
-    if (selection.length) {
-      const box = selectionBox(selection);
-      const handle = selectionHandle(box, point, zoom);
-      if (handle) {
-        transforming.current = { pointerId, handle, from: point, box, originals: selection, current: selection, angle: 0, moved: false };
-        setBusy(true);
-        return;
-      }
+      const handle = selectionHandle(frame.box, toSelectionFrame(frame, point), zoom);
+      if (handle) return startTransform(selection, pickedElements, frame, handle, point, pointerId);
     }
     // Ink is drawn over the elements, so it's picked first.
     const reach = ERASER_MIN_REACH / zoom;
     const stroke = [...doc.strokes].reverse().find((s) => touches(s, point, reach));
-    if (stroke) {
-      setSelectedId(null);
-      setSelected(new Set([stroke]));
-      transforming.current = { pointerId, handle: "move", from: point, box: selectionBox([stroke]), originals: [stroke], current: [stroke], angle: 0, moved: false };
-      setBusy(true);
-      return;
-    }
+    if (stroke) return pickAndDrag([stroke], [], point, pointerId);
     const element = elementAt(point);
-    if (element) {
-      setSelected(new Set());
-      setSelectedId(element.id);
-      return startElementDrag(element, "move", point, pointerId);
-    }
+    if (element) return pickAndDrag([], [element], point, pointerId);
     dropSelection();
     selecting.current = { pointerId, points: [point], erase: false };
   }
@@ -820,44 +791,17 @@ export default function WhiteboardView({
     }
     const transform = transforming.current;
     if (transform?.pointerId === e.pointerId) {
-      // Transformed from the strokes as they were when the drag started, so its steps' rounding doesn't add up.
+      // Transformed from the strokes and elements as they were when the drag started, so its steps' rounding doesn't
+      // add up. An element scaled keeps its shape.
       const point = worldPoint(e);
       if (!point || (!transform.moved && !pastThreshold(transform.from, point))) return;
       transform.moved = true;
-      const { strokes: next, angle } = transformStrokes(transform.originals, transform.box, transform.handle, transform.from, point);
-      transform.angle = angle;
-      replaceStrokes(new Map(transform.current.map((s, i) => [s, next[i]])));
-      transform.current = next;
-      return;
-    }
-    const drag = elementDrag.current;
-    if (drag?.pointerId === e.pointerId) {
-      const point = worldPoint(e);
-      if (!point || (!drag.moved && !pastThreshold(drag.from, point))) return;
-      drag.moved = true;
-      const o = drag.original;
-      let next: FloatingElement;
-      if (drag.handle === "move") {
-        next = { ...o, x: o.x + point.x - drag.from.x, y: o.y + point.y - drag.from.y };
-      } else if (drag.handle === "rotate") {
-        // Turned about its center by as far as the pointer has gone round it.
-        const c = elementCenter(o);
-        const angle = (o.angle ?? 0) + Math.atan2(point.y - c.y, point.x - c.x) - Math.atan2(drag.from.y - c.y, drag.from.x - c.x);
-        next = { ...o, angle: normalizeAngle(angle) };
-      } else {
-        // Scaled evenly, so an image or a page keeps its shape, from the corner opposite the one dragged: worked out
-        // in its own (upright) frame, then its new center's turned back, so that corner stays put on the board.
-        const box = elementBox(o);
-        const c = elementCenter(o);
-        const min = MIN_ELEMENT_SIDE / view.zoom / Math.min(o.w, o.h);
-        const scale = cornerScale(box, drag.handle, toElementFrame(o, drag.from), toElementFrame(o, point), min);
-        const anchor = boxCorners(box)[OPPOSITE[drag.handle]];
-        const center = turn({ x: anchor.x + (c.x - anchor.x) * scale, y: anchor.y + (c.y - anchor.y) * scale }, c, o.angle ?? 0);
-        const w = o.w * scale;
-        const h = o.h * scale;
-        next = { ...o, x: center.x - w / 2, y: center.y - h / 2, w, h };
-      }
-      setElements((all) => all.map((el) => (el.id === drag.id ? next : el)));
+      const next = transformGroup(transform.originals, transform.elements, transform.box, transform.boxAngle, transform.handle, transform.from, point, transform.min);
+      transform.angle = next.angle;
+      if (next.strokes.length) replaceStrokes(new Map(transform.current.map((s, i) => [s, next.strokes[i]])));
+      transform.current = next.strokes;
+      const moved = new Map(next.frames.map((el) => [el.id, el]));
+      if (moved.size) setElements((all) => all.map((el) => moved.get(el.id) ?? el));
       return;
     }
     const lassoing = selecting.current;
@@ -901,14 +845,8 @@ export default function WhiteboardView({
 
   /** The cursor over a point with the select tool. */
   function hoverCursor(point: Point): string | null {
-    if (selectedElement) {
-      const handle = selectionHandle(elementBox(selectedElement), toElementFrame(selectedElement, point), view.zoom);
-      if (handle) return HANDLE_CURSORS[handle];
-    }
-    if (selection.length) {
-      const handle = selectionHandle(selectionBox(selection), point, view.zoom);
-      if (handle) return HANDLE_CURSORS[handle];
-    }
+    const handle = frame && selectionHandle(frame.box, toSelectionFrame(frame, point), view.zoom);
+    if (handle) return HANDLE_CURSORS[handle];
     return elementAt(point) ? "cursor-move" : null;
   }
 
@@ -918,13 +856,8 @@ export default function WhiteboardView({
     if (transforming.current?.pointerId === e.pointerId) {
       transforming.current = null;
       setBusy(false);
-      // A turned selection's box was drawn turned; it's redrawn upright, around where the strokes are now.
+      // A turned selection's box was drawn turned; it's redrawn around where everything is now.
       setSelected((picked) => new Set(picked));
-      return;
-    }
-    if (elementDrag.current?.pointerId === e.pointerId) {
-      elementDrag.current = null;
-      setBusy(false);
       return;
     }
     if (erasing.current?.pointerId === e.pointerId) {
@@ -936,16 +869,13 @@ export default function WhiteboardView({
     if (lassoing?.pointerId === e.pointerId) {
       selecting.current = null;
       // A lasso picks (or the lasso eraser deletes) the strokes it wholly encloses and the floating elements whose
-      // centers it encloses; one that encloses nothing (a click) just clears its outline. Strokes or one element are
-      // picked, not both: the strokes, if it caught any, else the topmost element.
+      // centers it encloses, all together; one that encloses nothing (a click) just clears its outline.
       if (lassoing.points.length < 3) return redraw();
       const inside = new Set(doc.strokes.filter((s) => lassoed(s, lassoing.points)));
-      const caught = doc.elements.filter((el) => insideLoop(elementCenter(el), lassoing.points));
+      const caught = doc.elements.filter((el) => insideLoop(frameCenter(el), lassoing.points));
       if (!lassoing.erase) {
-        const top = caught.reduce<FloatingElement | null>((a, b) => (!a || b.z > a.z ? b : a), null);
         setSelected(inside);
-        setSelectedId(inside.size || !top ? null : top.id);
-        if (!inside.size) redraw();
+        setSelectedElements(new Set(caught.map((el) => el.id)));
       } else if (inside.size || caught.length) {
         const gone = new Set(caught.map((el) => el.id));
         setDoc((d) => ({
@@ -953,7 +883,7 @@ export default function WhiteboardView({
           strokes: inside.size ? d.strokes.filter((s) => !inside.has(s)) : d.strokes,
           elements: gone.size ? normalizeZ(d.elements.filter((el) => !gone.has(el.id))) : d.elements,
         }));
-        if (selectedId && gone.has(selectedId)) setSelectedId(null);
+        setSelectedElements((picked) => (gone.size ? new Set([...picked].filter((id) => !gone.has(id))) : picked));
         if (!inside.size) redraw();
       } else redraw();
       return;
@@ -999,8 +929,7 @@ export default function WhiteboardView({
 
   const world: CSSProperties = { transform: `translate(${view.x}px, ${view.y}px) scale(${view.zoom})`, transformOrigin: "0 0" };
   const stacked = [...doc.elements].sort((a, b) => a.z - b.z);
-  const elementDragging = busy && !!elementDrag.current;
-  const handleSize = HANDLE_SIZE / view.zoom;
+  const transformingNow = busy && !!transforming.current;
   const status = uploads > 0 ? `Uploading ${uploads > 1 ? `${uploads} files` : "file"}…` : null;
 
   return (
@@ -1134,57 +1063,8 @@ export default function WhiteboardView({
           ))}
         </div>
         <canvas ref={canvasRef} width={canvasWidth} height={canvasHeight} className="pointer-events-none absolute inset-0 h-full w-full" />
-        {/* Over the markup: the picked element's frame, comments and the text being typed, in world units too. */}
+        {/* Over the markup: comments and the text being typed, in world units too. */}
         <div className="absolute left-0 top-0" style={world}>
-          {selectedElement && (
-            <div
-              aria-hidden
-              className="pointer-events-none absolute"
-              style={{
-                left: selectedElement.x,
-                top: selectedElement.y,
-                width: selectedElement.w,
-                height: selectedElement.h,
-                transform: rotation(selectedElement),
-                outline: `${2 / view.zoom}px solid var(--dc-accent)`,
-              }}
-            >
-              {/* The rotate handle, on a stalk above the top's middle. */}
-              <span
-                className="absolute"
-                style={{
-                  left: selectedElement.w / 2 - 0.75 / view.zoom,
-                  top: -ROTATE_OFFSET / view.zoom,
-                  width: 1.5 / view.zoom,
-                  height: ROTATE_OFFSET / view.zoom,
-                  background: "var(--dc-accent)",
-                }}
-              />
-              <span
-                className="absolute rounded-full border border-neutral-900 bg-white"
-                style={{
-                  width: handleSize,
-                  height: handleSize,
-                  borderWidth: 1.5 / view.zoom,
-                  left: selectedElement.w / 2 - handleSize / 2,
-                  top: -ROTATE_OFFSET / view.zoom - handleSize / 2,
-                }}
-              />
-              {(["nw", "ne", "se", "sw"] as Corner[]).map((corner) => (
-                <span
-                  key={corner}
-                  className="absolute border border-neutral-900 bg-white"
-                  style={{
-                    width: handleSize,
-                    height: handleSize,
-                    borderWidth: 1.5 / view.zoom,
-                    left: (corner === "nw" || corner === "sw" ? 0 : selectedElement.w) - handleSize / 2,
-                    top: (corner === "nw" || corner === "ne" ? 0 : selectedElement.h) - handleSize / 2,
-                  }}
-                />
-              ))}
-            </div>
-          )}
           {editable && textEntry && (
             <input
               ref={textInputRef}
@@ -1252,14 +1132,15 @@ export default function WhiteboardView({
             />
           )}
         </div>
-        {selectedElement && !elementDragging && (
+        {frame && pickedElements.length > 0 && !transformingNow && (
           <ElementToolbar
-            element={selectedElement}
+            elements={pickedElements}
+            extent={selectionExtent(frame.box, frame.angle, view.zoom)}
             view={view}
             stageWidth={stageSize.width}
             onRestack={restackSelected}
-            onPage={(page) => void setElementPage(selectedElement.id, page)}
-            onOpen={() => setOpened(selectedElement)}
+            onPage={(id, page) => void setElementPage(id, page)}
+            onOpen={setOpened}
             onDelete={deleteSelection}
           />
         )}
@@ -1334,11 +1215,13 @@ function gridStyle(view: View): CSSProperties {
 }
 
 /**
- * The picked element's mini-toolbar, over it (or under it, if it's near the stage's top): restack it, turn a PDF's
- * page, open it fullscreen, or delete it. In screen pixels, so it stays the same size as the view zooms.
+ * The picked elements' mini-toolbar, over the selection (or under it, if it's near the stage's top): restack them or
+ * delete the selection, and, for an element picked alone, open it fullscreen or turn a PDF's page. In screen pixels,
+ * so it stays the same size as the view zooms.
  */
 function ElementToolbar({
-  element,
+  elements,
+  extent,
   view,
   stageWidth,
   onRestack,
@@ -1346,41 +1229,41 @@ function ElementToolbar({
   onOpen,
   onDelete,
 }: {
-  element: FloatingElement;
+  elements: FloatingElement[];
+  /** The box around the selection as it's shown and its rotate handle, in world units, which it keeps clear of. */
+  extent: Box;
   view: View;
   stageWidth: number;
   onRestack: (move: "forward" | "backward" | "front" | "back") => void;
-  onPage: (page: number) => void;
-  onOpen: () => void;
+  onPage: (id: string, page: number) => void;
+  onOpen: (element: FloatingElement) => void;
   onDelete: () => void;
 }) {
-  const { doc } = usePdf(element.kind === "pdf" ? element.src : null);
+  const element = elements.length === 1 ? elements[0] : null;
+  const pdf = element?.kind === "pdf" ? element : null;
+  const { doc } = usePdf(pdf?.src ?? null);
   const pages = doc?.numPages ?? null;
-  const page = element.page ?? 0;
+  const page = pdf?.page ?? 0;
   const [pageDraft, setPageDraft] = useState(String(page + 1));
   useEffect(() => setPageDraft(String(page + 1)), [page]);
 
-  // Clear of the element as it's turned, and of its rotate handle, so it never covers the handle.
-  const bounds = elementBounds(element);
-  const handle = turn({ x: element.x + element.w / 2, y: element.y - ROTATE_OFFSET / view.zoom }, elementCenter(element), element.angle ?? 0);
-  const handleReach = HANDLE_SIZE / view.zoom;
-  const top = Math.min(bounds.top, handle.y - handleReach) * view.zoom + view.y;
-  const bottom = Math.max(bounds.bottom, handle.y + handleReach) * view.zoom + view.y;
+  const top = extent.top * view.zoom + view.y;
+  const bottom = extent.bottom * view.zoom + view.y;
   const above = top > 52;
   // Kept on the stage, roughly half its own width in from either side.
-  const half = element.kind === "pdf" ? 230 : 130;
-  const center = Math.min(Math.max(((bounds.left + bounds.right) / 2) * view.zoom + view.x, half), Math.max(half, stageWidth - half));
+  const half = pdf ? 230 : element ? 130 : 110;
+  const center = Math.min(Math.max(((extent.left + extent.right) / 2) * view.zoom + view.x, half), Math.max(half, stageWidth - half));
 
   function commitPage() {
     const next = Number(pageDraft);
-    if (Number.isFinite(next) && next >= 1 && next - 1 !== page) onPage(next - 1);
+    if (pdf && Number.isFinite(next) && next >= 1 && next - 1 !== page) onPage(pdf.id, next - 1);
     else setPageDraft(String(page + 1));
   }
 
   return (
     <div
       role="toolbar"
-      aria-label={element.kind === "pdf" ? "PDF" : "Image"}
+      aria-label={pdf ? "PDF" : element ? "Image" : "Selection"}
       className="absolute z-10 flex items-center gap-0.5 whitespace-nowrap rounded-lg border border-border-default bg-surface-raised px-1 py-0.5 shadow-xl"
       style={{ left: center, top: above ? top - 8 : bottom + 8, transform: `translate(-50%, ${above ? "-100%" : "0"})` }}
       onPointerDown={(e) => e.stopPropagation()}
@@ -1398,10 +1281,10 @@ function ElementToolbar({
       <Segment on={false} label="Send to back" onClick={() => onRestack("back")}>
         <ToolIcon path="M8 2.5v9 M4.5 8L8 11.5 11.5 8 M3 13.5h10" />
       </Segment>
-      {element.kind === "pdf" && (
+      {pdf && (
         <>
           <ToolbarDivider />
-          <Segment on={false} label="Previous page" disabled={page <= 0} onClick={() => onPage(page - 1)}>
+          <Segment on={false} label="Previous page" disabled={page <= 0} onClick={() => onPage(pdf.id, page - 1)}>
             ‹
           </Segment>
           <label className="flex items-center gap-1 font-mono text-xs text-text-secondary">
@@ -1425,15 +1308,17 @@ function ElementToolbar({
             />
             <span>/ {pages ?? "…"}</span>
           </label>
-          <Segment on={false} label="Next page" disabled={pages === null || page >= pages - 1} onClick={() => onPage(page + 1)}>
+          <Segment on={false} label="Next page" disabled={pages === null || page >= pages - 1} onClick={() => onPage(pdf.id, page + 1)}>
             ›
           </Segment>
         </>
       )}
       <ToolbarDivider />
-      <Segment on={false} label="Open fullscreen" onClick={onOpen}>
-        <ToolIcon path="M9.5 2.5h4v4 M13.5 2.5L9 7 M6.5 13.5h-4v-4 M2.5 13.5L7 9" />
-      </Segment>
+      {element && (
+        <Segment on={false} label="Open fullscreen" onClick={() => onOpen(element)}>
+          <ToolIcon path="M9.5 2.5h4v4 M13.5 2.5L9 7 M6.5 13.5h-4v-4 M2.5 13.5L7 9" />
+        </Segment>
+      )}
       <Segment on={false} label="Delete (Del)" onClick={onDelete}>
         <ToolIcon path="M2.5 4.5h11 M6 4.5V3h4v1.5 M4 4.5l.7 9h6.6l.7-9 M6.8 7v4.5 M9.2 7v4.5" />
       </Segment>

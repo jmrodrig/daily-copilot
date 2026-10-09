@@ -41,6 +41,9 @@ export type Handle = "move" | "rotate" | Corner;
 /** A drag transforming the selection: the strokes as they were when it started, as they are now (in `strokes`), the
  * box they were in, where it started, and the angle it's turned them by so far. */
 export type Transform = { pointerId: number; handle: Handle; from: Point; box: Box; originals: Stroke[]; current: Stroke[]; angle: number };
+/** A box placed on the surface, turned by `angle` (radians, clockwise on screen) about its center: a whiteboard's
+ * floating element. */
+export type Frame = { x: number; y: number; w: number; h: number; angle?: number };
 
 export const isShape = (type: Tool) => type === "line" || type === "arrow" || type === "rect" || type === "circle";
 export const isEraser = (type: Tool): type is Eraser => type === "erase" || type === "lasso-erase";
@@ -358,6 +361,69 @@ export function selectionBox(strokes: Stroke[]): Box {
   return box;
 }
 
+/** The box around points. */
+function boundsOf(points: Point[]): Box {
+  return {
+    left: Math.min(...points.map((p) => p.x)),
+    top: Math.min(...points.map((p) => p.y)),
+    right: Math.max(...points.map((p) => p.x)),
+    bottom: Math.max(...points.map((p) => p.y)),
+  };
+}
+
+/** The box around two boxes. */
+const union = (a: Box, b: Box): Box => ({
+  left: Math.min(a.left, b.left),
+  top: Math.min(a.top, b.top),
+  right: Math.max(a.right, b.right),
+  bottom: Math.max(a.bottom, b.bottom),
+});
+
+/** A point turned by `angle` (radians) about `center`. */
+export function turnAbout(point: Point, center: Point, angle: number): Point {
+  if (!angle) return point;
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+  const dx = point.x - center.x;
+  const dy = point.y - center.y;
+  return { x: center.x + dx * cos - dy * sin, y: center.y + dx * sin + dy * cos };
+}
+
+/** An angle brought into (-π, π], so a frame turned round and round doesn't save ever larger ones. */
+const normalizeAngle = (angle: number) => Math.atan2(Math.sin(angle), Math.cos(angle));
+
+/** A frame's box as it would be upright (before it's turned by its `angle`), and its center. */
+export const frameBox = (f: Frame): Box => ({ left: f.x, top: f.y, right: f.x + f.w, bottom: f.y + f.h });
+export const frameCenter = (f: Frame): Point => ({ x: f.x + f.w / 2, y: f.y + f.h / 2 });
+
+/** The box around a frame as it's shown, turned. */
+export function frameBounds(f: Frame): Box {
+  if (!f.angle) return frameBox(f);
+  return boundsOf(Object.values(boxCorners(frameBox(f))).map((p) => turnAbout(p, frameCenter(f), f.angle ?? 0)));
+}
+
+/** The box around strokes' ink and frames as they're shown. */
+export function groupBox(strokes: Stroke[], frames: Frame[]): Box {
+  return frames.map(frameBounds).reduce(union, selectionBox(strokes));
+}
+
+/** The box a selection's handles go round, and how far it's turned: a frame picked alone's own box, turned as it
+ * is; anything else's box around all of it, upright; or null for nothing picked. */
+export function selectionFrame(strokes: Stroke[], frames: Frame[]): { box: Box; angle: number } | null {
+  if (!strokes.length && frames.length === 1) return { box: frameBox(frames[0]), angle: frames[0].angle ?? 0 };
+  return strokes.length || frames.length ? { box: groupBox(strokes, frames), angle: 0 } : null;
+}
+
+/** The box around a selection's box, turned by `angle`, and its rotate handle, at `zoom`: what's to be kept clear
+ * of it. */
+export function selectionExtent(box: Box, angle: number, zoom: number): Box {
+  const center = boxCenter(box);
+  const reach = HANDLE_SIZE / zoom;
+  const handle = turnAbout(rotateHandle(box, zoom), center, angle);
+  const shown = boundsOf(Object.values(boxCorners(box)).map((p) => turnAbout(p, center, angle)));
+  return union(shown, { left: handle.x - reach, top: handle.y - reach, right: handle.x + reach, bottom: handle.y + reach });
+}
+
 export const boxCenter = (box: Box): Point => ({ x: (box.left + box.right) / 2, y: (box.top + box.bottom) / 2 });
 export const boxCorners = (box: Box): Record<Corner, Point> => ({
   nw: { x: box.left, y: box.top },
@@ -400,26 +466,57 @@ function asPath(stroke: Stroke): Stroke {
  * when it started: moved by it, turned about the box's center (by the angle returned), or scaled, evenly, from the
  * corner opposite the one dragged. */
 export function transformStrokes(strokes: Stroke[], box: Box, handle: Handle, from: Point, to: Point): { strokes: Stroke[]; angle: number } {
+  const { strokes: next, angle } = transformGroup(strokes, [], box, 0, handle, from, to);
+  return { strokes: next, angle };
+}
+
+/** A frame moved so its center is at `center`. */
+const centeredAt = <T extends Frame>(f: T, center: Point): T => ({ ...f, x: center.x - f.w / 2, y: center.y - f.h / 2 });
+
+/** Strokes and frames as a drag of the selection's `handle`, from `from` to `to`, leaves them all together, given
+ * the box they were in when it started and how far that's turned (`boxAngle`): moved by it; turned about the box's
+ * center (by the angle returned), each frame's center going round it and the frame turning with it; or scaled,
+ * evenly, from the corner opposite the one dragged, each frame's center drawn away from (or toward) that corner and
+ * its sides scaled too, by at least `min`. */
+export function transformGroup<T extends Frame>(
+  strokes: Stroke[],
+  frames: T[],
+  box: Box,
+  boxAngle: number,
+  handle: Handle,
+  from: Point,
+  to: Point,
+  min = 0,
+): { strokes: Stroke[]; frames: T[]; angle: number } {
   if (handle === "move") {
     const dx = to.x - from.x;
     const dy = to.y - from.y;
-    return { strokes: strokes.map((s) => mapStroke(s, (p) => ({ x: p.x + dx, y: p.y + dy }))), angle: 0 };
+    return {
+      strokes: strokes.map((s) => mapStroke(s, (p) => ({ x: p.x + dx, y: p.y + dy }))),
+      frames: frames.map((f) => ({ ...f, x: f.x + dx, y: f.y + dy })),
+      angle: 0,
+    };
   }
+  const center = boxCenter(box);
   if (handle === "rotate") {
-    const center = boxCenter(box);
     const angle = Math.atan2(to.y - center.y, to.x - center.x) - Math.atan2(from.y - center.y, from.x - center.x);
-    const cos = Math.cos(angle);
-    const sin = Math.sin(angle);
-    const turn = (p: Point) => ({
-      x: center.x + (p.x - center.x) * cos - (p.y - center.y) * sin,
-      y: center.y + (p.x - center.x) * sin + (p.y - center.y) * cos,
-    });
-    return { strokes: strokes.map((s) => mapStroke(asPath(s), turn, 1, angle)), angle };
+    const turn = (p: Point) => turnAbout(p, center, angle);
+    return {
+      strokes: strokes.map((s) => mapStroke(asPath(s), turn, 1, angle)),
+      frames: frames.map((f) => centeredAt({ ...f, angle: normalizeAngle((f.angle ?? 0) + angle) }, turn(frameCenter(f)))),
+      angle,
+    };
   }
-  const scale = cornerScale(box, handle, from, to);
-  const anchor = boxCorners(box)[OPPOSITE[handle]];
+  // Scaled in the box's own (upright) frame: the drag's turned back to meet it, and the corner it's scaled from is
+  // turned with it, so that corner stays put on the surface.
+  const scale = cornerScale(box, handle, turnAbout(from, center, -boxAngle), turnAbout(to, center, -boxAngle), Math.max(MIN_SCALE, min));
+  const anchor = turnAbout(boxCorners(box)[OPPOSITE[handle]], center, boxAngle);
   const grow = (p: Point) => ({ x: anchor.x + (p.x - anchor.x) * scale, y: anchor.y + (p.y - anchor.y) * scale });
-  return { strokes: strokes.map((s) => mapStroke(s, grow, scale)), angle: 0 };
+  return {
+    strokes: strokes.map((s) => mapStroke(s, grow, scale)),
+    frames: frames.map((f) => centeredAt({ ...f, w: f.w * scale, h: f.h * scale }, grow(frameCenter(f)))),
+    angle: 0,
+  };
 }
 
 /** How much a drag of a box's corner, from `from` to `to`, scales it, evenly, from the opposite corner: how far
