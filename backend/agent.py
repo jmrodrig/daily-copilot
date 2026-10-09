@@ -15,7 +15,8 @@ Context injected into the system prompt (see `space_context`):
 
 - the contents of every folder marked as Reference Data in the space;
 - when the user has a note open inside a Project folder, that project's open tasks
-  (and the tasks linked to the note).
+  (and the tasks linked to the note);
+- the local RAG folders configured for the space (Space Preferences), with what's at their top level.
 
 Writes go through `file_layer.write_note`, which enforces the access mode and records
 every change in `history`. In `ask_first` mode the file layer refuses the write with
@@ -26,6 +27,9 @@ approve (see `POST /api/notes/apply-edit`).
 import functools
 import glob
 import json
+import time
+import urllib.parse
+import urllib.request
 from collections.abc import Callable, Sequence
 from datetime import date
 from pathlib import Path
@@ -41,7 +45,7 @@ import local_files
 import spaces
 from config import Settings, get_settings
 from models import FolderMeta, Project, Space, Task
-from schemas import AccessMode, ChatMessage, ChatResponse, ProposedEdit, Status, ToolCallSummary
+from schemas import AccessMode, ChatMessage, ChatResponse, ProposedEdit, Status, ToolCallSummary, clean_rag_folders
 
 # History sources: the agent writing by itself, and the user approving a proposed edit.
 AGENT_SOURCE = "copilot_agent"
@@ -53,6 +57,23 @@ READ_LIMIT = 20_000  # characters of note content returned to the model
 _SNIPPET_RADIUS = 80
 REFERENCE_LIMIT = 40_000  # characters of Reference Data notes put into the system prompt
 CONTEXT_TASK_LIMIT = 50  # project tasks put into the system prompt
+RAG_FOLDER_LIMIT = 40  # entries of each RAG folder listed in the system prompt
+
+# The Gemini models the chat can use: listed from the API (cached for a while), or these if it can't be reached.
+GEMINI_MODELS_URL = "https://generativelanguage.googleapis.com/v1beta/models"
+FALLBACK_MODELS = (
+    "gemini-3.1-pro-preview",
+    "gemini-2.5-pro",
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-lite",
+    "gemini-1.5-pro",
+    "gemini-1.5-flash",
+)
+_MODELS_TIMEOUT_SECONDS = 5
+_MODELS_CACHE_SECONDS = 600
+_models_cache: tuple[float, list[str]] | None = None
 
 
 class AgentError(Exception):
@@ -344,11 +365,31 @@ def _task_line(task: dict[str, Any]) -> str:
     return "- " + " · ".join(parts)
 
 
+def _rag_block(folders: list[str]) -> str:
+    """The space's local RAG folders, each with (up to `RAG_FOLDER_LIMIT` of) its top-level files and subfolders."""
+    lines = ["\n\nConfigured Local RAG Folders for this space:"]
+    for folder in folders:
+        try:
+            listing = local_files.list_local_directory(folder)
+        except (local_files.LocalFileError, OSError) as exc:
+            lines.append(f"- {folder}: (not reachable: {exc})")
+            continue
+        names = [e["name"] + ("/" if e["type"] == "directory" else "") for e in listing["entries"][:RAG_FOLDER_LIMIT]]
+        more = listing["count"] - len(names)
+        lines.append(f"- {folder}: [{', '.join(names)}]" + (f" … and {more} more" if more > 0 else ""))
+    lines.append(
+        "Always search and read from these folders using `list_local_directory` and `read_local_file` when "
+        "answering questions about design data, specifications, vessels, and engineering files."
+    )
+    return "\n".join(lines)
+
+
 def space_context(space_id: int, note_path: str | None = None) -> tuple[str, str]:
     """(space name, extra system prompt text) for a chat in `space_id` with `note_path` open."""
     root = spaces.content_dir(space_id)
     with database.SessionLocal() as session:
         space = session.get(Space, space_id)
+        rag_folders = clean_rag_folders(space.rag_folders) if space else []
         metas = spaces.folder_metas(session, space_id)
         project_meta = spaces.project_folder_for(metas, note_path) if note_path else None
         project = session.get(Project, project_meta.project_id) if project_meta and project_meta.project_id else None
@@ -363,6 +404,9 @@ def space_context(space_id: int, note_path: str | None = None) -> tuple[str, str
     references = sorted(path for path, meta in metas.items() if meta.is_reference and (root / path).is_dir())
     if references:
         blocks.append(_reference_block(root, references))
+
+    if rag_folders:
+        blocks.append(_rag_block(rag_folders))
 
     if project is not None:
         tasks = list_tasks(space_id=space_id, project_id=project.id)["tasks"]
@@ -445,6 +489,56 @@ class _Turn:
             raise ToolError(str(exc)) from exc
 
 
+# --- Models -------------------------------------------------------------------
+
+
+def _fetch_gemini_models(api_key: str) -> list[str]:
+    """The names (without `models/`) of the Gemini models that can generate content, from the Gemini API."""
+    names, page_token = [], ""
+    while True:
+        query = {"key": api_key, "pageSize": 1000, **({"pageToken": page_token} if page_token else {})}
+        with urllib.request.urlopen(
+            f"{GEMINI_MODELS_URL}?{urllib.parse.urlencode(query)}", timeout=_MODELS_TIMEOUT_SECONDS
+        ) as response:
+            body = json.load(response)
+        for model in body.get("models", []):
+            name = str(model.get("name", "")).removeprefix("models/")
+            if name.startswith("gemini") and "generateContent" in model.get("supportedGenerationMethods", []):
+                names.append(name)
+        page_token = body.get("nextPageToken") or ""
+        if not page_token:
+            return names
+
+
+def list_models(settings: Settings | None = None) -> list[str]:
+    """The Gemini models the chat can use (bare names, e.g. `gemini-2.5-pro`), the configured one first.
+
+    Falls back to `FALLBACK_MODELS` when there is no API key or the API can't be reached.
+    """
+    global _models_cache
+    settings = settings or get_settings()
+    names: list[str] = []
+    if _models_cache is not None and time.monotonic() - _models_cache[0] < _MODELS_CACHE_SECONDS:
+        names = _models_cache[1]
+    elif settings.gemini_api_key is not None:
+        try:
+            names = _fetch_gemini_models(settings.gemini_api_key.get_secret_value())
+        except Exception:  # noqa: BLE001 - any failure (network, HTTP error, bad JSON) means the fallback list
+            names = []
+        if names:
+            _models_cache = (time.monotonic(), names)
+    configured = settings.chat_model.removeprefix("gemini/")
+    return list(dict.fromkeys([configured, *(names or FALLBACK_MODELS)]))
+
+
+def chat_model_id(model: str | None, settings: Settings) -> str:
+    """The litellm model string for a model picked in the chat (always a Gemini one), or the configured default."""
+    if not model or not model.strip():
+        return settings.chat_model
+    model = model.strip().removeprefix("models/")
+    return model if model.startswith("gemini/") else f"gemini/{model}"
+
+
 # --- Chat loop ----------------------------------------------------------------
 
 
@@ -473,10 +567,12 @@ def run_chat(
     *,
     space_id: int = spaces.DEFAULT_SPACE_ID,
     note_path: str | None = None,
+    model: str | None = None,
     settings: Settings | None = None,
 ) -> ChatResponse:
     """Answer the last user message in `space_id`, calling tools as the model asks, for up to
-    `MAX_TOOL_ROUNDS` rounds. `note_path` is the note the user has open, if any."""
+    `MAX_TOOL_ROUNDS` rounds. `note_path` is the note the user has open, if any; `model` the Gemini model picked
+    in the chat (else `settings.chat_model`)."""
     settings = settings or get_settings()
     if settings.gemini_api_key is None:
         raise AgentNotConfiguredError("COPILOT_GEMINI_API_KEY is not set; add it to backend/.env")
@@ -490,12 +586,13 @@ def run_chat(
     history: list[Any] = [{"role": "system", "content": system}]
     history += [{"role": m.role.value, "content": m.content} for m in messages]
     turn, summaries = _Turn(mode, space_id), []
+    chosen_model = chat_model_id(model, settings)
 
     for round_ in range(MAX_TOOL_ROUNDS + 1):
         last = round_ == MAX_TOOL_ROUNDS  # Out of rounds: make the model answer with what it has.
         try:
             response = litellm.completion(
-                model=settings.chat_model,
+                model=chosen_model,
                 api_key=settings.gemini_api_key.get_secret_value(),
                 messages=history,
                 tools=_tool_specs(mode),

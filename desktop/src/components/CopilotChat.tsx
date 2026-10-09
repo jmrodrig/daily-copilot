@@ -40,8 +40,15 @@ const MODES: { value: AccessMode; label: string }[] = [
   { value: "write_directly", label: "Write directly" },
 ];
 const MODE_KEY = "copilot.accessMode";
+// The Gemini model last picked in the chat (a bare name, e.g. "gemini-2.5-pro").
+const MODEL_KEY = "copilot_chat_model";
 const CONTEXT_LINES = 3;
 const COMMAND_RE = /^(\/[a-z0-9][a-z0-9_-]*)(?:\s+([\s\S]*))?$/i;
+
+/** A litellm model string without its provider (`gemini/gemini-2.5-pro` -> `gemini-2.5-pro`). */
+function bareModel(model: string): string {
+  return model.split("/").pop() ?? model;
+}
 
 function storedMode(): AccessMode {
   const value = localStorage.getItem(MODE_KEY);
@@ -132,7 +139,9 @@ export default function CopilotChat({
   const [mode, setMode] = useState<AccessMode>(storedMode);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [model, setModel] = useState<string | null>(null);
+  // The model picked (else the server's default, once known), and the ones on offer (GET /api/models).
+  const [model, setModel] = useState<string | null>(() => localStorage.getItem(MODEL_KEY));
+  const [models, setModels] = useState<string[]>([]);
   const [prompts, setPrompts] = useState<SavedPrompt[]>([]);
   const [menuIndex, setMenuIndex] = useState(0);
   const [menuDismissed, setMenuDismissed] = useState(false);
@@ -150,9 +159,17 @@ export default function CopilotChat({
 
   useEffect(() => {
     getJson<{ chat_model?: string }>("/health")
-      .then((data) => setModel(data.chat_model ?? null))
+      .then((data) => setModel((picked) => picked ?? (data.chat_model ? bareModel(data.chat_model) : null)))
+      .catch(() => {});
+    getJson<string[]>("/api/models")
+      .then(setModels)
       .catch(() => {});
   }, []);
+
+  function pickModel(next: string) {
+    setModel(next);
+    localStorage.setItem(MODEL_KEY, next);
+  }
 
   useEffect(() => {
     const load = () =>
@@ -239,6 +256,7 @@ export default function CopilotChat({
           access_mode: mode,
           space_id: spaceId,
           note_path: context.notePath,
+          model: model ?? undefined,
         }),
       });
       if (!res.ok) throw new Error(await errorDetail(res));
@@ -331,10 +349,23 @@ export default function CopilotChat({
 
       <div className="flex flex-col gap-2.5 px-5 pb-2.5">
         <div className="flex items-center gap-2">
-          <span className="btn min-h-[34px] cursor-default hover:bg-transparent" title={model ?? undefined}>
-            <span className={`h-2 w-2 rounded-full ${model ? "bg-project-p5002" : "bg-project-neutral"}`} />
-            {model ? model.split("/").pop() : "Model"}
-          </span>
+          <label className="btn min-h-[34px] cursor-pointer gap-2 pr-1.5" title="The Gemini model that answers">
+            <span className={`h-2 w-2 shrink-0 rounded-full ${model ? "bg-project-p5002" : "bg-project-neutral"}`} />
+            <select
+              aria-label="Model"
+              value={model ?? ""}
+              onChange={(e) => pickModel(e.target.value)}
+              disabled={sending || (!model && !models.length)}
+              className="max-w-[12rem] cursor-pointer truncate bg-transparent text-inherit outline-none"
+            >
+              {!model && <option value="">Model</option>}
+              {(model && !models.includes(model) ? [model, ...models] : models).map((name) => (
+                <option key={name} value={name}>
+                  {name}
+                </option>
+              ))}
+            </select>
+          </label>
           <button
             type="button"
             onClick={() => {

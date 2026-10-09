@@ -115,7 +115,7 @@ export default function MediaLightbox({
   const [tool, setTool] = useState<Tool>("draw");
   const toolRef = useRef(tool);
   toolRef.current = tool;
-  // The eraser the toolbar's eraser button (and Shift) picks, and whether its menu, to pick the other, is open.
+  // The eraser the toolbar's eraser button (and a right click) picks, and whether its menu, to pick the other, is open.
   const [eraser, setEraser] = useState<Eraser>("lasso-erase");
   const eraserRef = useRef(eraser);
   eraserRef.current = eraser;
@@ -143,8 +143,8 @@ export default function MediaLightbox({
   const textEntryRef = useRef(textEntry);
   textEntryRef.current = textEntry;
   const textInputRef = useRef<HTMLInputElement>(null);
-  // The tool Shift swapped for the eraser, while it's held.
-  const shiftFrom = useRef<Tool | null>(null);
+  // The tool a right click swapped for the eraser, for the next to swap back to.
+  const previousToolRef = useRef<Tool | null>(null);
   // The strokes the select tool picked (those of them still in `strokes`), the lasso picking them (or, for the lasso
   // eraser, deleting them) as it's drawn, the drag transforming them, and the handle the pointer is over.
   const [selected, setSelected] = useState<Set<Stroke>>(() => new Set());
@@ -382,32 +382,6 @@ export default function MediaLightbox({
     };
   }, [pdf, page, size, canvasWidth, canvasHeight]);
 
-  // Holding Shift in markup swaps the tool for the eraser, and letting go swaps it back (unless another was picked
-  // meanwhile). Not while typing, where Shift is for capitals.
-  useEffect(() => {
-    if (!editing) return;
-    const release = () => {
-      const from = shiftFrom.current;
-      shiftFrom.current = null;
-      if (from && isEraser(toolRef.current)) setTool(from);
-    };
-    const keydown = (e: KeyboardEvent) => {
-      if (e.key !== "Shift" || e.repeat || shiftFrom.current || isTyping(e.target) || isEraser(toolRef.current)) return;
-      shiftFrom.current = toolRef.current;
-      setTool(eraserRef.current);
-    };
-    const keyup = (e: KeyboardEvent) => e.key === "Shift" && release();
-    window.addEventListener("keydown", keydown);
-    window.addEventListener("keyup", keyup);
-    // Shift let go in another window never comes up here.
-    window.addEventListener("blur", release);
-    return () => {
-      window.removeEventListener("keydown", keydown);
-      window.removeEventListener("keyup", keyup);
-      window.removeEventListener("blur", release);
-      release();
-    };
-  }, [editing]);
 
   // Delete or Backspace deletes the selection (once it's done being dragged). Not while typing.
   useEffect(() => {
@@ -516,25 +490,47 @@ export default function MediaLightbox({
     });
   }
 
+  /** Start an eraser's drag at `point`. */
+  function eraseDown(eraser: Eraser, point: Point, pointerId: number) {
+    if (eraser === "erase") {
+      // Deletes every stroke it touches, here and along its drag.
+      const reach = Math.max(lineSize, ERASER_MIN_REACH) / view.zoom;
+      erasing.current = { pointerId, reach };
+      eraseAt(point, reach);
+    } else {
+      // Deletes the strokes wholly inside the loop it draws, once it's done.
+      selecting.current = { pointerId, points: [point], erase: true };
+    }
+  }
+
+  /** A right click swaps the tool for the eraser, which its drag then erases with, or the eraser back for the tool. */
+  function rightDown(e: ReactPointerEvent) {
+    e.preventDefault();
+    if (!editing || drawing.current || erasing.current || selecting.current || transforming.current) return;
+    commitText();
+    if (isEraser(tool)) {
+      setTool(previousToolRef.current ?? "draw");
+      previousToolRef.current = null;
+      return;
+    }
+    previousToolRef.current = tool;
+    const eraser = eraserRef.current;
+    setTool(eraser);
+    setEraserMenu(false);
+    const point = imagePoint(e);
+    if (point) eraseDown(eraser, point, e.pointerId);
+  }
+
   function pointerDown(e: ReactPointerEvent) {
-    if (e.button !== 0 && e.pointerType === "mouse") return;
+    const right = e.pointerType === "mouse" && e.button === 2;
+    if (e.button !== 0 && e.pointerType === "mouse" && !right) return;
     if (saving) return;
     e.currentTarget.setPointerCapture(e.pointerId);
+    if (right) return rightDown(e);
     if (draws(e)) {
       const point = imagePoint(e);
       if (!point || drawing.current || erasing.current || selecting.current || transforming.current || tool === "pan") return;
-      if (tool === "erase") {
-        // Deletes every stroke it touches, here and along its drag.
-        const reach = Math.max(lineSize, ERASER_MIN_REACH) / view.zoom;
-        erasing.current = { pointerId: e.pointerId, reach };
-        eraseAt(point, reach);
-        return;
-      }
-      if (tool === "lasso-erase") {
-        // Deletes the strokes wholly inside the loop it draws, once it's done.
-        selecting.current = { pointerId: e.pointerId, points: [point], erase: true };
-        return;
-      }
+      if (isEraser(tool)) return eraseDown(tool, point, e.pointerId);
       if (tool === "select") {
         // On the selection, or a handle of it, transforms it; anywhere else drops it, and starts a lasso for another.
         const box = selection.length ? selectionBox(selection) : null;
@@ -791,6 +787,8 @@ export default function MediaLightbox({
         onPointerMove={pointerMove}
         onPointerUp={pointerUp}
         onPointerCancel={pointerUp}
+        // A right click swaps to the eraser and back (see rightDown), so it doesn't open the browser's menu.
+        onContextMenu={(e) => e.preventDefault()}
         onDoubleClick={() => !editing && fit()}
       >
         <div

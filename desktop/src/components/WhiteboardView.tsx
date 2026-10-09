@@ -220,9 +220,9 @@ export default function WhiteboardView({
   // White, which shows on the dark stage.
   const [ink, setInk] = useState(INKS.find((i) => i.name === "White")?.value ?? INKS[5].value);
   const [lineSize, setLineSize] = useState(SIZES[1]);
-  // Space held pans, whatever the tool; the tool Shift swapped for the eraser, while it's held.
+  // Space held pans, whatever the tool; the tool a right click swapped for the eraser, for the next to swap back to.
   const [spaceHeld, setSpaceHeld] = useState(false);
-  const shiftFrom = useRef<Tool | null>(null);
+  const previousToolRef = useRef<Tool | null>(null);
   const activeTool: Tool = !editable || spaceHeld ? "pan" : tool;
 
   // The strokes and the floating elements (by id) picked, those of them still on the board, and the box their
@@ -569,13 +569,6 @@ export default function WhiteboardView({
       else deleteSelection();
     } else if (e.key === " ") {
       if (!e.repeat) setSpaceHeld(true);
-    } else if (e.key === "Shift") {
-      // Holding Shift swaps the tool for the eraser, and letting go swaps it back (unless another was picked).
-      handled = false;
-      if (!e.repeat && !shiftFrom.current && !isEraser(toolRef.current) && !dragging()) {
-        shiftFrom.current = toolRef.current;
-        setTool(eraserRef.current);
-      }
     } else if (!mod && !e.altKey && !e.shiftKey && key === "g") toggleGrid();
     else if (!mod && !e.altKey && !e.shiftKey && SHORTCUTS[key]) pickTool(key === "e" ? eraserRef.current : SHORTCUTS[key]);
     else handled = false;
@@ -585,15 +578,8 @@ export default function WhiteboardView({
     }
   }
 
-  function releaseShift() {
-    const from = shiftFrom.current;
-    shiftFrom.current = null;
-    if (from && isEraser(toolRef.current)) setTool(from);
-  }
-
   function keyUp(e: ReactKeyboardEvent) {
     if (e.key === " ") setSpaceHeld(false);
-    if (e.key === "Shift") releaseShift();
   }
 
   function toggleGrid() {
@@ -768,28 +754,50 @@ export default function WhiteboardView({
     selecting.current = { pointerId, points: [point], erase: false };
   }
 
+  /** Start an eraser's drag at `point`. */
+  function eraseDown(eraser: Eraser, point: Point, pointerId: number) {
+    if (eraser === "erase") {
+      // Deletes every stroke it touches, here and along its drag.
+      const reach = Math.max(lineSize, ERASER_MIN_REACH) / view.zoom;
+      erasing.current = { pointerId, reach };
+      setBusy(true);
+      eraseAt(point, reach);
+    } else {
+      selecting.current = { pointerId, points: [point], erase: true };
+    }
+  }
+
+  /** A right click swaps the tool for the eraser, which its drag then erases with, or the eraser back for the tool. */
+  function rightDown(e: ReactPointerEvent) {
+    e.preventDefault();
+    if (!editable || spaceHeld || dragging()) return;
+    if (isEraser(tool)) {
+      pickTool(previousToolRef.current ?? "draw");
+      previousToolRef.current = null;
+      return;
+    }
+    previousToolRef.current = tool;
+    const eraser = eraserRef.current;
+    pickTool(eraser);
+    const point = worldPoint(e);
+    if (!point) return;
+    if (eraserMenu) setEraserMenu(false);
+    eraseDown(eraser, point, e.pointerId);
+  }
+
   function pointerDown(e: ReactPointerEvent) {
     const middle = e.pointerType === "mouse" && e.button === 1;
-    if (e.pointerType === "mouse" && e.button !== 0 && !middle) return;
+    const right = e.pointerType === "mouse" && e.button === 2;
+    if (e.pointerType === "mouse" && e.button !== 0 && !middle && !right) return;
     rootRef.current?.focus({ preventScroll: true });
     if (middle) e.preventDefault();
     e.currentTarget.setPointerCapture(e.pointerId);
+    if (right) return rightDown(e);
     if (!middle && draws(e)) {
       const point = worldPoint(e);
       if (!point || dragging()) return;
       if (eraserMenu) setEraserMenu(false);
-      if (tool === "erase") {
-        // Deletes every stroke it touches, here and along its drag.
-        const reach = Math.max(lineSize, ERASER_MIN_REACH) / view.zoom;
-        erasing.current = { pointerId: e.pointerId, reach };
-        setBusy(true);
-        eraseAt(point, reach);
-        return;
-      }
-      if (tool === "lasso-erase") {
-        selecting.current = { pointerId: e.pointerId, points: [point], erase: true };
-        return;
-      }
+      if (isEraser(tool)) return eraseDown(tool, point, e.pointerId);
       if (tool === "select") return selectDown(point, e.pointerId);
       if (tool === "comment") {
         // A click pins a comment, open to be written in; it's kept once it's saved with something in it.
@@ -1008,7 +1016,6 @@ export default function WhiteboardView({
         // Keys let go elsewhere never come up here.
         if (rootRef.current?.contains(e.relatedTarget as Node | null)) return;
         setSpaceHeld(false);
-        releaseShift();
       }}
       onPaste={(e) => {
         if (!canInsert || isTyping(e.target)) return;
@@ -1128,6 +1135,8 @@ export default function WhiteboardView({
         onPointerUp={pointerUp}
         onPointerCancel={pointerUp}
         onPointerLeave={() => setHover(null)}
+        // A right click swaps to the eraser and back (see rightDown), so it doesn't open the browser's menu.
+        onContextMenu={(e) => e.preventDefault()}
         draggable={false}
         onDragStart={preventDrag}
         onDoubleClick={() => (!editable || tool === "pan") && fit()}

@@ -172,13 +172,13 @@ def create_space(db: Session, name: str) -> Space:
 
 
 def update_space(db: Session, space_id: int, **changes: Any) -> Space | None:
-    """Rename a space and/or set its `status_flow`, `custom_fields_schema` and `status_colors` (plain JSON values);
-    `None` if it doesn't exist (or is deleted)."""
+    """Rename a space and/or set its `status_flow`, `custom_fields_schema`, `status_colors` and `rag_folders` (plain
+    JSON values); `None` if it doesn't exist (or is deleted)."""
     space = get_space(db, space_id)
     if space is None:
         return None
     set_source(db, SPACES_SOURCE)
-    for key in ("name", "status_flow", "custom_fields_schema", "status_colors"):
+    for key in ("name", "status_flow", "custom_fields_schema", "status_colors", "rag_folders"):
         if key in changes:
             setattr(space, key, changes[key])
     db.commit()

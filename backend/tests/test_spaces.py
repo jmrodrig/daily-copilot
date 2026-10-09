@@ -95,6 +95,7 @@ def test_spaces_list_and_create(client):
         "status_flow": None,
         "custom_fields_schema": [],
         "status_colors": {},
+        "rag_folders": [],
         "created_at": None,
     }
 

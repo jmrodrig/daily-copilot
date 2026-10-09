@@ -438,6 +438,11 @@ class ChatRequest(BaseModel):
     access_mode: AccessMode = AccessMode.ASK_FIRST
     space_id: int = Field(default=1, description="The active space: the agent only sees its notes and tasks")
     note_path: str | None = Field(default=None, description="The note the user has open, relative to content/")
+    model: str | None = Field(
+        default=None,
+        pattern=r"^(gemini/|models/)?[A-Za-z0-9._-]+$",
+        description="The Gemini model to answer with, e.g. `gemini-2.5-pro`; the server's default if not given",
+    )
 
     @field_validator("messages")
     @classmethod
@@ -730,6 +735,13 @@ def clean_status_colors(value: Any) -> dict[Status, str]:
     return colors
 
 
+def clean_rag_folders(value: Any) -> list[str]:
+    """RAG folder paths stripped, without blanks or repeats; anything but a list (e.g. None) means none."""
+    if not isinstance(value, list):
+        return []
+    return list(dict.fromkeys(path.strip() for path in value if isinstance(path, str) and path.strip()))
+
+
 def clean_custom_fields_schema(value: Any) -> list[CustomFieldDef]:
     """Stored custom field definitions that parse; None means none."""
     fields = []
@@ -765,6 +777,10 @@ class SpaceUpdate(BaseModel):
         description="Replaces the space's status colours: status -> its \"#rrggbb\" colour for task pills; "
         "statuses left out (or a null/empty map) use the app's defaults",
     )
+    rag_folders: list[str] | None = Field(
+        default=None,
+        description="Replaces the local folders (absolute paths or network shares) the Co-pilot agent searches",
+    )
 
     @field_validator("name")
     @classmethod
@@ -780,6 +796,11 @@ class SpaceUpdate(BaseModel):
             field_id: {old.strip(): new.strip() for old, new in renames.items() if old.strip() and new.strip()}
             for field_id, renames in value.items()
         }
+
+    @field_validator("rag_folders")
+    @classmethod
+    def _clean_rag_folders(cls, value: list[str] | None) -> list[str] | None:
+        return None if value is None else clean_rag_folders(value)
 
     @field_validator("status_flow")
     @classmethod
@@ -811,6 +832,7 @@ class Space(SpaceIn):
     status_flow: StatusFlow | None = Field(default=None, description="See `SpaceUpdate.status_flow`")
     custom_fields_schema: list[CustomFieldDef] = Field(default_factory=list)
     status_colors: dict[Status, str] = Field(default_factory=dict, description="See `SpaceUpdate.status_colors`")
+    rag_folders: list[str] = Field(default_factory=list, description="See `SpaceUpdate.rag_folders`")
     created_at: datetime | None = None
 
     @field_validator("status_flow", mode="before")
@@ -827,6 +849,11 @@ class Space(SpaceIn):
     @classmethod
     def _clean_colors(cls, value: Any) -> dict[Status, str]:
         return clean_status_colors(value)
+
+    @field_validator("rag_folders", mode="before")
+    @classmethod
+    def _clean_folders(cls, value: Any) -> list[str]:
+        return clean_rag_folders(value)
 
 
 class FolderNode(BaseModel):

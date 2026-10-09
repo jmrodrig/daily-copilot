@@ -426,3 +426,90 @@ def test_run_chat_system_prompt_reflects_mode(settings, model, notes_dir):
         agent.run_chat([ChatMessage(role="user", content="hi")], mode, settings=settings)
         assert marker in model.calls[-1]["messages"][0]["content"]
         assert "write_note" in [t["function"]["name"] for t in model.calls[-1]["tools"]]
+
+
+# --- Models -------------------------------------------------------------------
+
+
+@pytest.fixture
+def no_models_cache(monkeypatch):
+    monkeypatch.setattr(agent, "_models_cache", None)
+
+
+def test_list_models_from_the_api(client, monkeypatch, no_models_cache):
+    keys = []
+
+    def fetch(api_key):
+        keys.append(api_key)
+        return ["gemini-2.5-pro", "gemini-2.5-flash", "test-model"]
+
+    monkeypatch.setattr(agent, "_fetch_gemini_models", fetch)
+
+    response = client.get("/api/models")
+
+    assert response.status_code == 200
+    assert response.json() == ["test-model", "gemini-2.5-pro", "gemini-2.5-flash"]  # the configured one first
+    assert keys == ["test-key"]
+    client.get("/api/models")
+    assert keys == ["test-key"]  # cached
+
+
+def test_list_models_falls_back_when_the_api_fails(client, monkeypatch, no_models_cache):
+    def fetch(api_key):
+        raise OSError("offline")
+
+    monkeypatch.setattr(agent, "_fetch_gemini_models", fetch)
+
+    models = client.get("/api/models").json()
+
+    assert models[0] == "test-model"
+    assert "gemini-2.5-pro" in models and "gemini-2.5-flash" in models
+
+
+def test_list_models_without_api_key(settings, monkeypatch, no_models_cache):
+    settings.gemini_api_key = None
+    monkeypatch.setattr(agent, "_fetch_gemini_models", lambda api_key: pytest.fail("no key, no call"))
+
+    assert agent.list_models(settings)[1:] == list(agent.FALLBACK_MODELS)
+
+
+@pytest.mark.parametrize(
+    ("picked", "used"),
+    [(None, "gemini/test-model"), ("gemini-2.5-flash", "gemini/gemini-2.5-flash"), ("gemini/gemini-2.0-flash", "gemini/gemini-2.0-flash")],
+)
+def test_chat_uses_the_picked_model(client, model, picked, used):
+    model.script.append(reply("ok"))
+    payload = {"messages": [{"role": "user", "content": "Hi"}], "model": picked}
+
+    assert client.post("/api/chat", json=payload).status_code == 200
+    assert model.calls[0]["model"] == used
+
+
+@pytest.mark.parametrize("picked", ["openai/gpt-4o", "gemini 2.5", "../x"])
+def test_chat_rejects_other_providers_models(client, model, picked):
+    payload = {"messages": [{"role": "user", "content": "Hi"}], "model": picked}
+
+    assert client.post("/api/chat", json=payload).status_code == 422
+    assert model.calls == []
+
+
+# --- RAG folders --------------------------------------------------------------
+
+
+def test_space_context_lists_rag_folders(client, tmp_path):
+    folder = tmp_path / "Lawrences Files"
+    (folder / "C7801").mkdir(parents=True)
+    (folder / "spec.pdf").write_bytes(b"%PDF")
+    missing = tmp_path / "gone"
+    client.put("/api/spaces/1", json={"rag_folders": [str(folder), str(missing)]})
+
+    _, context = agent.space_context(1)
+
+    assert "Configured Local RAG Folders for this space:" in context
+    assert f"- {folder}: [C7801/, spec.pdf]" in context
+    assert f"- {missing}: (not reachable:" in context
+    assert "list_local_directory" in context
+
+
+def test_space_context_without_rag_folders(client):
+    assert "RAG Folders" not in agent.space_context(1)[1]

@@ -111,6 +111,12 @@ def health() -> dict[str, str]:
     return {"status": "ok", "chat_model": get_settings().chat_model}
 
 
+@app.get("/api/models")
+def models() -> list[str]:
+    """The Gemini models the Co-pilot chat can answer with (e.g. `gemini-2.5-pro`), the configured default first."""
+    return agent.list_models()
+
+
 _URL_TIMEOUT_SECONDS = 5
 # Enough for the <head> of any page; the title is never further in.
 _URL_MAX_BYTES = 512 * 1024
@@ -552,7 +558,11 @@ def chat(request: ChatRequest, db: Session = Depends(get_db)) -> ChatResponse:
     _space_id_or_404(db, request.space_id)
     try:
         return agent.run_chat(
-            request.messages, request.access_mode, space_id=request.space_id, note_path=request.note_path
+            request.messages,
+            request.access_mode,
+            space_id=request.space_id,
+            note_path=request.note_path,
+            model=request.model,
         )
     except agent.AgentNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -906,7 +916,8 @@ def create_space(request: schemas.SpaceIn, db: Session = Depends(get_db)) -> sch
 
 @app.put("/api/spaces/{space_id}")
 def update_space(space_id: int, request: schemas.SpaceUpdate, db: Session = Depends(get_db)) -> schemas.Space:
-    """Rename a space and/or set its status flow, custom task fields and status colours; fields left out are kept.
+    """Rename a space and/or set its status flow, custom task fields, status colours and RAG folders; fields left out
+    are kept.
 
     Replacing the custom fields keeps the tasks' values, except those of fields that were removed (and values
     that don't fit a field whose type changed); `renamed_options` carries renamed dropdown options over.

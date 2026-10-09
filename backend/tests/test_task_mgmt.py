@@ -117,6 +117,19 @@ def test_space_status_colors(client):
     assert client.put("/api/spaces/1", json={"status_colors": None}).json()["status_colors"] == {}
 
 
+def test_space_rag_folders(client):
+    assert client.get("/api/spaces").json()[0]["rag_folders"] == []
+
+    response = client.put("/api/spaces/1", json={"rag_folders": [r" O:\Lawrences Files ", "", r"Y:\Shared", r"Y:\Shared"]})
+
+    assert response.status_code == 200, response.text
+    folders = [r"O:\Lawrences Files", r"Y:\Shared"]  # stripped, without blanks or repeats
+    assert response.json()["rag_folders"] == folders
+    assert client.get("/api/spaces").json()[0]["rag_folders"] == folders
+    assert client.put("/api/spaces/1", json={"name": "Work"}).json()["rag_folders"] == folders
+    assert client.put("/api/spaces/1", json={"rag_folders": None}).json()["rag_folders"] == []
+
+
 @pytest.mark.parametrize(
     "payload",
     [

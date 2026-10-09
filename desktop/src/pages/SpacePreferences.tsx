@@ -4,6 +4,7 @@ import { useLocation } from "react-router-dom";
 import ColorPicker from "../components/ColorPicker";
 import { Tag } from "../components/TriageBoard";
 import { getJson, message, sendJson } from "../lib/api";
+import { checkLocalFile } from "../lib/localFiles";
 import { pillStyle } from "../lib/colors";
 import { useSpace, type CustomFieldDef, type CustomFieldType, type Space } from "../lib/space";
 import { DEFAULT_STATUS_COLORS, statusColor, STATUS_LABELS, STATUSES, type ProjectOption, type ProjectUpdate, type StatusFlow, type TaskStatus } from "../lib/tasks";
@@ -102,6 +103,9 @@ export default function SpacePreferences() {
           onSave={({ fields, renames }) => updateSpace(space.id, { custom_fields_schema: fields, renamed_options: renames })}
         />
       )}
+      {space && (
+        <RagFoldersEditor key={`rag-${space.id}`} space={space} onSave={(rag_folders) => updateSpace(space.id, { rag_folders })} />
+      )}
       {space && <ProjectsEditor key={`projects-${space.id}`} spaceId={space.id} />}
     </div>
   );
@@ -132,6 +136,92 @@ function useSaver<T>(onSave: (value: T) => Promise<unknown>) {
     </>
   );
   return { save, saving, status, touched: () => setSaved(false) };
+}
+
+// --- RAG local folders --------------------------------------------------------------
+
+/**
+ * The local folders (drives, network shares) the Co-pilot searches for this space's design data: listed in its prompt,
+ * to read with its local file tools. A folder is checked to exist on the backend's machine before it's added; adding
+ * or removing one saves at once.
+ */
+function RagFoldersEditor({ space, onSave }: { space: Space; onSave: (folders: string[]) => Promise<unknown> }) {
+  const folders = space.rag_folders ?? [];
+  const [path, setPath] = useState("");
+  const [checking, setChecking] = useState(false);
+  const [invalid, setInvalid] = useState<string | null>(null);
+  const { save, saving, status, touched } = useSaver(onSave);
+
+  async function add(event: FormEvent) {
+    event.preventDefault();
+    const folder = path.trim();
+    if (!folder || checking || saving) return;
+    touched();
+    setInvalid(null);
+    if (folders.some((f) => f.toLowerCase() === folder.toLowerCase())) return setInvalid("That folder is already in the list.");
+    setChecking(true);
+    const check = await checkLocalFile(folder);
+    setChecking(false);
+    if (!check.exists) return setInvalid(check.error ?? `No folder at ${folder}.`);
+    if (check.type === "file") return setInvalid(`${folder} is a file, not a folder.`);
+    await save([...folders, folder]);
+    setPath("");
+  }
+
+  return (
+    <section className="panel flex flex-col gap-3" aria-label="RAG local folders">
+      <div>
+        <h2 className="text-base font-semibold">RAG Local Folders</h2>
+        <p className="mt-1 text-[15px] text-text-muted">
+          Folders on this computer or the network the Co-pilot searches and reads when you ask about design data,
+          specifications, vessels and engineering files in this space.
+        </p>
+      </div>
+      {folders.length === 0 ? (
+        <p className="text-[15px] text-text-muted">No folders yet.</p>
+      ) : (
+        <ul className="flex flex-col divide-y divide-border-default/60 rounded-lg border border-border-default">
+          {folders.map((folder) => (
+            <li key={folder} className="flex items-center gap-2 px-3 py-2">
+              <span className="min-w-0 flex-1 truncate font-mono text-[13px]" title={folder}>
+                {folder}
+              </span>
+              <button
+                type="button"
+                className="btn min-h-8 !text-xs"
+                disabled={saving}
+                onClick={() => {
+                  setInvalid(null);
+                  void save(folders.filter((f) => f !== folder));
+                }}
+              >
+                Remove
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <form onSubmit={add} className="flex items-end gap-2 border-t border-border-default pt-3">
+        <label className="flex flex-1 flex-col gap-1.5">
+          <span className="text-[13px] font-semibold tracking-[0.08em] text-text-muted">FOLDER PATH</span>
+          <input
+            value={path}
+            onChange={(e) => {
+              setPath(e.target.value);
+              setInvalid(null);
+            }}
+            placeholder="e.g. O:\Lawrences Files or \\server\share"
+            className="field py-1.5 font-mono"
+          />
+        </label>
+        <button type="submit" className="btn min-h-9" disabled={!path.trim() || checking || saving}>
+          {checking ? "Checking…" : "Add folder"}
+        </button>
+      </form>
+      {invalid && <p className="text-xs text-accent">{invalid}</p>}
+      {status}
+    </section>
+  );
 }
 
 // --- Status flow --------------------------------------------------------------------

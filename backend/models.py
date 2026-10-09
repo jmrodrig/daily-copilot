@@ -63,6 +63,9 @@ class Space(Versioned, Base):
     # Status -> its "#rrggbb" colour for task pills (`schemas.clean_status_colors`); statuses left out (or None)
     # use the app's defaults.
     status_colors: Mapped[dict | None] = mapped_column(JSON, default=None)
+    # Local folders (e.g. `O:\Lawrences Files`, network shares) the Co-pilot agent searches for this space's design
+    # data. None only for rows from before them.
+    rag_folders: Mapped[list[str] | None] = mapped_column(JSON, default=list)
     created_at: Mapped[dt.datetime] = mapped_column(server_default=func.now())
 
     def __repr__(self) -> str:

@@ -20,13 +20,14 @@ export type CustomFieldDef = {
 };
 
 // GET /api/spaces (see Space in backend/schemas.py). `status_colors` holds the statuses whose colour the space changed
-// (see DEFAULT_STATUS_COLORS for the rest).
+// (see DEFAULT_STATUS_COLORS for the rest); `rag_folders` the local folders the Co-pilot searches for the space's data.
 export type Space = {
   id: number;
   name: string;
   status_flow: StatusFlow | null;
   custom_fields_schema: CustomFieldDef[];
   status_colors: Record<string, string>;
+  rag_folders?: string[];
 };
 
 /**
@@ -36,6 +37,7 @@ export type Space = {
 export type SpaceUpdate = Partial<Pick<Space, "name" | "status_flow" | "custom_fields_schema">> & {
   renamed_options?: Record<string, Record<string, string>>;
   status_colors?: Record<string, string>;
+  rag_folders?: string[];
 };
 
 type SpaceState = {
