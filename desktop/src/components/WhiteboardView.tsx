@@ -1077,7 +1077,7 @@ export default function WhiteboardView({
                 <Segment on={layersMenu} label="Locked layers" onClick={() => setLayersMenu((open) => !open)}>
                   <span className="flex items-center gap-1.5">
                     <ToolIcon path={LOCK_ICON} />
-                    <span className="text-[14px]">Locked layers</span>
+                    
                     <span className="font-mono text-xs text-text-muted">{lockedLayers.length}</span>
                   </span>
                 </Segment>
