@@ -88,3 +88,44 @@ def test_open_is_refused_for_remote_clients(client, design, monkeypatch):
     # TestClient's host is "testclient", not the loopback address.
     assert client.post("/api/local-files/open", json={"path": str(design)}).status_code == 403
     assert opened == []
+
+
+def test_check_path_reports_files_folders_and_missing_paths(design):
+    folder = local_files.check_path(design.as_uri())
+    assert folder == {"exists": True, "name": "Design data", "type": "directory", "path": str(design)}
+
+    file = local_files.check_path(str(design / "readme.md"))
+    assert file["exists"] and file["type"] == "file" and file["name"] == "readme.md"
+
+    missing = local_files.check_path(str(design / "missing.txt"))
+    assert not missing["exists"] and missing["type"] == "unknown" and "No file or folder" in missing["error"]
+
+    relative = local_files.check_path("relative/file.txt")
+    assert not relative["exists"] and relative["path"] == "relative/file.txt" and "Not an absolute path" in relative["error"]
+
+
+def test_check_path_does_not_walk_folders(design, monkeypatch):
+    monkeypatch.setattr(local_files.Path, "rglob", lambda *_: pytest.fail("check_path must not walk the folder"))
+    monkeypatch.setattr(local_files.Path, "iterdir", lambda *_: pytest.fail("check_path must not list the folder"))
+    assert local_files.check_path(str(design))["exists"]
+
+
+def test_check_endpoint(client, design):
+    found = client.get("/api/local-files/check", params={"path": str(design)})
+    assert found.status_code == 200 and found.json()["exists"] and found.json()["type"] == "directory"
+
+    missing = client.get("/api/local-files/check", params={"path": str(design / "missing")})
+    assert missing.status_code == 200 and missing.json()["exists"] is False and missing.json()["error"]
+
+    relative = client.get("/api/local-files/check", params={"path": "relative"})
+    assert relative.status_code == 200 and relative.json()["exists"] is False
+
+
+def test_stat_stops_counting_a_huge_folder(client, design, monkeypatch):
+    monkeypatch.setattr(local_files, "STAT_LIMIT", 2)
+    folder = client.get("/api/local-files/stat", params={"path": str(design)}).json()
+    assert folder["partial"] is True
+    assert 0 < folder["size"] < sum(f.stat().st_size for f in design.rglob("*") if f.is_file())
+
+    whole = client.get("/api/local-files/stat", params={"path": str(design / "Hull")}).json()
+    assert whole["partial"] is False

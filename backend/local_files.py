@@ -22,6 +22,7 @@ from urllib.parse import unquote, urlparse
 TEXT_SUFFIXES = {".txt", ".md", ".csv", ".json", ".tsv", ".log", ".xml", ".yaml", ".yml", ".ini"}
 READ_LIMIT = 20_000  # characters of a file's text returned to the agent
 LIST_LIMIT = 500  # entries of a directory listed for the agent
+STAT_LIMIT = 1_000  # files counted towards a folder's size, so a huge network share can't hang the request
 
 _WINDOWS_DRIVE = re.compile(r"^/?[A-Za-z]:[\\/]")
 
@@ -59,12 +60,52 @@ def _entry(path: Path) -> dict[str, Any]:
     return {"name": path.name or str(path), "type": "directory" if is_dir else "file", "size": 0 if is_dir else path.stat().st_size}
 
 
+def check_path(raw: str) -> dict[str, Any]:
+    """Whether a linked path exists: `{exists, name, type, path}`, with an `error` when it doesn't.
+
+    Only the path itself is looked at, never what's in a folder, so it answers at once even for a huge network drive.
+    """
+    try:
+        path = to_path(raw)
+        if not path.exists():
+            return {"exists": False, "name": path.name or str(path), "type": "unknown", "path": str(path), "error": f"No file or folder at {path}"}
+        is_dir = path.is_dir()
+        return {"exists": True, "name": path.name or str(path), "type": "directory" if is_dir else "file", "path": str(path)}
+    except (LocalFileError, OSError) as exc:
+        return {"exists": False, "path": raw, "error": str(exc)}
+
+
+def _folder_size(folder: Path) -> tuple[int, bool]:
+    """The total size of the files in a folder and whether it's complete: it stops after `STAT_LIMIT` files, and
+    skips subfolders and files it can't read."""
+    total, counted, pending = 0, 0, [folder]
+    while pending:
+        try:
+            with os.scandir(pending.pop()) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            pending.append(Path(entry.path))
+                        elif entry.is_file():
+                            if counted >= STAT_LIMIT:
+                                return total, False
+                            total += entry.stat().st_size
+                            counted += 1
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return total, True
+
+
 def stat_path(raw: str) -> dict[str, Any]:
-    """`{name, type, size}` of a file or folder; a folder's size is the total of the files in it."""
+    """`{name, type, size, partial}` of a file or folder; a folder's size is the total of the files in it, `partial`
+    when only the first `STAT_LIMIT` files were counted."""
     path = _existing(raw)
-    entry = _entry(path)
+    entry = {**_entry(path), "partial": False}
     if path.is_dir():
-        entry["size"] = sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+        size, complete = _folder_size(path)
+        entry["size"], entry["partial"] = size, not complete
     return entry
 
 

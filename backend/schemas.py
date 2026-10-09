@@ -1200,3 +1200,14 @@ class LocalFileStat(BaseModel):
     name: str
     type: Literal["file", "directory"]
     size: int
+    partial: bool = False  # a folder too big to measure in full: `size` counts only its first files
+
+
+class LocalFileCheck(BaseModel):
+    """`GET /api/local-files/check`: whether a linked path exists on this machine, checked as a link is typed."""
+
+    exists: bool
+    name: str | None = None
+    type: Literal["file", "directory", "unknown"] | None = None
+    path: str
+    error: str | None = None

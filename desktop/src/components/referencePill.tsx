@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { getJson } from "../lib/api";
+import { isLocalHref, openLocalFile } from "../lib/localFiles";
 import { notePath, useSpace } from "../lib/space";
 import {
   statusColor,
@@ -53,6 +54,9 @@ const escapeLabel = (label: string) => label.replace(/[\\[\]*_`<>]/g, "\\$&");
 const unescapeLabel = (label: string) => label.replace(/\\(.)/g, "$1");
 // The destination can't hold spaces, quotes, angle brackets or parentheses.
 const encodeHref = (href: string) => href.replace(/[\s()"<>]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0")}`);
+// A local path (`C:\My Files`) is read back as it was: unlike a URL, nothing on the backend decodes it.
+const decodeHref = (href: string) =>
+  isLocalHref(href) && !/^file:/i.test(href) ? href.replace(/%(09|0A|0D|20|22|28|29|3C|3E)/gi, (_, hex: string) => String.fromCharCode(parseInt(hex, 16))) : href;
 
 export const ReferencePill = Node.create({
   name: "referencePill",
@@ -93,7 +97,7 @@ export const ReferencePill = Node.create({
     tokenize(src) {
       const match = PILL.exec(src);
       if (!match) return undefined;
-      return { type: "referencePill", raw: match[0], label: unescapeLabel(match[1]), href: match[2], kind: match[3] };
+      return { type: "referencePill", raw: match[0], label: unescapeLabel(match[1]), href: decodeHref(match[2]), kind: match[3] };
     },
   },
   parseMarkdown: (token, h) => h.createNode("referencePill", { kind: token.kind, href: token.href, label: token.label }),
@@ -107,7 +111,10 @@ export const ReferencePill = Node.create({
   },
 });
 
-/** The pill in the editor: click selects it (to delete or move), double-click opens what it points to. */
+/**
+ * The pill in the editor: click selects it (to delete or move), double-click opens what it points to; a local file or
+ * folder through the backend (see openLocalFile).
+ */
 function PillView({ node, selected, updateAttributes }: NodeViewProps) {
   const { kind, href, label } = node.attrs as RefPillAttrs;
   const navigate = useNavigate();
@@ -130,8 +137,10 @@ function PillView({ node, selected, updateAttributes }: NodeViewProps) {
 
   function open() {
     if (taskId !== null) openTask(taskId);
-    else if (kind === "url") window.open(href, "_blank", "noopener,noreferrer");
-    else navigate(href);
+    else if (kind === "url") {
+      if (isLocalHref(href)) void openLocalFile(href);
+      else window.open(href, "_blank", "noopener,noreferrer");
+    } else navigate(href);
   }
 
   return (
@@ -143,7 +152,7 @@ function PillView({ node, selected, updateAttributes }: NodeViewProps) {
       onDoubleClick={open}
       className={`reference-pill ${kind} ${selected ? "selected" : ""}`}
     >
-      <PillIcon kind={kind} />
+      <PillIcon kind={kind} href={href} />
       <span className="reference-pill-label">
         {status && <StatusTag status={status} />}
         {label || href}
@@ -196,8 +205,9 @@ export function StatusTag({ status }: { status: TaskStatus }) {
 
 export const PILL_NAMES: Record<RefKind, string> = { task: "Task", note: "Note", url: "Link" };
 
-/** A pill's icon: a checkbox for a task, a page for a note, a globe for a web page. */
-export function PillIcon({ kind, size = 13 }: { kind: RefKind; size?: number }) {
+/** A pill's icon: a checkbox for a task, a page for a note, a globe for a web page, a folder for a local file or folder. */
+export function PillIcon({ kind, href, size = 13 }: { kind: RefKind; href?: string; size?: number }) {
+  const local = kind === "url" && isLocalHref(href);
   return (
     <svg aria-hidden width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" className="reference-pill-icon">
       {kind === "task" && (
@@ -212,7 +222,8 @@ export function PillIcon({ kind, size = 13 }: { kind: RefKind; size?: number }) 
           <path d="M9.5 1.7v3.8h3.8M5.5 8.5h5M5.5 11h3.5" />
         </>
       )}
-      {kind === "url" && (
+      {local && <path d="M1.7 4.2a1.2 1.2 0 0 1 1.2-1.2h3.2l1.6 1.8h5.4a1.2 1.2 0 0 1 1.2 1.2v6.6a1.2 1.2 0 0 1-1.2 1.2H2.9a1.2 1.2 0 0 1-1.2-1.2z" />}
+      {kind === "url" && !local && (
         <>
           <circle cx="8" cy="8" r="6.3" />
           <path d="M1.7 8h12.6M8 1.7c1.7 1.8 2.5 3.9 2.5 6.3S9.7 12.5 8 14.3C6.3 12.5 5.5 10.4 5.5 8S6.3 3.5 8 1.7z" />

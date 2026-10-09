@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 
 import { getJson, message, sendJson } from "../lib/api";
+import { checkLocalFile, isLocalHref, type LocalFileCheck } from "../lib/localFiles";
 import { STATUS_LABELS, type ProjectOption, type TaskCreate, type TaskItem } from "../lib/tasks";
 import { noteHref, PillIcon, PILL_NAMES, taskHref, type RefPillAttrs } from "./referencePill";
 
@@ -243,14 +244,18 @@ type KindFilter = "all" | "note" | "task";
 const RECENT_PER_KIND = 6;
 const MAX_RESULTS = 20;
 
-/** The text as a web address, if it is one (`www.` gets `https://`), else null. */
+/** The text as a web address or local path, if it is one (`www.` gets `https://`), else null. */
 function asUrl(text: string): string | null {
   const t = text.trim();
   if (/^(https?:\/\/|mailto:)\S+$/i.test(t)) return t;
   if (/^www\.\S+\.\S+$/i.test(t)) return `https://${t}`;
-  if (/^(file:|[a-z]:[\\/]|\\\\)/i.test(t)) return t;
+  if (isLocalHref(t)) return t;
   return null;
 }
+
+/** A local path's check on the backend's file system: running, and its last answer (null until there is one). */
+type LocalCheckState = { loading: boolean; result: LocalFileCheck | null };
+const NO_LOCAL_CHECK: LocalCheckState = { loading: false, result: null };
 
 /**
  * How well a candidate matches the search (lower is better), or null if it doesn't: every word must be in its
@@ -281,7 +286,8 @@ function matchRank(c: Candidate, words: string[]): number | null {
 /**
  * The link panel: search the space's tasks and notes by name or tag (`#tag`), most recently modified first until
  * something is typed, or paste a URL. A task or note is shown under its own title; a URL under the display text
- * typed (the selected text, by default). Picked, the link is handed to `onPick`, which puts its pill in the note.
+ * typed (the selected text, by default). A local path is checked on the backend's file system as it's typed, and can
+ * only be inserted once it's found. Picked, the link is handed to `onPick`, which puts its pill in the note.
  */
 export function LinkPanel({
   spaceId,
@@ -302,6 +308,7 @@ export function LinkPanel({
   const [active, setActive] = useState(0);
   const [selected, setSelected] = useState<Candidate | null>(null);
   const [displayText, setDisplayText] = useState(draft.text);
+  const [localCheck, setLocalCheck] = useState<LocalCheckState>(NO_LOCAL_CHECK);
   const panel = usePanel(draft, onClose);
   const listRef = useRef<HTMLUListElement>(null);
 
@@ -345,6 +352,38 @@ export function LinkPanel({
       controller.abort();
     };
   }, [url]);
+
+  // A local path: does it exist on the backend's machine? Checked after a pause in the typing; its file or folder name
+  // fills in the display text unless the user typed their own.
+  const isLocal = isLocalHref(url);
+  useEffect(() => {
+    if (!url || !isLocalHref(url)) {
+      setLocalCheck(NO_LOCAL_CHECK);
+      return;
+    }
+    setLocalCheck({ loading: true, result: null });
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      checkLocalFile(url, controller.signal)
+        .then((result) => {
+          setLocalCheck({ loading: false, result });
+          const name = result.exists ? result.name : null;
+          if (!name) return;
+          setDisplayText((text) => {
+            if (text.trim() && text !== url && text !== fetchedTitle.current) return text;
+            fetchedTitle.current = name;
+            return name;
+          });
+        })
+        // Aborted: a newer path is being checked.
+        .catch(() => {});
+    }, 200);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [url]);
+  const localBlocked = isLocal && (localCheck.loading || !localCheck.result?.exists);
 
   const candidates = useMemo<Candidate[]>(
     () => [
@@ -396,7 +435,7 @@ export function LinkPanel({
 
   function insert() {
     if (selected) pickCandidate(selected);
-    else if (url) onPick({ kind: "url", href: url, label: displayText.trim() || url });
+    else if (url && !localBlocked) onPick({ kind: "url", href: url, label: displayText.trim() || url });
   }
 
   function onSearchKey(event: ReactKeyboardEvent) {
@@ -464,9 +503,12 @@ export function LinkPanel({
         </div>
       )}
       {url ? (
-        <div className="flex items-center gap-2 rounded-md border border-border-default px-2.5 py-2 text-[15px] text-text-secondary">
-          <PillIcon kind="url" />
-          <span className="truncate">{url}</span>
+        <div className="flex flex-col gap-1.5">
+          <div className="flex items-center gap-2 rounded-md border border-border-default px-2.5 py-2 text-[15px] text-text-secondary">
+            <PillIcon kind="url" href={url} />
+            <span className="truncate">{url}</span>
+          </div>
+          {isLocal && <LocalCheckStatus check={localCheck} />}
         </div>
       ) : (
         <ul id="link-panel-results" ref={listRef} role="listbox" aria-label="Tasks and notes" className="-mx-1 max-h-[min(15rem,40vh)] overflow-y-auto">
@@ -523,11 +565,28 @@ export function LinkPanel({
         <button type="button" onClick={() => onClose(true)} className="btn min-h-0 px-2 py-1 text-xs">
           Cancel
         </button>
-        <button type="submit" className="btn-primary min-h-0 px-2 py-1 text-xs" disabled={!selected && !url}>
+        <button type="submit" className="btn-primary min-h-0 px-2 py-1 text-xs" disabled={!selected && (!url || localBlocked)}>
           Insert
         </button>
       </div>
     </form>
+  );
+}
+
+/** Whether a local path in the link panel was found on the backend's file system, or why not. */
+function LocalCheckStatus({ check }: { check: LocalCheckState }) {
+  const { loading, result } = check;
+  if (loading || !result) return <p className="text-[13px] text-text-muted" aria-live="polite">Checking server file system…</p>;
+  if (result.exists)
+    return (
+      <p className="truncate text-[13px] text-emerald-500" aria-live="polite" title={result.path}>
+        ✓ Exists on server ({result.type}: {result.name})
+      </p>
+    );
+  return (
+    <p className="text-[13px] text-red-400" role="alert">
+      ⚠ Not found on server file system ({result.error || "File or folder does not exist"})
+    </p>
   );
 }
 

@@ -46,6 +46,7 @@ from schemas import (
     GanttTask,
     FolderCreate,
     ImageUpload,
+    LocalFileCheck,
     LocalFileStat,
     LocalPathRequest,
     MediaMarkup,
@@ -830,6 +831,12 @@ def open_local_file(request: LocalPathRequest, http: Request) -> None:
         local_files.open_path(request.path)
     except (local_files.LocalFileError, OSError) as exc:
         raise _local_file_errors(exc) from exc
+
+
+@app.get("/api/local-files/check")
+def check_local_file(path: str) -> LocalFileCheck:
+    """Whether a path or `file://` URL exists on this machine; never an error, so the link panel can show why not."""
+    return LocalFileCheck(**local_files.check_path(path))
 
 
 @app.get("/api/local-files/stat")
