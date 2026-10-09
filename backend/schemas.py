@@ -443,6 +443,9 @@ class ChatRequest(BaseModel):
         pattern=r"^(gemini/|models/)?[A-Za-z0-9._-]+$",
         description="The Gemini model to answer with, e.g. `gemini-2.5-pro`; the server's default if not given",
     )
+    reasoning_effort: Literal["low", "medium", "high"] | None = Field(
+        default=None, description="How hard the model thinks; the model's own default if not given"
+    )
 
     @field_validator("messages")
     @classmethod
@@ -456,6 +459,7 @@ class SavedPromptIn(BaseModel):
     """`POST /api/prompts` and `PUT /api/prompts/{id}`: a slash command and the instruction it sends."""
 
     command: str = Field(description='e.g. "/prep"; the leading slash is optional')
+    space_id: int = Field(default=1, description="The space the command belongs to (kept as is by `PUT`)")
     description: str = Field(default="", max_length=200, description="One line shown in the chat's command menu")
     instruction: str = Field(min_length=1, description="What the agent is told to do when the command is used")
 

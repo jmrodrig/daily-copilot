@@ -57,7 +57,6 @@ READ_LIMIT = 20_000  # characters of note content returned to the model
 _SNIPPET_RADIUS = 80
 REFERENCE_LIMIT = 40_000  # characters of Reference Data notes put into the system prompt
 CONTEXT_TASK_LIMIT = 50  # project tasks put into the system prompt
-RAG_FOLDER_LIMIT = 40  # entries of each RAG folder listed in the system prompt
 
 # The Gemini models the chat can use: listed from the API (cached for a while), or these if it can't be reached.
 GEMINI_MODELS_URL = "https://generativelanguage.googleapis.com/v1beta/models"
@@ -366,21 +365,14 @@ def _task_line(task: dict[str, Any]) -> str:
 
 
 def _rag_block(folders: list[str]) -> str:
-    """The space's local RAG folders, each with (up to `RAG_FOLDER_LIMIT` of) its top-level files and subfolders."""
-    lines = ["\n\nConfigured Local RAG Folders for this space:"]
+    """The space's local folders, named only: listing them on every turn would bloat the prompt, so the agent
+    crawls them with the local-file tools when a command or question calls for it."""
+    lines = [
+        "\n\nConfigured Local Folders in this space (crawled when instructed via commands or query, using "
+        "`list_local_directory` and `read_local_file`):"
+    ]
     for folder in folders:
-        try:
-            listing = local_files.list_local_directory(folder)
-        except (local_files.LocalFileError, OSError) as exc:
-            lines.append(f"- {folder}: (not reachable: {exc})")
-            continue
-        names = [e["name"] + ("/" if e["type"] == "directory" else "") for e in listing["entries"][:RAG_FOLDER_LIMIT]]
-        more = listing["count"] - len(names)
-        lines.append(f"- {folder}: [{', '.join(names)}]" + (f" … and {more} more" if more > 0 else ""))
-    lines.append(
-        "Always search and read from these folders using `list_local_directory` and `read_local_file` when "
-        "answering questions about design data, specifications, vessels, and engineering files."
-    )
+        lines.append(f"- `{folder}`")
     return "\n".join(lines)
 
 
@@ -585,11 +577,13 @@ def run_chat(
     space_id: int = spaces.DEFAULT_SPACE_ID,
     note_path: str | None = None,
     model: str | None = None,
+    reasoning_effort: str | None = None,
     settings: Settings | None = None,
 ) -> ChatResponse:
     """Answer the last user message in `space_id`, calling tools as the model asks, for up to
     `MAX_TOOL_ROUNDS` rounds. `note_path` is the note the user has open, if any; `model` the Gemini model picked
-    in the chat (else `settings.chat_model`)."""
+    in the chat (else `settings.chat_model`); `reasoning_effort` ("low", "medium" or "high") how hard it thinks,
+    left to the model if not given or not supported."""
     settings = settings or get_settings()
     if settings.gemini_api_key is None:
         raise AgentNotConfiguredError("COPILOT_GEMINI_API_KEY is not set; add it to backend/.env")
@@ -607,14 +601,25 @@ def run_chat(
 
     for round_ in range(MAX_TOOL_ROUNDS + 1):
         last = round_ == MAX_TOOL_ROUNDS  # Out of rounds: make the model answer with what it has.
+        kwargs: dict[str, Any] = {
+            "model": chosen_model,
+            "api_key": settings.gemini_api_key.get_secret_value(),
+            "messages": history,
+            "tools": _tool_specs(mode),
+            "tool_choice": "none" if last else "auto",
+        }
+        if reasoning_effort:
+            kwargs["reasoning_effort"] = reasoning_effort
         try:
-            response = litellm.completion(
-                model=chosen_model,
-                api_key=settings.gemini_api_key.get_secret_value(),
-                messages=history,
-                tools=_tool_specs(mode),
-                tool_choice="none" if last else "auto",
-            )
+            try:
+                response = litellm.completion(**kwargs)
+            except litellm.UnsupportedParamsError:
+                if not reasoning_effort:
+                    raise
+                # This model can't take an effort level: answer with its own and stop asking for one.
+                reasoning_effort = None
+                del kwargs["reasoning_effort"]
+                response = litellm.completion(**kwargs)
         except Exception as exc:  # litellm raises many provider-specific types
             raise AgentError(f"The chat model failed: {exc}") from exc
         message = response.choices[0].message

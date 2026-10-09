@@ -8,7 +8,6 @@ import NotePage from "./pages/NotePage";
 import People from "./pages/People";
 import Placeholder from "./pages/Placeholder";
 import ProjectPlan from "./pages/ProjectPlan";
-import Settings from "./pages/Settings";
 import SpacePreferences from "./pages/SpacePreferences";
 import SavedTaskView, { AdHocTasks } from "./pages/Tasks";
 
@@ -24,7 +23,7 @@ export default function App() {
         <Route path="check-in" element={<EveningCheckIn />} />
         <Route path="plan/:code" element={<ProjectPlan />} />
         <Route path="note" element={<NotePage />} />
-        <Route path="settings" element={<Settings />} />
+        <Route path="settings" element={<Navigate to="/space-preferences" replace />} />
         <Route path="space-preferences" element={<SpacePreferences />} />
         <Route path="emails" element={<Placeholder title="Forwarded emails" />} />
         <Route path="graph" element={<Placeholder title="Notes graph" />} />

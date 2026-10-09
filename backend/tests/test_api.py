@@ -580,15 +580,43 @@ def test_checkin_with_nothing_to_report(client, triage_today):
 # --- Saved prompts (slash commands) -------------------------------------------
 
 
-def test_default_prompts_are_seeded_once(client):
-    prompts = client.get("/api/prompts").json()
-    assert [p["command"] for p in prompts] == ["/prep"]
-    assert prompts[0]["instruction"]
+DEFAULT_COMMANDS = ["/design-search", "/prep", "/rcd"]
 
-    client.delete(f"/api/prompts/{prompts[0]['id']}")
+
+def commands(client, space_id=1):
+    return [p["command"] for p in client.get(f"/api/prompts?space_id={space_id}").json()]
+
+
+def test_default_prompts_are_seeded_once(client):
+    prompts = client.get("/api/prompts?space_id=1").json()
+    assert [p["command"] for p in prompts] == DEFAULT_COMMANDS
+    assert all(p["instruction"] and p["space_id"] == 1 for p in prompts)
+    rcd = next(p for p in prompts if p["command"] == "/rcd")
+    assert r"Y:\Classification, Certification & Documentation\RCD\All harmonized standards" in rcd["instruction"]
+
+    prep = next(p for p in prompts if p["command"] == "/prep")
+    client.delete(f"/api/prompts/{prep['id']}")
     with database.SessionLocal() as db:
-        main.seed_prompts(db)
-    assert client.get("/api/prompts").json() == []
+        main.seed_prompts(db, 1)
+    assert commands(client) == ["/design-search", "/rcd"]
+
+
+def test_new_spaces_get_their_own_default_prompts(client):
+    space = client.post("/api/spaces", json={"name": "Yard"}).json()
+    assert commands(client, space["id"]) == DEFAULT_COMMANDS
+    assert len(client.get("/api/prompts").json()) == 2 * len(DEFAULT_COMMANDS)
+
+    created = client.post("/api/prompts", json={"command": "/yard", "instruction": "x", "space_id": space["id"]})
+    assert created.status_code == 201
+    assert created.json()["space_id"] == space["id"]
+    assert "/yard" in commands(client, space["id"])
+    assert "/yard" not in commands(client)
+    # The same command can exist in another space.
+    assert client.post("/api/prompts", json={"command": "/yard", "instruction": "y"}).status_code == 201
+    # Editing keeps a prompt in its space.
+    updated = client.put(f"/api/prompts/{created.json()['id']}", json={"command": "/yard2", "instruction": "z"})
+    assert updated.json()["space_id"] == space["id"]
+    assert client.post("/api/prompts", json={"command": "/x", "instruction": "y", "space_id": 999}).status_code == 404
 
 
 def test_prompt_crud(client):
@@ -598,7 +626,7 @@ def test_prompt_crud(client):
     assert created.status_code == 201
     prompt = created.json()
     assert (prompt["command"], prompt["description"], prompt["instruction"]) == ("/weekly", "Weekly report", "Summarise.")
-    assert [p["command"] for p in client.get("/api/prompts").json()] == ["/prep", "/weekly"]
+    assert commands(client) == [*DEFAULT_COMMANDS, "/weekly"]
 
     updated = client.put(f"/api/prompts/{prompt['id']}", json={"command": "/week", "instruction": "Summarise the week."})
     assert updated.status_code == 200
@@ -606,7 +634,7 @@ def test_prompt_crud(client):
     assert updated.json()["description"] == ""
 
     assert client.delete(f"/api/prompts/{prompt['id']}").status_code == 204
-    assert [p["command"] for p in client.get("/api/prompts").json()] == ["/prep"]
+    assert commands(client) == DEFAULT_COMMANDS
     assert client.delete(f"/api/prompts/{prompt['id']}").status_code == 404
     assert client.put(f"/api/prompts/{prompt['id']}", json={"command": "/x", "instruction": "y"}).status_code == 404
 

@@ -85,8 +85,8 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     init_db()
     with database.SessionLocal() as db:
         spaces.migrate(db)
-        seed_prompts(db)
         for space in db.scalars(select(Space)).all():
+            seed_prompts(db, space.id)
             seed_views(db, space.id)
     yield
 
@@ -563,6 +563,7 @@ def chat(request: ChatRequest, db: Session = Depends(get_db)) -> ChatResponse:
             space_id=request.space_id,
             note_path=request.note_path,
             model=request.model,
+            reasoning_effort=request.reasoning_effort,
         )
     except agent.AgentNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -578,18 +579,40 @@ DEFAULT_PROMPTS = (
         instruction=(
             "Prepare me for an upcoming meeting. Find the meeting note (ask me which meeting if it is not clear), "
             "read the notes from the previous meeting of the same series and list which of its action items are "
-            "still open. Check the project's open and overdue tasks. Then draft a prep brief "
-            "in the meeting note: open items carried over, schedule risks, and questions to raise."
+            "open or overdue."
+        ),
+    ),
+    schemas.SavedPromptIn(
+        command="/design-search",
+        description="Search configured local folders for design data",
+        instruction=(
+            "Search the space's configured local folders using list_local_directory and read_local_file to answer "
+            "the following: "
+        ),
+    ),
+    schemas.SavedPromptIn(
+        command="/rcd",
+        description="Find information in RCD harmonized standards",
+        instruction=(
+            "Find information in the RCD regulations in "
+            r"'Y:\Classification, Certification & Documentation\RCD\All harmonized standards' "
+            "using list_local_directory and read_local_file to answer the following: "
         ),
     ),
 )
 
 
-def seed_prompts(db: Session) -> None:
-    """Add the default slash commands to a database that has never had any (deleted ones count)."""
-    if db.scalars(select(SavedPrompt).execution_options(include_deleted=True).limit(1)).first() is None:
+def seed_prompts(db: Session, space_id: int) -> None:
+    """Add each default slash command the space has never had (deleted ones count, so they stay deleted)."""
+    had = set(
+        db.scalars(
+            select(SavedPrompt.command).where(SavedPrompt.space_id == space_id).execution_options(include_deleted=True)
+        )
+    )
+    missing = [prompt for prompt in DEFAULT_PROMPTS if prompt.command not in had]
+    if missing:
         set_source(db, PROMPTS_SOURCE)
-        db.add_all(SavedPrompt(**prompt.model_dump()) for prompt in DEFAULT_PROMPTS)
+        db.add_all(SavedPrompt(**{**prompt.model_dump(), "space_id": space_id}) for prompt in missing)
         db.commit()
 
 
@@ -600,22 +623,29 @@ def _get_prompt(db: Session, prompt_id: int) -> SavedPrompt:
     return prompt
 
 
-def _check_command_free(db: Session, command: str, prompt_id: int | None = None) -> None:
-    clash = db.scalars(select(SavedPrompt).where(SavedPrompt.command == command, SavedPrompt.id != prompt_id)).first()
+def _check_command_free(db: Session, space_id: int, command: str, prompt_id: int | None = None) -> None:
+    clash = db.scalars(
+        select(SavedPrompt).where(
+            SavedPrompt.space_id == space_id, SavedPrompt.command == command, SavedPrompt.id != prompt_id
+        )
+    ).first()
     if clash is not None:
-        raise HTTPException(status_code=409, detail=f"{command} already exists")
+        raise HTTPException(status_code=409, detail=f"{command} already exists in this space")
 
 
 @app.get("/api/prompts")
-def list_prompts(db: Session = Depends(get_db)) -> list[schemas.SavedPrompt]:
-    """The saved slash commands, alphabetically."""
-    prompts = db.scalars(select(SavedPrompt).order_by(SavedPrompt.command)).all()
-    return [schemas.SavedPrompt.model_validate(p, from_attributes=True) for p in prompts]
+def list_prompts(space_id: int | None = None, db: Session = Depends(get_db)) -> list[schemas.SavedPrompt]:
+    """The saved slash commands of `space_id` (of every space if not given), alphabetically."""
+    query = select(SavedPrompt).order_by(SavedPrompt.command, SavedPrompt.space_id)
+    if space_id is not None:
+        query = query.where(SavedPrompt.space_id == space_id)
+    return [schemas.SavedPrompt.model_validate(p, from_attributes=True) for p in db.scalars(query)]
 
 
 @app.post("/api/prompts", status_code=201)
 def create_prompt(request: schemas.SavedPromptIn, db: Session = Depends(get_db)) -> schemas.SavedPrompt:
-    _check_command_free(db, request.command)
+    _space_id_or_404(db, request.space_id)
+    _check_command_free(db, request.space_id, request.command)
     set_source(db, PROMPTS_SOURCE)
     prompt = SavedPrompt(**request.model_dump())
     db.add(prompt)
@@ -627,10 +657,11 @@ def create_prompt(request: schemas.SavedPromptIn, db: Session = Depends(get_db))
 def update_prompt(
     prompt_id: int, request: schemas.SavedPromptIn, db: Session = Depends(get_db)
 ) -> schemas.SavedPrompt:
+    """Edit a slash command; it stays in its space."""
     prompt = _get_prompt(db, prompt_id)
-    _check_command_free(db, request.command, prompt_id)
+    _check_command_free(db, prompt.space_id, request.command, prompt_id)
     set_source(db, PROMPTS_SOURCE)
-    for key, value in request.model_dump().items():
+    for key, value in request.model_dump(exclude={"space_id"}).items():
         setattr(prompt, key, value)
     db.commit()
     return schemas.SavedPrompt.model_validate(prompt, from_attributes=True)
@@ -908,8 +939,9 @@ def list_spaces(db: Session = Depends(get_db)) -> list[schemas.Space]:
 
 @app.post("/api/spaces", status_code=201)
 def create_space(request: schemas.SpaceIn, db: Session = Depends(get_db)) -> schemas.Space:
-    """A new space with empty content/, the starter templates and the default task views."""
+    """A new space with empty content/, the starter templates, the default slash commands and task views."""
     space = spaces.create_space(db, request.name)
+    seed_prompts(db, space.id)
     seed_views(db, space.id)
     return schemas.Space.model_validate(space, from_attributes=True)
 

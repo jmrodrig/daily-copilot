@@ -82,6 +82,40 @@ def test_chat_answers_without_tools(client, model):
     assert call["messages"][1:] == [{"role": "user", "content": "Hi"}]
 
 
+def test_chat_passes_reasoning_effort(client, model):
+    model.script += [reply("Hi"), reply("Hi")]
+
+    client.post("/api/chat", json={"messages": [{"role": "user", "content": "Hi"}], "reasoning_effort": "high"})
+    chat(client, "Hi")
+
+    assert model.calls[0]["reasoning_effort"] == "high"
+    assert "reasoning_effort" not in model.calls[1]
+
+
+def test_chat_rejects_unknown_reasoning_effort(client, model):
+    body = {"messages": [{"role": "user", "content": "Hi"}], "reasoning_effort": "max"}
+    assert client.post("/api/chat", json=body).status_code == 422
+
+
+def test_chat_drops_reasoning_effort_the_model_does_not_support(client, monkeypatch):
+    calls = []
+
+    def completion(**kwargs):
+        calls.append(kwargs)
+        if "reasoning_effort" in kwargs:
+            raise agent.litellm.UnsupportedParamsError(message="no effort", llm_provider="gemini", model="m")
+        return reply("Fine")
+
+    monkeypatch.setattr(agent.litellm, "completion", completion)
+    body = {"messages": [{"role": "user", "content": "Hi"}], "reasoning_effort": "low"}
+
+    response = client.post("/api/chat", json=body)
+
+    assert response.status_code == 200
+    assert response.json()["reply"] == "Fine"
+    assert ["reasoning_effort" in c for c in calls] == [True, False]
+
+
 def test_chat_sends_the_conversation_so_far(client, model):
     model.script.append(reply("Yes"))
     messages = [
@@ -527,20 +561,19 @@ def test_chat_rejects_other_providers_models(client, model, picked):
 # --- RAG folders --------------------------------------------------------------
 
 
-def test_space_context_lists_rag_folders(client, tmp_path):
+def test_space_context_names_rag_folders_without_listing_them(client, tmp_path):
     folder = tmp_path / "Lawrences Files"
     (folder / "C7801").mkdir(parents=True)
     (folder / "spec.pdf").write_bytes(b"%PDF")
-    missing = tmp_path / "gone"
-    client.put("/api/spaces/1", json={"rag_folders": [str(folder), str(missing)]})
+    client.put("/api/spaces/1", json={"rag_folders": [str(folder)]})
 
     _, context = agent.space_context(1)
 
-    assert "Configured Local RAG Folders for this space:" in context
-    assert f"- {folder}: [C7801/, spec.pdf]" in context
-    assert f"- {missing}: (not reachable:" in context
+    assert "Configured Local Folders in this space" in context
+    assert f"- `{folder}`" in context
     assert "list_local_directory" in context
+    assert "spec.pdf" not in context and "C7801" not in context
 
 
 def test_space_context_without_rag_folders(client):
-    assert "RAG Folders" not in agent.space_context(1)[1]
+    assert "Local Folders" not in agent.space_context(1)[1]

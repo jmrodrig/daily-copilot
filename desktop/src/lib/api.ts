@@ -56,7 +56,7 @@ export function message(err: unknown): string {
 }
 
 // Shape of GET /api/prompts (see SavedPrompt in backend/schemas.py).
-export type SavedPrompt = { id: number; command: string; description: string; instruction: string };
+export type SavedPrompt = { id: number; space_id: number; command: string; description: string; instruction: string };
 
 /** Fired after the saved prompts change, so the chat's command menu can reload them. */
 export const PROMPTS_CHANGED = "copilot:prompts-changed";

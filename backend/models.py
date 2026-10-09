@@ -232,13 +232,16 @@ class TimeLog(Versioned, Base):
 class SavedPrompt(Versioned, Base):
     """A slash command for the Co-pilot chat: typing `command` sends `instruction` to the agent.
 
-    `command` is unique among live prompts only (checked by the API), so a deleted
-    command can be created again.
+    Each space has its own commands. `command` is unique among a space's live prompts only (checked by the
+    API), so a deleted command can be created again.
     """
 
     __tablename__ = "saved_prompts"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    # Literal 1 = `spaces.DEFAULT_SPACE_ID` (spaces imports this module); rows from before spaces had prompts
+    # move into the default space.
+    space_id: Mapped[int] = mapped_column(ForeignKey("spaces.id"), default=1, server_default="1", index=True)
     command: Mapped[str] = mapped_column(String(32), index=True)
     description: Mapped[str] = mapped_column(default="")
     instruction: Mapped[str]

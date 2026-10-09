@@ -229,23 +229,36 @@ a new note) and `base_hash`, the SHA-256 of the note file when it was proposed.
 `history` with source `copilot_agent_approved`. Without `COPILOT_GEMINI_API_KEY`,
 `/api/chat` returns 503; a failing model call returns 502.
 
+Optional `model` picks the Gemini model and `reasoning_effort` (`"low"`, `"medium"` or
+`"high"`) how hard it thinks; left out, the model uses its own default. A model that
+does not support an effort level answers without one.
+
+A space's configured local folders (`rag_folders`) are only named in the system prompt;
+the agent crawls them with `list_local_directory` and `read_local_file` when a command
+(e.g. `/design-search`) or question calls for it.
+
 ## Saved prompts (slash commands)
 
 Saved prompts are routines the user triggers in the desktop chat by starting a message
 with their command, e.g. `/prep Friday design review`. They are `SavedPrompt` rows:
 
 ```json
-{"command": "/prep", "description": "Draft a meeting prep brief", "instruction": "Prepare me for an upcoming meeting..."}
+{"space_id": 1, "command": "/prep", "description": "Draft a meeting prep brief", "instruction": "Prepare me for an upcoming meeting..."}
 ```
 
-- `GET /api/prompts` lists them by command.
-- `POST /api/prompts` creates one (201); `PUT /api/prompts/{id}` replaces one.
+- `GET /api/prompts?space_id=1` lists a space's prompts by command (every space's
+  without `space_id`).
+- `POST /api/prompts` creates one in `space_id` (201, default space 1);
+  `PUT /api/prompts/{id}` replaces one, keeping it in its space.
 - `DELETE /api/prompts/{id}` soft-deletes one (204).
 
 `command` is lower-cased and gets a leading `/` if missing; it must be up to 31
-letters, digits, `-` or `_`. A command already used by another live prompt returns
-409. Changes are logged in `history` with source `settings`. On startup a database
-that has never had any prompts gets a default `/prep` for meeting prep.
+letters, digits, `-` or `_`. A command already used by another live prompt in the same
+space returns 409. Changes are logged in `history` with source `settings`. On startup
+(and when a space is created) each space gets the default commands it has never had,
+deleted ones included: `/prep` for meeting prep, `/design-search` for the space's local
+folders and `/rcd` for the RCD harmonized standards. They are edited in the desktop
+app's Space Preferences.
 
 The prompt is expanded by the desktop app, not the server: the user message sent to
 `/api/chat` becomes `[Saved prompt /prep]`, the instruction, and `User input: ...` for

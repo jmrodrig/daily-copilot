@@ -554,11 +554,6 @@ export default function Sidebar({ onCollapse }: { onCollapse: () => void }) {
           </div>
           <div className="truncate font-mono text-[13px] text-text-muted">{window.location.host}</div>
         </div>
-        <div className="flex shrink-0 flex-col items-end gap-0.5">
-          <NavLink to="/settings" className={({ isActive }) => footerLinkClass(isActive)}>
-            Settings
-          </NavLink>
-        </div>
       </div>
 
       {menu && (
@@ -698,10 +693,6 @@ function SpaceSwitcher() {
       )}
     </div>
   );
-}
-
-function footerLinkClass(isActive: boolean): string {
-  return `rounded-md px-2 py-1 text-xs ${isActive ? "bg-surface-active text-text-primary" : "text-text-muted hover:bg-surface-hover"}`;
 }
 
 function navClass(isActive: boolean): string {

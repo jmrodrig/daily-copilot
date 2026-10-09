@@ -43,12 +43,26 @@ const MODES: { value: AccessMode; label: string }[] = [
 const MODE_KEY = "copilot.accessMode";
 // The Gemini model last picked in the chat (a bare name, e.g. "gemini-2.5-pro").
 const MODEL_KEY = "copilot_chat_model";
+type Effort = "auto" | "low" | "medium" | "high";
+const EFFORTS: { value: Effort; label: string; hint: string }[] = [
+  { value: "auto", label: "Auto", hint: "Default (model's native behavior)" },
+  { value: "low", label: "Low", hint: "Fast, minimal thinking" },
+  { value: "medium", label: "Medium", hint: "Balanced reasoning" },
+  { value: "high", label: "High", hint: "Deep reasoning & thinking budget" },
+];
+// The reasoning effort last picked in the chat; "auto" leaves it to the model.
+const EFFORT_KEY = "copilot_reasoning_effort";
 const CONTEXT_LINES = 3;
 const COMMAND_RE = /^(\/[a-z0-9][a-z0-9_-]*)(?:\s+([\s\S]*))?$/i;
 
 /** A litellm model string without its provider (`gemini/gemini-2.5-pro` -> `gemini-2.5-pro`). */
 function bareModel(model: string): string {
   return model.split("/").pop() ?? model;
+}
+
+function storedEffort(): Effort {
+  const value = localStorage.getItem(EFFORT_KEY);
+  return EFFORTS.some((e) => e.value === value) ? (value as Effort) : "auto";
 }
 
 function storedMode(): AccessMode {
@@ -85,7 +99,6 @@ function pageContext(location: Location, spaceId: number): { label: string; hint
   const labels: Record<string, string> = {
     "/triage": "Triage",
     "/check-in": "Evening check-in",
-    "/settings": "Settings",
     "/emails": "Forwarded emails",
     "/graph": "Notes graph",
     "/people": "People",
@@ -145,6 +158,9 @@ export default function CopilotChat({
   const [models, setModels] = useState<string[]>([]);
   const [modelMenu, setModelMenu] = useState(false);
   const modelButtonRef = useRef<HTMLButtonElement>(null);
+  const [effort, setEffort] = useState<Effort>(storedEffort);
+  const [effortMenu, setEffortMenu] = useState(false);
+  const effortButtonRef = useRef<HTMLButtonElement>(null);
   const [prompts, setPrompts] = useState<SavedPrompt[]>([]);
   const [menuIndex, setMenuIndex] = useState(0);
   const [menuDismissed, setMenuDismissed] = useState(false);
@@ -174,15 +190,26 @@ export default function CopilotChat({
     localStorage.setItem(MODEL_KEY, next);
   }
 
+  function pickEffort(next: Effort) {
+    setEffort(next);
+    localStorage.setItem(EFFORT_KEY, next);
+  }
+
+  // Each space has its own slash commands.
   useEffect(() => {
+    const controller = new AbortController();
     const load = () =>
-      getJson<SavedPrompt[]>("/api/prompts")
+      getJson<SavedPrompt[]>(`/api/prompts?space_id=${spaceId}`, controller.signal)
         .then(setPrompts)
         .catch(() => {});
+    setPrompts([]);
     load();
     window.addEventListener(PROMPTS_CHANGED, load);
-    return () => window.removeEventListener(PROMPTS_CHANGED, load);
-  }, []);
+    return () => {
+      controller.abort();
+      window.removeEventListener(PROMPTS_CHANGED, load);
+    };
+  }, [spaceId]);
 
   useEffect(() => {
     localStorage.setItem(MODE_KEY, mode);
@@ -260,6 +287,7 @@ export default function CopilotChat({
           space_id: spaceId,
           note_path: context.notePath,
           model: model ?? undefined,
+          reasoning_effort: effort === "auto" ? null : effort,
         }),
       });
       if (!res.ok) throw new Error(await errorDetail(res));
@@ -408,6 +436,64 @@ export default function CopilotChat({
             </div>
           </Popover>
           <button
+            ref={effortButtonRef}
+            type="button"
+            aria-haspopup="listbox"
+            aria-expanded={effortMenu}
+            onClick={() => setEffortMenu((open) => !open)}
+            disabled={sending}
+            className="btn min-h-[34px] gap-1.5 px-2.5 text-xs font-medium text-text-primary hover:bg-surface-hover"
+            title="Reasoning effort"
+          >
+            <BrainIcon />
+            <span>{effort === "auto" ? "Effort: Auto" : EFFORTS.find((e) => e.value === effort)?.label}</span>
+            <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-text-muted">
+              <path d="M4 6l4 4 4-4" />
+            </svg>
+          </button>
+          <Popover
+            anchor={effortButtonRef}
+            open={effortMenu}
+            onClose={() => setEffortMenu(false)}
+            label="Reasoning effort"
+            role="listbox"
+            className="w-60"
+          >
+            <div className="border-b border-border-default px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wider text-text-muted">
+              Reasoning effort
+            </div>
+            <div className="py-1">
+              {EFFORTS.map((option) => {
+                const isSelected = option.value === effort;
+                return (
+                  <button
+                    key={option.value}
+                    type="button"
+                    role="option"
+                    aria-selected={isSelected}
+                    onClick={() => {
+                      pickEffort(option.value);
+                      setEffortMenu(false);
+                    }}
+                    className={`flex w-full items-center justify-between gap-2 rounded px-2.5 py-1.5 text-left text-xs transition-colors ${
+                      isSelected ? "bg-accent/20 text-accent-soft" : "text-text-primary hover:bg-surface-hover"
+                    }`}
+                  >
+                    <span className="flex min-w-0 flex-col">
+                      <span className="font-medium">{option.label}</span>
+                      <span className="truncate text-text-muted">{option.hint}</span>
+                    </span>
+                    {isSelected && (
+                      <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 text-accent">
+                        <path d="M3.5 8.5l3 3 6-6" />
+                      </svg>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          </Popover>
+          <button
             type="button"
             onClick={() => {
               setEntries([]);
@@ -529,6 +615,15 @@ const MODE_CHIP: Record<AccessMode, string> = {
   write_directly: "Notes: read and write",
 };
 
+function BrainIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 text-text-muted" aria-hidden>
+      <path d="M9.5 3A2.5 2.5 0 0 0 7 5.5v.1A3 3 0 0 0 4.5 10a3 3 0 0 0 .4 5.4A3 3 0 0 0 9.5 19a2.5 2.5 0 0 0 2.5-2.5v-11A2.5 2.5 0 0 0 9.5 3z" />
+      <path d="M14.5 3A2.5 2.5 0 0 1 17 5.5v.1a3 3 0 0 1 2.5 4.4 3 3 0 0 1-.4 5.4 3 3 0 0 1-4.6 3.6 2.5 2.5 0 0 1-2.5-2.5" />
+    </svg>
+  );
+}
+
 function CommandMenu({
   items,
   highlighted,
@@ -569,7 +664,7 @@ function CommandMenu({
       ))}
       <div className="mx-1.5 my-1 h-px bg-border-strong" />
       <Link
-        to="/settings"
+        to="/space-preferences#commands"
         onMouseDown={(e) => e.preventDefault()}
         className="block rounded-md px-3 py-1.5 text-xs text-text-muted hover:bg-surface-active hover:text-text-primary"
       >
