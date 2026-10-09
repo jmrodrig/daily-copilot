@@ -492,8 +492,21 @@ class _Turn:
 # --- Models -------------------------------------------------------------------
 
 
+# Gemini models that generate content but aren't for chat (speech, images, robotics, test models...).
+_NON_CHAT_SUBSTRINGS = (
+    "-tts",
+    "-transcribe",
+    "-image",
+    "-robotics",
+    "-computer-use",
+    "banana",
+    "embedding",
+    "aqa",
+)
+
+
 def _fetch_gemini_models(api_key: str) -> list[str]:
-    """The names (without `models/`) of the Gemini models that can generate content, from the Gemini API."""
+    """The names (without `models/`) of the Gemini chat models that can generate content, from the Gemini API."""
     names, page_token = [], ""
     while True:
         query = {"key": api_key, "pageSize": 1000, **({"pageToken": page_token} if page_token else {})}
@@ -503,7 +516,11 @@ def _fetch_gemini_models(api_key: str) -> list[str]:
             body = json.load(response)
         for model in body.get("models", []):
             name = str(model.get("name", "")).removeprefix("models/")
-            if name.startswith("gemini") and "generateContent" in model.get("supportedGenerationMethods", []):
+            if (
+                name.startswith("gemini")
+                and "generateContent" in model.get("supportedGenerationMethods", [])
+                and not any(sub in name.lower() for sub in _NON_CHAT_SUBSTRINGS)
+            ):
                 names.append(name)
         page_token = body.get("nextPageToken") or ""
         if not page_token:

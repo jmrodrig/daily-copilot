@@ -454,6 +454,37 @@ def test_list_models_from_the_api(client, monkeypatch, no_models_cache):
     assert keys == ["test-key"]  # cached
 
 
+def test_fetch_gemini_models_keeps_only_chat_models(monkeypatch):
+    names = [
+        "gemini-2.5-pro",
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-preview-tts",
+        "gemini-2.5-flash-image",
+        "gemini-robotics-er-1.5-preview",
+        "gemini-2.5-computer-use-preview",
+        "gemini-embedding-001",
+        "gemini-live-transcribe",
+        "nano-banana",
+        "imagen-4.0-generate-001",
+    ]
+    body = {"models": [{"name": f"models/{n}", "supportedGenerationMethods": ["generateContent"]} for n in names]}
+    body["models"].append({"name": "models/gemini-1.5-flash", "supportedGenerationMethods": ["countTokens"]})
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return json.dumps(body).encode()
+
+    monkeypatch.setattr(agent.urllib.request, "urlopen", lambda url, timeout: Response())
+
+    assert agent._fetch_gemini_models("key") == ["gemini-2.5-pro", "gemini-2.5-flash"]
+
+
 def test_list_models_falls_back_when_the_api_fails(client, monkeypatch, no_models_cache):
     def fetch(api_key):
         raise OSError("offline")

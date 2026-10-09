@@ -5,6 +5,7 @@ import remarkGfm from "remark-gfm";
 
 import { errorDetail, getJson, message, PROMPTS_CHANGED, type SavedPrompt } from "../lib/api";
 import { notePath, useSpace } from "../lib/space";
+import Popover from "./Popover";
 import { IconButton } from "./Sidebar";
 
 // Shapes of POST /api/chat and POST /api/notes/apply-edit (see ChatResponse etc. in backend/schemas.py).
@@ -142,6 +143,8 @@ export default function CopilotChat({
   // The model picked (else the server's default, once known), and the ones on offer (GET /api/models).
   const [model, setModel] = useState<string | null>(() => localStorage.getItem(MODEL_KEY));
   const [models, setModels] = useState<string[]>([]);
+  const [modelMenu, setModelMenu] = useState(false);
+  const modelButtonRef = useRef<HTMLButtonElement>(null);
   const [prompts, setPrompts] = useState<SavedPrompt[]>([]);
   const [menuIndex, setMenuIndex] = useState(0);
   const [menuDismissed, setMenuDismissed] = useState(false);
@@ -349,23 +352,61 @@ export default function CopilotChat({
 
       <div className="flex flex-col gap-2.5 px-5 pb-2.5">
         <div className="flex items-center gap-2">
-          <label className="btn min-h-[34px] cursor-pointer gap-2 pr-1.5" title="The Gemini model that answers">
+          <button
+            ref={modelButtonRef}
+            type="button"
+            aria-haspopup="listbox"
+            aria-expanded={modelMenu}
+            onClick={() => setModelMenu((open) => !open)}
+            disabled={sending || (!model && !models.length)}
+            className="btn min-h-[34px] gap-2 px-3 text-xs font-medium text-text-primary hover:bg-surface-hover"
+            title="Select Gemini model"
+          >
             <span className={`h-2 w-2 shrink-0 rounded-full ${model ? "bg-project-p5002" : "bg-project-neutral"}`} />
-            <select
-              aria-label="Model"
-              value={model ?? ""}
-              onChange={(e) => pickModel(e.target.value)}
-              disabled={sending || (!model && !models.length)}
-              className="max-w-[12rem] cursor-pointer truncate bg-transparent text-inherit outline-none"
-            >
-              {!model && <option value="">Model</option>}
-              {(model && !models.includes(model) ? [model, ...models] : models).map((name) => (
-                <option key={name} value={name}>
-                  {name}
-                </option>
-              ))}
-            </select>
-          </label>
+            <span className="max-w-[12rem] truncate">{model ?? "Model"}</span>
+            <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-text-muted">
+              <path d="M4 6l4 4 4-4" />
+            </svg>
+          </button>
+          <Popover
+            anchor={modelButtonRef}
+            open={modelMenu}
+            onClose={() => setModelMenu(false)}
+            label="Select Gemini model"
+            role="listbox"
+            className="w-64 max-h-72 overflow-y-auto"
+          >
+            <div className="border-b border-border-default px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wider text-text-muted">
+              Gemini Models
+            </div>
+            <div className="py-1">
+              {(model && !models.includes(model) ? [model, ...models] : models).map((name) => {
+                const isSelected = name === model;
+                return (
+                  <button
+                    key={name}
+                    type="button"
+                    role="option"
+                    aria-selected={isSelected}
+                    onClick={() => {
+                      pickModel(name);
+                      setModelMenu(false);
+                    }}
+                    className={`flex w-full items-center justify-between gap-2 rounded px-2.5 py-1.5 text-left text-xs transition-colors ${
+                      isSelected ? "bg-accent/20 font-medium text-accent-soft" : "text-text-primary hover:bg-surface-hover"
+                    }`}
+                  >
+                    <span className="truncate">{name}</span>
+                    {isSelected && (
+                      <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 text-accent">
+                        <path d="M3.5 8.5l3 3 6-6" />
+                      </svg>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          </Popover>
           <button
             type="button"
             onClick={() => {
