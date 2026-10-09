@@ -11,14 +11,16 @@ from typing import Any
 
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 import agent
 import file_layer
 import database
+import local_files
 import spaces
 from database import get_db, init_db
 from history import set_source, soft_delete, to_jsonable, utcnow
@@ -44,6 +46,8 @@ from schemas import (
     GanttTask,
     FolderCreate,
     ImageUpload,
+    LocalFileStat,
+    LocalPathRequest,
     MediaMarkup,
     FolderMetaOut,
     FolderMetaUpdate,
@@ -801,6 +805,62 @@ def apply_edit(request: ApplyEditRequest, db: Session = Depends(get_db)) -> Appl
 # --- Spaces, content tree and templates (Phase 9) -----------------------------
 
 DESKTOP_SOURCE = "desktop"
+
+
+# --- Local files -----------------------------------------------------------------
+# Files and folders on this machine linked from notes (see local_files): opened here, downloaded by remote clients.
+
+_LOOPBACK = {"127.0.0.1", "::1", "localhost"}
+
+
+def _local_file_errors(exc: Exception) -> HTTPException:
+    if isinstance(exc, FileNotFoundError):
+        return HTTPException(status_code=404, detail=str(exc))
+    if isinstance(exc, PermissionError):
+        return HTTPException(status_code=403, detail=str(exc))
+    return HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/local-files/open", status_code=204)
+def open_local_file(request: LocalPathRequest, http: Request) -> None:
+    """Open a linked file or folder with its default program; only for a client on this machine."""
+    if http.client is None or http.client.host not in _LOOPBACK:
+        raise HTTPException(status_code=403, detail="Local files can only be opened on the machine running Co-Pilot")
+    try:
+        local_files.open_path(request.path)
+    except (local_files.LocalFileError, OSError) as exc:
+        raise _local_file_errors(exc) from exc
+
+
+@app.get("/api/local-files/stat")
+def stat_local_file(path: str) -> LocalFileStat:
+    """A linked file or folder's name, kind and size (a folder's total), before a remote client downloads it."""
+    try:
+        return LocalFileStat(**local_files.stat_path(path))
+    except (local_files.LocalFileError, OSError) as exc:
+        raise _local_file_errors(exc) from exc
+
+
+@app.get("/api/local-files/download")
+def download_local_file(path: str) -> FileResponse:
+    """A linked file, as an attachment."""
+    try:
+        file = local_files.file_path(path)
+    except (local_files.LocalFileError, OSError) as exc:
+        raise _local_file_errors(exc) from exc
+    return FileResponse(file, filename=file.name, headers={"X-Content-Type-Options": "nosniff"})
+
+
+@app.get("/api/local-files/download-zip")
+def download_local_folder(path: str) -> FileResponse:
+    """A linked folder as a ZIP, built in a temporary folder deleted once it's sent."""
+    try:
+        archive, name = local_files.zip_directory(path)
+    except (local_files.LocalFileError, OSError) as exc:
+        raise _local_file_errors(exc) from exc
+    return FileResponse(
+        archive, filename=name, media_type="application/zip", background=BackgroundTask(local_files.remove_temp, archive)
+    )
 
 
 @app.get("/api/spaces")

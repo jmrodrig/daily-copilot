@@ -1186,3 +1186,17 @@ class UrlMetadata(BaseModel):
     """A web page's metadata for a link pill: its `<title>`, or None when it can't be fetched or has none."""
 
     title: str | None = None
+
+
+class LocalPathRequest(BaseModel):
+    """`POST /api/local-files/open`: a local file or folder linked from a note (path or `file://` URL)."""
+
+    path: str = Field(min_length=1)
+
+
+class LocalFileStat(BaseModel):
+    """`GET /api/local-files/stat`: a local file or folder, for a remote client to confirm its download."""
+
+    name: str
+    type: Literal["file", "directory"]
+    size: int

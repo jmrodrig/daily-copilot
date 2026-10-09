@@ -8,6 +8,8 @@ The tools the model may call:
 - `read_note`: read one note with its front-matter.
 - `list_tasks`: the space's tasks from SQLite (status, dates, overdue flag).
 - `write_note`: create or replace a note. Only offered outside `read_only` mode.
+- `list_local_directory` / `read_local_file`: crawl and read the local file system (design data such as
+  PDFs, CAD and Maxsurf files outside the notes; see `local_files`).
 
 Context injected into the system prompt (see `space_context`):
 
@@ -35,6 +37,7 @@ from sqlalchemy import func, or_, select
 
 import database
 import file_layer
+import local_files
 import spaces
 from config import Settings, get_settings
 from models import FolderMeta, Project, Space, Task
@@ -85,6 +88,10 @@ Rules:
 - A message starting with `[Saved prompt /<command>]` is one of the user's saved routines (e.g. /prep for \
 meeting prep): carry out its instruction with the tools, using any `User input:` that follows it.
 - `[The user is looking at ...]` says which page or note the user has open; "this page" or "this note" means it.
+- You can crawl the local file system with `list_local_directory` and `read_local_file` to find design data \
+outside the notes (PDF drawings and reports, CAD files, Maxsurf models, spreadsheets, ...). Use absolute paths, \
+e.g. ones linked from a note (`file:///C:/...`, `C:\\...`, `\\\\server\\share\\...`). Text and PDF files can be read; \
+for other formats you get only their size and dates. Cite the file paths you relied on.
 {write_rules}{context}"""
 
 _WRITE_RULES = {
@@ -101,6 +108,10 @@ _WRITE_GUIDE = (
 )
 
 _PATH_PARAM = {"type": "string", "description": "Note path relative to the notes folder, e.g. `C7801/Keel.md`"}
+_LOCAL_PATH_PARAM = {
+    "type": "string",
+    "description": "Absolute local path or `file://` URL, e.g. `C:\\Projects\\C7801` or `/home/user/projects`",
+}
 
 TOOLS: dict[str, dict[str, Any]] = {
     "search_notes": {
@@ -148,6 +159,15 @@ TOOLS: dict[str, dict[str, Any]] = {
             },
             "required": ["path", "content"],
         },
+    },
+    "list_local_directory": {
+        "description": "List the files and subfolders (name, type, size in bytes) of a folder on the local file system.",
+        "parameters": {"type": "object", "properties": {"path": _LOCAL_PATH_PARAM}, "required": ["path"]},
+    },
+    "read_local_file": {
+        "description": "Read a file on the local file system: text files (.txt, .md, .csv, .json, ...) as they are and "
+        "the text of PDFs; other formats (Word, Excel, CAD, Maxsurf, ...) return only their size and dates.",
+        "parameters": {"type": "object", "properties": {"path": _LOCAL_PATH_PARAM}, "required": ["path"]},
     },
 }
 
@@ -412,6 +432,8 @@ class _Turn:
             "read_note": functools.partial(read_note, notes_dir=self.root),
             "list_tasks": functools.partial(list_tasks, space_id=self.space_id),
             "write_note": self.write_note,
+            "list_local_directory": local_files.list_local_directory,
+            "read_local_file": local_files.read_local_file,
         }
         if name not in tools or (name == "write_note" and self.mode is AccessMode.READ_ONLY):
             raise ToolError(f"Unknown tool: {name}")
@@ -419,7 +441,7 @@ class _Turn:
             return tools[name](**arguments)
         except TypeError as exc:
             raise ToolError(f"Bad arguments for {name}: {exc}") from exc
-        except (file_layer.FileLayerError, OSError, UnicodeDecodeError) as exc:
+        except (file_layer.FileLayerError, local_files.LocalFileError, OSError, UnicodeDecodeError) as exc:
             raise ToolError(str(exc)) from exc
 
 

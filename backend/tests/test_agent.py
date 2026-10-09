@@ -200,7 +200,7 @@ def test_read_only_does_not_offer_or_allow_writes(client, notes_dir, model):
     body = chat(client, "Write a note", mode="read_only").json()
 
     offered = [t["function"]["name"] for t in model.calls[0]["tools"]]
-    assert offered == ["search_notes", "read_note", "list_tasks"]
+    assert offered == ["search_notes", "read_note", "list_tasks", "list_local_directory", "read_local_file"]
     assert "READ ONLY" in model.calls[0]["messages"][0]["content"]
     assert tool_results(model.calls[1]) == [{"error": "Unknown tool: write_note"}]
     assert body["proposed_edits"] == [] and body["written_paths"] == []

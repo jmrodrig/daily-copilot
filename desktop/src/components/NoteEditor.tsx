@@ -1,5 +1,6 @@
 import { Extension, getMarkRange } from "@tiptap/core";
 import type { ImageOptions } from "@tiptap/extension-image";
+import Link from "@tiptap/extension-link";
 import { TaskItem, TaskList } from "@tiptap/extension-list";
 import { TableKit, TableView } from "@tiptap/extension-table";
 import TextAlign from "@tiptap/extension-text-align";
@@ -23,6 +24,7 @@ import StarterKit from "@tiptap/starter-kit";
 import { useEffect, useLayoutEffect, useRef, useState, useMemo, useCallback, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 
 import { message, uploadFile } from "../lib/api";
+import { isLocalHref, openLocalFile } from "../lib/localFiles";
 import type { TaskItem as TaskRow } from "../lib/tasks";
 import MediaLightbox, { ExpandButton, isPdfUrl, MarkupOverlay } from "./MediaLightbox";
 import { LinkPanel, panelPosition, TaskPanel, type PanelDraft } from "./refPanels";
@@ -103,8 +105,14 @@ export default function NoteEditor({
 
   const editor = useEditor({
     extensions: [
-      // Paragraphs and headings are swapped for ones that save their alignment (see noteFormatting).
-      StarterKit.configure({ link: { openOnClick: false }, paragraph: false, heading: false }),
+      // Paragraphs and headings are swapped for ones that save their alignment (see noteFormatting), and links for
+      // ones that keep local paths (see NoteLink).
+      StarterKit.configure({ link: false, paragraph: false, heading: false }),
+      NoteLink.configure({
+        openOnClick: false,
+        protocols: ["file"],
+        isAllowedUri: (url, { defaultValidate }) => isLocalHref(url) || defaultValidate(url),
+      }),
       AlignedParagraph,
       AlignedHeading,
       AlignedBlocks,
@@ -519,7 +527,8 @@ function isAttachmentHref(href: string | undefined): boolean {
 
 /**
  * The menu under a link: open it, and for an uploaded file in an editable note, remove it. A linked PDF opens in the
- * lightbox, to be marked up while the note is editable, as does a click on its pill. Extracted so its props memoize
+ * lightbox, to be marked up while the note is editable, as does a click on its pill. A link to a local file or folder
+ * opens on this machine, or downloads on a remote one (see openLocalFile), from its pill or the Open button. Extracted so its props memoize
  * without cluttering NoteEditor's top-level hooks.
  */
 function BubbleMenuWrapper({ editor }: { editor: Editor }) {
@@ -537,7 +546,13 @@ function BubbleMenuWrapper({ editor }: { editor: Editor }) {
     const click = (event: MouseEvent) => {
       const anchor = event.target instanceof Element ? event.target.closest("a[href]") : null;
       const href = anchor?.getAttribute("href") ?? undefined;
-      if (!anchor || !isAttachmentHref(href) || !isPdfUrl(href!) || event.ctrlKey || event.metaKey || event.shiftKey) return;
+      if (!anchor || event.ctrlKey || event.metaKey || event.shiftKey) return;
+      if (isLocalHref(href)) {
+        event.preventDefault();
+        void openLocalFile(href);
+        return;
+      }
+      if (!isAttachmentHref(href) || !isPdfUrl(href!)) return;
       event.preventDefault();
       setPdf({ href: href!, name: anchor.textContent ?? "" });
     };
@@ -573,6 +588,11 @@ function BubbleMenuWrapper({ editor }: { editor: Editor }) {
           target="_blank"
           rel="noopener noreferrer"
           onClick={(event) => {
+            if (isLocalHref(link.href)) {
+              event.preventDefault();
+              void openLocalFile(link.href);
+              return;
+            }
             if (!isAttachmentHref(link.href) || !isPdfUrl(link.href!)) return;
             event.preventDefault();
             const { state } = editor;
@@ -602,6 +622,20 @@ function BubbleMenuWrapper({ editor }: { editor: Editor }) {
     </>
   );
 }
+
+/**
+ * Links, allowed to point at local files and folders (`file:///…`, `C:\…`, `\\server\…`; see NoteEditor's config) rather
+ * than stripped as unsafe. An href with spaces or brackets, as local paths often have, is saved as `[name](<href>)` so
+ * it parses back.
+ */
+const NoteLink = Link.extend({
+  renderMarkdown: (node, h) => {
+    const href: string = node.attrs?.href ?? "";
+    const title: string = node.attrs?.title ?? "";
+    const target = /[\s()<>]/.test(href) ? `<${href}>` : href;
+    return `[${h.renderChildren(node)}](${target}${title ? ` "${title}"` : ""})`;
+  },
+});
 
 const ResizableImage = SizedImage.extend<ImageOptions>({
   addNodeView() {
