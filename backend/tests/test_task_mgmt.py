@@ -443,6 +443,50 @@ def test_project_color_shows_on_projects_tasks_and_gantt(client):
     assert (renamed["name"], renamed["color"]) == ("Keel build", None)
 
 
+def test_renaming_a_project_renames_its_code_and_tag(client):
+    root = spaces.content_dir(spaces.DEFAULT_SPACE_ID)
+    (root / "Keel").mkdir(parents=True)
+    (root / "Keel" / "plan.md").write_text("---\ntags: [c7801, urgent]\n---\nBody\n", encoding="utf-8")
+    (root / "Keel" / "single.md").write_text("---\ntags: C7801\n---\nBody\n", encoding="utf-8")
+    (root / "Keel" / "other.md").write_text("---\ntags: [urgent]\n---\nBody\n", encoding="utf-8")
+    with database.SessionLocal() as db:
+        project = Project(code="C7801", name="Keel")
+        db.add(project)
+        db.commit()
+        project_id = project.id
+    tagged = new_task(client, "Weld", tags=["C7801", "Hull build", "urgent"])
+    untagged = new_task(client, "Paint", tags=["urgent"])
+
+    response = client.put(f"/api/projects/{project_id}", json={"name": "Hull build"})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["code"] == "Hull build"
+    assert client.get(f"/api/tasks/{tagged['id']}").json()["tags"] == ["Hull build", "urgent"]
+    assert client.get(f"/api/tasks/{untagged['id']}").json()["tags"] == ["urgent"]
+    notes = {
+        name: client.get("/api/notes/file", params={"path": f"Keel/{name}.md"}).json()["frontmatter"]["tags"]
+        for name in ("plan", "single", "other")
+    }
+    assert notes == {"plan": ["Hull build", "urgent"], "single": ["Hull build"], "other": ["urgent"]}
+
+
+def test_renaming_a_project_keeps_codes_unique(client):
+    with database.SessionLocal() as db:
+        db.add(Project(code="HULL", name="Hull"))
+        project = Project(code="C7801", name="Keel")
+        db.add(project)
+        db.commit()
+        project_id = project.id
+
+    response = client.put(f"/api/projects/{project_id}", json={"name": "hull"})
+    assert response.status_code == 400
+    assert sorted(p["code"] for p in client.get("/api/projects").json()) == ["C7801", "HULL"]
+    # Only the case of its own code changes: no collision with itself.
+    assert client.put(f"/api/projects/{project_id}", json={"name": "c7801"}).json()["code"] == "c7801"
+    long_name = "x" * 40
+    assert client.put(f"/api/projects/{project_id}", json={"name": long_name}).json()["code"] == "x" * 32
+
+
 @pytest.mark.parametrize(
     "payload, status",
     [({"color": "red"}, 422), ({"name": " "}, 422), ({"description": None}, 422)],

@@ -1154,15 +1154,66 @@ def list_projects(space_id: int = spaces.DEFAULT_SPACE_ID, db: Session = Depends
 @app.put("/api/projects/{project_id}")
 def update_project(project_id: int, request: schemas.ProjectUpdate, db: Session = Depends(get_db)) -> schemas.Project:
     """Rename a project or change its description or colour (`color: null` goes back to the default); unsent
-    fields are kept. Its code is fixed: it ties the project to its imported Gantt."""
+    fields are kept. Renaming also changes its code (its tag) to the new name, renaming that tag on every task
+    and note."""
     project = db.get(Project, project_id)
     if project is None or project.deleted_at is not None:
         raise HTTPException(status_code=404, detail=f"Unknown project id: {project_id}")
     set_source(db, DESKTOP_SOURCE)
+    old_code = project.code
+    new_code = old_code
+    if request.name is not None and request.name != project.name:
+        new_code = request.name[: spaces._CODE_MAX]
+        if new_code != old_code:
+            taken = db.scalars(
+                select(Project.id)
+                .where(func.upper(Project.code) == new_code.upper(), Project.id != project.id)
+                .execution_options(include_deleted=True)
+            ).first()
+            if taken is not None:
+                raise HTTPException(status_code=400, detail="Project code already in use")
+            project.code = new_code
+            for task in db.scalars(select(Task).where(Task.tags.is_not(None))):
+                tags = _renamed_tags(task.tags, old_code, new_code)
+                if tags is not None:
+                    task.tags = tags
     for key, value in request.model_dump(exclude_unset=True).items():
         setattr(project, key, value)
     db.commit()
+    if new_code != old_code:
+        _rename_note_tags(db, old_code, new_code)
     return schemas.Project.model_validate(project, from_attributes=True)
+
+
+def _renamed_tags(value: Any, old: str, new: str) -> list[str] | None:
+    """Tags with `old` (any case) replaced by `new`, or None if `old` is not among them."""
+    tags = schemas.clean_tags(value)
+    if not any(tag.lower() == old.lower() for tag in tags):
+        return None
+    return list(dict.fromkeys(new if tag.lower() == old.lower() else tag for tag in tags))
+
+
+def _rename_note_tags(db: Session, old: str, new: str) -> None:
+    """Rename a tag in the front-matter of every note of every space."""
+    for space in db.scalars(select(Space)).all():
+        root = spaces.content_dir(space.id)
+        if not root.is_dir():
+            continue
+        for path in file_layer.list_notes("**/*.md", notes_dir=root):
+            if _hidden(path):
+                continue
+            try:
+                note = file_layer.read_note(path, notes_dir=root)
+                frontmatter = note["frontmatter"]
+                tags = _renamed_tags(frontmatter.get("tags"), old, new)
+                if tags is None:
+                    continue
+                frontmatter["tags"] = tags
+                file_layer.write_note(
+                    path, note["content"], frontmatter, AccessMode.WRITE_DIRECTLY, notes_dir=root, source=DESKTOP_SOURCE
+                )
+            except (file_layer.FileLayerError, OSError, UnicodeDecodeError):
+                continue  # A hand-edited note with broken front-matter must not stop the rename.
 
 
 def _task_items(db: Session, tasks: list[Task]) -> list[TaskItem]:
