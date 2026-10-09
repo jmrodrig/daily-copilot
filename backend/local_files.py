@@ -2,7 +2,8 @@
 
 Notes may link to local files and folders (`file:///C:/Projects/C7801/Lines.pdf`, `C:\\Projects\\C7801`,
 `\\\\server\\share\\...`, `/home/...`). On the machine itself the app opens them with the system's default
-program (`open_path`); a remote client downloads them instead (`stat_path`, a file, or `zip_directory`).
+program (`open_path`); a remote client gets a Windows shortcut to the same file on the network share instead
+(`generate_shortcut_content`, with the share's UNC path from `to_unc_path`), so nothing large crosses HTTP.
 
 The agent crawls the same file system with `list_local_directory` and `read_local_file` to find design data.
 """
@@ -17,7 +18,7 @@ import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import quote, unquote, urlparse
 
 TEXT_SUFFIXES = {".txt", ".md", ".csv", ".json", ".tsv", ".log", ".xml", ".yaml", ".yml", ".ini"}
 READ_LIMIT = 20_000  # characters of a file's text returned to the agent
@@ -70,7 +71,13 @@ def check_path(raw: str) -> dict[str, Any]:
         if not path.exists():
             return {"exists": False, "name": path.name or str(path), "type": "unknown", "path": str(path), "error": f"No file or folder at {path}"}
         is_dir = path.is_dir()
-        return {"exists": True, "name": path.name or str(path), "type": "directory" if is_dir else "file", "path": str(path)}
+        return {
+            "exists": True,
+            "name": path.name or str(path),
+            "type": "directory" if is_dir else "file",
+            "path": str(path),
+            "unc_path": to_unc_path(raw),
+        }
     except (LocalFileError, OSError) as exc:
         return {"exists": False, "path": raw, "error": str(exc)}
 
@@ -102,7 +109,7 @@ def stat_path(raw: str) -> dict[str, Any]:
     """`{name, type, size, partial}` of a file or folder; a folder's size is the total of the files in it, `partial`
     when only the first `STAT_LIMIT` files were counted."""
     path = _existing(raw)
-    entry = {**_entry(path), "partial": False}
+    entry = {**_entry(path), "partial": False, "unc_path": to_unc_path(raw)}
     if path.is_dir():
         size, complete = _folder_size(path)
         entry["size"], entry["partial"] = size, not complete
@@ -116,6 +123,64 @@ def open_path(raw: str) -> None:
         os.startfile(path)  # type: ignore[attr-defined]  # Windows only
     else:
         subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", str(path)])
+
+
+_ERROR_MORE_DATA = 234
+_ERROR_CONNECTION_UNAVAIL = 1201  # a persistent mapping that isn't connected right now; its share is still known
+
+
+def _mapped_share(drive: str) -> str | None:
+    r"""The network share a Windows drive letter (`O:`) is mapped to, like `\server\share\folder`, or None."""
+    import ctypes
+    from ctypes import wintypes
+
+    try:
+        size = wintypes.DWORD(1024)
+        while True:
+            buffer = ctypes.create_unicode_buffer(size.value)
+            result = ctypes.windll.mpr.WNetGetConnectionW(drive, buffer, ctypes.byref(size))  # type: ignore[attr-defined]
+            if result != _ERROR_MORE_DATA:
+                break
+    except (AttributeError, OSError):
+        return None
+    if result not in (0, _ERROR_CONNECTION_UNAVAIL):
+        return None
+    return buffer.value or None
+
+
+def to_unc_path(raw: str) -> str:
+    r"""A link's path as other machines on the network reach it: on Windows a mapped drive's path becomes the share's
+    UNC path (`O:\Lawrences Files` -> `\syfileapp1\Archive Data\Older Yachts\Lawrences Files`); any other path
+    is returned as it is."""
+    path = to_path(raw)
+    text = str(path)
+    if sys.platform != "win32":
+        return text
+    if text.startswith(("\\\\", "//")):
+        return text.replace("/", "\\")
+    if path.drive:
+        share = _mapped_share(path.drive)
+        if share:
+            return share.rstrip("\\") + text[len(path.drive) :]
+    return text
+
+
+def _file_url(path: str) -> str:
+    """A `file:` URL for a UNC or local path (`file://server/share/a%20b`, `file:///C:/x`, `file:///home/x`),
+    percent-encoded so the shortcut is plain ASCII whatever the code page."""
+    text = path.replace("\\", "/")
+    if not text.startswith("/"):
+        text = f"/{text}"  # a drive path, C:/x
+    return "file:" + ("" if text.startswith("//") else "//") + quote(text, safe="/:")
+
+
+def generate_shortcut_content(raw: str) -> tuple[str, str, str]:
+    """A Windows Internet Shortcut (`.url`) to a file or folder on the network share: `(content, file name, UNC path)`.
+    Opening it on a client launches the file, or the folder in Windows Explorer, straight from the share."""
+    path = _existing(raw)
+    unc_path = to_unc_path(raw)
+    content = f"[InternetShortcut]\r\nURL={_file_url(unc_path)}\r\n"
+    return content, f"{path.name or 'Network-Shortcut'}.url", unc_path
 
 
 def file_path(raw: str) -> Path:

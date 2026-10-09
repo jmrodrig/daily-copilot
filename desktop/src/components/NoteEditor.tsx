@@ -528,7 +528,7 @@ function isAttachmentHref(href: string | undefined): boolean {
 /**
  * The menu under a link: open it, and for an uploaded file in an editable note, remove it. A linked PDF opens in the
  * lightbox, to be marked up while the note is editable, as does a click on its pill. A link to a local file or folder
- * opens on this machine, or downloads on a remote one (see openLocalFile), from its pill or the Open button. Extracted so its props memoize
+ * opens on this machine, or from the network share through a shortcut on a remote one (see openLocalFile), from its pill or the Open button. Extracted so its props memoize
  * without cluttering NoteEditor's top-level hooks.
  */
 function BubbleMenuWrapper({ editor }: { editor: Editor }) {

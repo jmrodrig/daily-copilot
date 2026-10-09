@@ -1,7 +1,7 @@
 import { getJson, message, sendJson } from "./api";
 
 // Shape of GET /api/local-files/stat (see LocalFileStat in backend/schemas.py).
-type LocalFileStat = { name: string; type: "file" | "directory"; size: number; partial: boolean };
+export type LocalFileStat = { name: string; type: "file" | "directory"; size: number; partial: boolean; unc_path?: string | null };
 
 // Shape of GET /api/local-files/check (see LocalFileCheck in backend/schemas.py).
 export type LocalFileCheck = {
@@ -9,6 +9,7 @@ export type LocalFileCheck = {
   name?: string | null;
   type?: "file" | "directory" | "unknown" | null;
   path: string;
+  unc_path?: string | null;
   error?: string | null;
 };
 
@@ -37,9 +38,35 @@ function isLocalhost(): boolean {
   return ["localhost", "127.0.0.1", "[::1]"].includes(window.location.hostname);
 }
 
+/** Copy text to the clipboard; false if the browser won't (`navigator.clipboard` needs HTTPS or localhost). */
+async function copyText(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // Denied: fall back to the old way below.
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  try {
+    return document.execCommand("copy");
+  } catch {
+    return false;
+  } finally {
+    textarea.remove();
+  }
+}
+
 /**
- * Open a linked local file or folder. On the machine running the backend it opens in its default program; a remote
- * client is asked to confirm, then downloads the file, or a folder as a ZIP.
+ * Open a linked local file or folder. On the machine running the backend it opens in its default program. A remote
+ * client downloads a small Windows shortcut (`.url`) to it on the network share, which opens it straight from the share,
+ * and gets the share's path on its clipboard in case the shortcut is blocked; nothing large crosses HTTP.
  */
 export async function openLocalFile(href: string): Promise<void> {
   try {
@@ -47,18 +74,22 @@ export async function openLocalFile(href: string): Promise<void> {
       await sendJson("POST", "/api/local-files/open", { path: href });
       return;
     }
-    const stat = await getJson<LocalFileStat>(`/api/local-files/stat?path=${encodeURIComponent(href)}`);
-    const megabytes = (stat.size / (1024 * 1024)).toFixed(stat.size < 1024 * 1024 ? 2 : 1);
-    const what = stat.type === "directory" ? `the folder ${stat.name} as a ZIP` : stat.name;
-    const size = stat.partial ? `over ${megabytes} MB` : `${megabytes} MB`;
-    if (!window.confirm(`Download ${what} (${size})?`)) return;
-    const endpoint = stat.type === "directory" ? "download-zip" : "download";
+    // `check`, not `stat`: it doesn't total a folder's size, so it answers at once even for a huge share.
+    const found = await getJson<LocalFileCheck>(`/api/local-files/check?path=${encodeURIComponent(href)}`);
+    if (!found.exists) throw new Error(found.error ?? "Not found");
+    const networkPath = found.unc_path || href;
+    const copied = await copyText(networkPath);
     const anchor = document.createElement("a");
-    anchor.href = `/api/local-files/${endpoint}?path=${encodeURIComponent(href)}`;
-    anchor.download = stat.type === "directory" ? `${stat.name}.zip` : stat.name;
+    anchor.href = `/api/local-files/shortcut?path=${encodeURIComponent(href)}`;
+    anchor.download = `${found.name || "Network-Shortcut"}.url`;
     document.body.appendChild(anchor);
     anchor.click();
     anchor.remove();
+    window.alert(
+      copied
+        ? `Opening via network drive... (Shortcut downloaded. Network path also copied to clipboard: ${networkPath})`
+        : `Opening via network drive... (Shortcut downloaded. Network path: ${networkPath})`,
+    );
   } catch (err) {
     window.alert(`Could not open ${href}: ${message(err)}`);
   }

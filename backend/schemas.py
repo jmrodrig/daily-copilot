@@ -1201,6 +1201,7 @@ class LocalFileStat(BaseModel):
     type: Literal["file", "directory"]
     size: int
     partial: bool = False  # a folder too big to measure in full: `size` counts only its first files
+    unc_path: str | None = None  # the path on the network share, a mapped drive's resolved (see local_files.to_unc_path)
 
 
 class LocalFileCheck(BaseModel):
@@ -1210,4 +1211,5 @@ class LocalFileCheck(BaseModel):
     name: str | None = None
     type: Literal["file", "directory", "unknown"] | None = None
     path: str
+    unc_path: str | None = None
     error: str | None = None

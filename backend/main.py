@@ -4,6 +4,7 @@ import html
 import re
 import secrets
 import urllib.request
+from urllib.parse import quote
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
@@ -12,7 +13,7 @@ from typing import Any
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from starlette.background import BackgroundTask
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
@@ -809,7 +810,8 @@ DESKTOP_SOURCE = "desktop"
 
 
 # --- Local files -----------------------------------------------------------------
-# Files and folders on this machine linked from notes (see local_files): opened here, downloaded by remote clients.
+# Files and folders on this machine linked from notes (see local_files): opened here, and opened from the network share
+# through a downloaded Windows shortcut by remote clients.
 
 _LOOPBACK = {"127.0.0.1", "::1", "localhost"}
 
@@ -846,6 +848,25 @@ def stat_local_file(path: str) -> LocalFileStat:
         return LocalFileStat(**local_files.stat_path(path))
     except (local_files.LocalFileError, OSError) as exc:
         raise _local_file_errors(exc) from exc
+
+
+@app.get("/api/local-files/shortcut")
+def get_local_file_shortcut(path: str) -> Response:
+    """A Windows Internet Shortcut (`.url`) to a linked file or folder on the network share, for a remote client to open."""
+    try:
+        content, filename, _ = local_files.generate_shortcut_content(path)
+    except (local_files.LocalFileError, OSError) as exc:
+        raise _local_file_errors(exc) from exc
+    ascii_name = filename.encode("ascii", "replace").decode().replace("?", "_").replace('"', "_")
+    return Response(
+        content=content.encode("utf-8"),
+        media_type="application/x-mswinurl",
+        headers={
+            # Header values must be Latin-1: an ASCII fallback, and the real name for browsers that read `filename*`.
+            "Content-Disposition": f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(filename)}",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @app.get("/api/local-files/download")

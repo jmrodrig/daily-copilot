@@ -1,4 +1,5 @@
 import io
+import sys
 import zipfile
 
 import pymupdf
@@ -92,7 +93,7 @@ def test_open_is_refused_for_remote_clients(client, design, monkeypatch):
 
 def test_check_path_reports_files_folders_and_missing_paths(design):
     folder = local_files.check_path(design.as_uri())
-    assert folder == {"exists": True, "name": "Design data", "type": "directory", "path": str(design)}
+    assert folder == {"exists": True, "name": "Design data", "type": "directory", "path": str(design), "unc_path": str(design)}
 
     file = local_files.check_path(str(design / "readme.md"))
     assert file["exists"] and file["type"] == "file" and file["name"] == "readme.md"
@@ -129,3 +130,72 @@ def test_stat_stops_counting_a_huge_folder(client, design, monkeypatch):
 
     whole = client.get("/api/local-files/stat", params={"path": str(design / "Hull")}).json()
     assert whole["partial"] is False
+
+
+windows_only = pytest.mark.skipif(sys.platform != "win32", reason="drive letters and UNC paths are Windows paths")
+SHARE = r"\\syfileapp1\Archive Data\Older Yachts"
+
+
+@windows_only
+def test_to_unc_path_resolves_mapped_drives_and_keeps_unc_paths(monkeypatch):
+    drives = []
+
+    def wnet_get_connection(drive, buffer, _size):
+        drives.append(drive)
+        if drive != "O:":
+            return 2250  # ERROR_NOT_CONNECTED: not a network drive
+        buffer.value = SHARE
+        return 0
+
+    import ctypes
+
+    monkeypatch.setattr(ctypes.windll.mpr, "WNetGetConnectionW", wnet_get_connection)
+
+    expected = SHARE + r"\Lawrences Files"
+    assert local_files.to_unc_path(r"O:\Lawrences Files") == expected
+    assert local_files.to_unc_path("file:///O:/Lawrences%20Files") == expected
+    assert local_files.to_unc_path("O:\\") == SHARE + "\\"
+    assert local_files.to_unc_path(r"C:\Projects\C7801") == r"C:\Projects\C7801"
+    assert drives == ["O:", "O:", "O:", "C:"]
+
+    assert local_files.to_unc_path("//syfileapp1/Archive Data/x") == r"\\syfileapp1\Archive Data\x"
+    assert local_files.to_unc_path("file://syfileapp1/Archive%20Data/x") == r"\\syfileapp1\Archive Data\x"
+    assert drives == ["O:", "O:", "O:", "C:"]  # a UNC path isn't looked up
+
+
+@windows_only
+def test_shortcut_points_at_the_network_share(design, monkeypatch):
+    monkeypatch.setattr(local_files, "to_unc_path", lambda _raw: SHARE + r"\Lawrences Files")
+    content, name, unc = local_files.generate_shortcut_content(str(design))
+
+    assert name == "Design data.url"
+    assert unc == SHARE + r"\Lawrences Files"
+    assert content == "[InternetShortcut]\r\nURL=file://syfileapp1/Archive%20Data/Older%20Yachts/Lawrences%20Files\r\n"
+
+
+def test_shortcut_endpoint(client, design):
+    response = client.get("/api/local-files/shortcut", params={"path": str(design / "readme.md")})
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/x-mswinurl")
+    assert response.headers["content-disposition"].startswith('attachment; filename="readme.md.url"')
+    lines = response.text.splitlines()
+    assert lines[0] == "[InternetShortcut]"
+    assert lines[1] == f"URL={(design / 'readme.md').as_uri()}"
+
+    assert client.get("/api/local-files/shortcut", params={"path": str(design / "missing")}).status_code == 404
+    assert client.get("/api/local-files/shortcut", params={"path": "relative"}).status_code == 400
+
+
+def test_shortcut_endpoint_names_non_ascii_files(client, design):
+    (design / "Plan – é.txt").write_text("x", encoding="utf-8")
+    response = client.get("/api/local-files/shortcut", params={"path": str(design / "Plan – é.txt")})
+
+    assert response.status_code == 200
+    assert "filename*=UTF-8''Plan%20%E2%80%93%20%C3%A9.txt.url" in response.headers["content-disposition"]
+    assert response.text.isascii()
+
+
+def test_stat_and_check_report_the_unc_path(client, design):
+    assert client.get("/api/local-files/stat", params={"path": str(design)}).json()["unc_path"] == str(design)
+    assert client.get("/api/local-files/check", params={"path": str(design)}).json()["unc_path"] == str(design)
