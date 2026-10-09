@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ComponentProps, type ReactNode } from "react";
-import Markdown, { type Components } from "react-markdown";
+import Markdown, { defaultUrlTransform, type Components } from "react-markdown";
 import { Link, useSearchParams } from "react-router-dom";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize from "rehype-sanitize";
@@ -7,6 +7,7 @@ import remarkGfm from "remark-gfm";
 
 import { formatDay, LABEL_TAG, NEUTRAL_TAG, ProjectTag, Tag, TagPills } from "../components/TriageBoard";
 import { getJson, message, sendJson } from "../lib/api";
+import { isLocalHref, openLocalFile } from "../lib/localFiles";
 import { useSpace } from "../lib/space";
 import { useTitle } from "../lib/title";
 import { isOverdue, STATUS_LABELS, taskIdFromHref, useTaskChanges, useTaskPanel, type TaskItem } from "../lib/tasks";
@@ -399,6 +400,7 @@ export default function NotePage() {
                   remarkPlugins={[remarkGfm]}
                   rehypePlugins={[rehypeRaw, [rehypeSanitize, NOTE_HTML_SCHEMA], liftCellColors, layoutMedia]}
                   components={NOTE_COMPONENTS}
+                  urlTransform={noteUrlTransform}
                 >
                   {note.note.content}
                 </Markdown>
@@ -597,6 +599,22 @@ function NoteImage({ node: _node, className, style, src, alt, title, ...props }:
   );
 }
 
+/**
+ * react-markdown's URL filter, letting links to local files and folders through (a drive letter reads as an unknown
+ * protocol). The parser percent-encodes a link's destination, so a drive or UNC path is decoded back to the path itself
+ * (`O:%5CMy%20Files` to `O:\My Files`) for openLocalFile; a `file:` URL stays a URL.
+ */
+function noteUrlTransform(url: string): string {
+  if (/^file:/i.test(url)) return url;
+  let decoded = url;
+  try {
+    decoded = decodeURIComponent(url);
+  } catch {
+    // A stray `%`: leave it be.
+  }
+  return isLocalHref(decoded) ? decoded : defaultUrlTransform(url);
+}
+
 const NOTE_COMPONENTS: Components = {
   img: NoteImage,
   // A ```whiteboard block (see noteFormatting) shows as its board, read-only; any other code block as code.
@@ -610,8 +628,10 @@ const NOTE_COMPONENTS: Components = {
     return <pre {...props} />;
   },
   a: ({ node: _node, ref, ...props }) => {
-    // A task or note pill opens in the app, a URL pill in a new tab (see referencePill).
+    // A task or note pill opens in the app, a URL pill in a new tab (see referencePill), and a link to a local file or
+    // folder, pill or plain, through the backend: the browser won't open a local path from a web page.
     const kind = refKind(props.title);
+    if (isLocalHref(props.href) && (!kind || kind === "url")) return <LocalFileLink href={props.href}>{props.children}</LocalFileLink>;
     if (kind === "task" && props.href) return <TaskPillLink href={props.href}>{props.children}</TaskPillLink>;
     if (kind && kind !== "url" && props.href)
       return (
@@ -631,6 +651,24 @@ const NOTE_COMPONENTS: Components = {
     return <a {...props} target={props.href?.startsWith("#") ? undefined : "_blank"} rel="noopener noreferrer" />;
   },
 };
+
+/** A link to a local file or folder in the read-only note, shown as a pill: opens it on click (see openLocalFile). */
+function LocalFileLink({ href, children }: { href: string; children: ReactNode }) {
+  return (
+    <a
+      href={href}
+      title={href}
+      className="reference-pill url"
+      onClick={(e) => {
+        e.preventDefault();
+        void openLocalFile(href);
+      }}
+    >
+      <PillIcon kind="url" href={href} />
+      <span className="reference-pill-label">{children}</span>
+    </a>
+  );
+}
 
 /** A PDF attached to the read-only note: its pill opens it in the lightbox, read-only. */
 function PdfLink({ href, children }: { href: string; children: ReactNode }) {

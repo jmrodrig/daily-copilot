@@ -1,6 +1,6 @@
 import { mergeAttributes, Node, type JSONContent } from "@tiptap/core";
 import { NodeViewWrapper, ReactNodeViewRenderer, type NodeViewProps } from "@tiptap/react";
-import { useEffect, useState } from "react";
+import { useEffect, useState, type MouseEvent } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { getJson } from "../lib/api";
@@ -112,8 +112,8 @@ export const ReferencePill = Node.create({
 });
 
 /**
- * The pill in the editor: click selects it (to delete or move), double-click opens what it points to; a local file or
- * folder through the backend (see openLocalFile).
+ * The pill in the editor: click selects it (to delete or move), double-click opens what it points to. A local file or
+ * folder opens on a single click, through the backend (see openLocalFile).
  */
 function PillView({ node, selected, updateAttributes }: NodeViewProps) {
   const { kind, href, label } = node.attrs as RefPillAttrs;
@@ -122,6 +122,7 @@ function PillView({ node, selected, updateAttributes }: NodeViewProps) {
 
   const taskId = kind === "task" ? taskIdFromHref(href) : null;
   const status = useTaskStatus(taskId);
+  const local = kind === "url" && isLocalHref(href);
 
   useEffect(() => {
     if (taskId === null) return;
@@ -148,8 +149,21 @@ function PillView({ node, selected, updateAttributes }: NodeViewProps) {
       as="span"
       contentEditable={false}
       data-reference-pill=""
-      title={`${kind === "url" ? href : `${PILL_NAMES[kind]}: ${label}`} (double-click to open)`}
-      onDoubleClick={open}
+      data-kind={kind}
+      data-href={href}
+      title={`${kind === "url" ? href : `${PILL_NAMES[kind]}: ${label}`} (${local ? "click" : "double-click"} to open)`}
+      onClick={
+        local
+          ? (e: MouseEvent) => {
+              // NoteEditor's own click listener may have opened it already.
+              if (e.defaultPrevented) return;
+              e.preventDefault();
+              e.stopPropagation();
+              void openLocalFile(href);
+            }
+          : undefined
+      }
+      onDoubleClick={local ? undefined : open}
       className={`reference-pill ${kind} ${selected ? "selected" : ""}`}
     >
       <PillIcon kind={kind} href={href} />

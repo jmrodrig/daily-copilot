@@ -544,6 +544,14 @@ function BubbleMenuWrapper({ editor }: { editor: Editor }) {
   useEffect(() => {
     const dom = editor.view.dom;
     const click = (event: MouseEvent) => {
+      // A local file or folder opens on a single click, from a link or its pill.
+      const pill = event.target instanceof Element ? event.target.closest('[data-reference-pill][data-kind="url"]') : null;
+      const pillHref = pill?.getAttribute("data-href");
+      if (isLocalHref(pillHref)) {
+        event.preventDefault();
+        void openLocalFile(pillHref);
+        return;
+      }
       const anchor = event.target instanceof Element ? event.target.closest("a[href]") : null;
       const href = anchor?.getAttribute("href") ?? undefined;
       if (!anchor || event.ctrlKey || event.metaKey || event.shiftKey) return;

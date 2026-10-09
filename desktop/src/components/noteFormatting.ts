@@ -426,9 +426,17 @@ const CSS_COLOR = String.raw`(#[0-9a-f]{3,8}|rgba?\([\d\s.,%]+\))`;
 const CELL_STYLE = new RegExp(`^background-color: ?${CSS_COLOR};?$`, "i");
 const WIDTH_STYLE = /^width: ?(\d{1,3})%;?$/;
 
-/** The sanitizer schema for rendering notes: GitHub's defaults, plus the colors, alignment and width divs and image sizes above. */
+// A Windows drive path (`O:\Files`) reads to the sanitizer as a URL with protocol `O`: allow every drive letter, and
+// `file:`, so links to local files keep their href (see isLocalHref).
+const DRIVE_LETTERS = Array.from({ length: 26 }, (_, i) => String.fromCharCode(97 + i)).flatMap((c) => [c, c.toUpperCase()]);
+
+/**
+ * The sanitizer schema for rendering notes: GitHub's defaults, plus the colors, alignment and width divs and image
+ * sizes above, and links to local files and folders.
+ */
 export const NOTE_HTML_SCHEMA: SanitizeSchema = {
   ...defaultSchema,
+  protocols: { ...defaultSchema.protocols, href: [...(defaultSchema.protocols?.href ?? []), "file", ...DRIVE_LETTERS] },
   attributes: {
     ...defaultSchema.attributes,
     span: [...(defaultSchema.attributes?.span ?? []), ["style", new RegExp(`^(background-)?color: ?${CSS_COLOR};?$`, "i")]],
