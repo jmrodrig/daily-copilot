@@ -248,6 +248,7 @@ function asUrl(text: string): string | null {
   const t = text.trim();
   if (/^(https?:\/\/|mailto:)\S+$/i.test(t)) return t;
   if (/^www\.\S+\.\S+$/i.test(t)) return `https://${t}`;
+  if (/^(file:|[a-z]:[\\/]|\\\\)/i.test(t)) return t;
   return null;
 }
 
