@@ -286,17 +286,16 @@ function StatusColorsEditor({ space, onSave }: { space: Space; onSave: (colors: 
         <h2 className="text-base font-semibold">Status colors</h2>
         <p className="mt-1 text-[15px] text-text-muted">The colour of each status, shown as a dot on the task pills in notes.</p>
       </div>
-      <ul className="grid grid-cols-2 gap-x-6 gap-y-2 sm:grid-cols-3">
+      <ul className="flex flex-col gap-3">
         {STATUSES.map((state) => (
-          <li key={state} className="flex items-center gap-2 text-[15px]">
-            <input
-              type="color"
-              aria-label={`Colour of ${STATUS_LABELS[state]}`}
+          <li key={state} className="flex flex-wrap items-center gap-x-4 gap-y-2 text-[15px]">
+            <span className="w-28 font-medium">{STATUS_LABELS[state]}</span>
+            <ColorPicker
+              label={STATUS_LABELS[state]}
               value={colors[state]}
-              onChange={(e) => pick(state, e.target.value)}
-              className="h-7 w-9 shrink-0 cursor-pointer rounded border border-border-default bg-transparent p-0.5"
+              onChange={(next) => pick(state, next ?? DEFAULT_STATUS_COLORS[state])}
+              allowNone={false}
             />
-            <span className="flex-1">{STATUS_LABELS[state]}</span>
             {colors[state] !== DEFAULT_STATUS_COLORS[state] && (
               <button
                 type="button"
