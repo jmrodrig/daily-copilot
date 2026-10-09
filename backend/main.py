@@ -47,6 +47,7 @@ from schemas import (
     MediaMarkup,
     FolderMetaOut,
     FolderMetaUpdate,
+    FolderOrderUpdate,
     NoteCreate,
     NoteFile,
     NoteRoot,
@@ -905,6 +906,25 @@ def update_folder_meta(request: FolderMetaUpdate, db: Session = Depends(get_db))
         is_reference=meta.is_reference,
         project_id=meta.project_id if meta.is_project else None,
     )
+
+
+@app.put("/api/folders/order")
+def update_folder_order(request: FolderOrderUpdate, db: Session = Depends(get_db)) -> FolderOrderUpdate:
+    """Save the custom order of a folder's notes and sub-folders (or the root's, for an empty path)."""
+    root = spaces.content_dir(_space_id_or_404(db, request.space_id))
+    rel = request.path.strip().strip("/")
+    if rel:
+        try:
+            rel = spaces.normalize_folder(request.space_id, rel)
+        except file_layer.NotePathError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    folder = root / rel if rel else root
+    if not folder.is_dir():
+        raise HTTPException(status_code=404, detail=f"No folder at {rel or 'the root'}")
+    if any(not name or "/" in name or "\\" in name or name.startswith(".") for name in request.order):
+        raise HTTPException(status_code=400, detail="The order lists entry names of the folder")
+    spaces.write_order(folder, request.order)
+    return FolderOrderUpdate(space_id=request.space_id, path=rel, order=request.order)
 
 
 @app.post("/api/folders", status_code=201)

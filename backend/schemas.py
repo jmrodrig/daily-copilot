@@ -864,6 +864,14 @@ class FolderMetaOut(BaseModel):
     project_id: int | None = None
 
 
+class FolderOrderUpdate(BaseModel):
+    """`PUT /api/folders/order`: the custom order of a folder's notes and sub-folders, by name."""
+
+    space_id: int
+    path: str = Field(default="", description="Relative to content/; empty for the root")
+    order: list[str]
+
+
 class FolderCreate(BaseModel):
     """`POST /api/folders`: create an (empty) folder under content/."""
 

@@ -437,6 +437,50 @@ def note_history(entity_id):
         ]
 
 
+def test_folder_order_sorts_the_tree(client):
+    write(1, "Yachts/a.md", "# A\n")
+    write(1, "Yachts/b.md", "# B\n")
+    write(1, "Yachts/c.md", "# C\n")
+    (spaces.content_dir(1) / "Yachts" / "Drawings").mkdir()
+    (spaces.content_dir(1) / "Archive").mkdir()
+
+    saved = client.put("/api/folders/order", json={"space_id": 1, "path": "/Yachts/", "order": ["c.md", "a.md"]})
+    root = client.put("/api/folders/order", json={"space_id": 1, "path": "", "order": ["Yachts", "Archive"]})
+
+    assert saved.json() == {"space_id": 1, "path": "Yachts", "order": ["c.md", "a.md"]}
+    assert root.status_code == 200
+    tree = client.get("/api/tree", params={"space_id": 1}).json()["content"]
+    assert [f["name"] for f in tree["folders"]] == ["Yachts", "Archive"]
+    yachts = tree["folders"][0]
+    assert [n["path"] for n in yachts["notes"]] == ["Yachts/c.md", "Yachts/a.md", "Yachts/b.md"]
+    assert [f["name"] for f in yachts["folders"]] == ["Drawings"]  # unlisted entries sort after, by name
+
+
+def test_invalid_order_file_falls_back_to_names(client):
+    write(1, "b.md", "b")
+    write(1, "a.md", "a")
+    (spaces.content_dir(1) / spaces.ORDER_FILE).write_text("{not json", encoding="utf-8")
+
+    tree = client.get("/api/tree", params={"space_id": 1}).json()["content"]
+
+    assert [n["path"] for n in tree["notes"]] == ["a.md", "b.md"]
+
+
+@pytest.mark.parametrize(
+    ("payload", "status"),
+    [
+        ({"space_id": 1, "path": "Nope", "order": []}, 404),
+        ({"space_id": 1, "path": "../x", "order": []}, 400),
+        ({"space_id": 1, "path": "", "order": ["../x.md"]}, 400),
+        ({"space_id": 1, "path": "", "order": [".trash"]}, 400),
+        ({"space_id": 9, "path": "", "order": []}, 404),
+    ],
+)
+def test_folder_order_errors(client, payload, status):
+    spaces.content_dir(1).mkdir(parents=True, exist_ok=True)
+    assert client.put("/api/folders/order", json=payload).status_code == status
+
+
 def test_move_a_note_into_a_folder(client):
     write(1, "Idea.md", "# Idea\n")
     (spaces.content_dir(1) / "Inbox").mkdir()

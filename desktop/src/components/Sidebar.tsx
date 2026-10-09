@@ -40,6 +40,31 @@ function canDrop(source: string | null, folder: string): boolean {
   return source !== null && parentOf(source) !== folder && source !== folder && !folder.startsWith(`${source}/`);
 }
 
+type DropPosition = "before" | "after" | "inside";
+// Where a dragged item lands: into a folder ("" for content/), or before or after a sibling to reorder it.
+type DropTarget = { path: string; position: DropPosition };
+
+/** Where dropping `source` on the row of `path` at `clientY` puts it, if anywhere: the middle half of a
+ *  folder's row drops into it, otherwise a sibling's upper or lower half reorders before or after it. */
+function dropPosition(source: string | null, path: string, isFolder: boolean, rect: DOMRect, clientY: number): DropPosition | null {
+  if (source === null || source === path) return null;
+  const offset = clientY - rect.top;
+  const intoFolder = isFolder && canDrop(source, path);
+  if (intoFolder && offset >= rect.height / 4 && offset <= (rect.height * 3) / 4) return "inside";
+  // Precise reordering stays within a folder; across folders an item can only be dropped into one.
+  if (parentOf(source) === parentOf(path)) return offset < rect.height / 2 ? "before" : "after";
+  return intoFolder ? "inside" : null;
+}
+
+const fileName = (path: string) => path.slice(path.lastIndexOf("/") + 1);
+
+/** The folder at `path` ("" for the root) of the tree, if it is there. */
+function findFolder(root: FolderNode, path: string): FolderNode | null {
+  if (root.path === path) return root;
+  const child = root.folders.find((folder) => path === folder.path || path.startsWith(`${folder.path}/`));
+  return child ? findFolder(child, path) : null;
+}
+
 const NAV_ITEMS = [
   { to: "/", label: "Today", end: true },
   { to: "/triage", label: "Triage", end: false },
@@ -83,7 +108,7 @@ export default function Sidebar({ onCollapse }: { onCollapse: () => void }) {
   const [viewError, setViewError] = useState<string | null>(null);
   const [renamingItem, setRenamingItem] = useState<string | null>(null);
   const [dragging, setDragging] = useState<string | null>(null);
-  const [dropTarget, setDropTarget] = useState<string | null>(null);
+  const [dropTarget, setDropTarget] = useState<DropTarget | null>(null);
   const location = useLocation();
   const navigate = useNavigate();
 
@@ -221,29 +246,58 @@ export default function Sidebar({ onCollapse }: { onCollapse: () => void }) {
     if (deleted && open && (open === path || open.startsWith(`${path}/`))) navigate("/");
   }
 
+  /** Save `source` before or after its sibling `target` as the custom order of their folder. */
+  async function reorderItem(source: string, target: DropTarget) {
+    const parent = parentOf(target.path);
+    const folder = tree?.space_id === spaceId ? findFolder(tree.content, parent) : null;
+    if (!folder) return;
+    const names = [...folder.folders.map((f) => f.name), ...folder.notes.map((n) => fileName(n.path))];
+    const order = names.filter((name) => name !== fileName(source));
+    const at = order.indexOf(fileName(target.path));
+    if (at < 0) return;
+    order.splice(target.position === "before" ? at : at + 1, 0, fileName(source));
+    await changeContent(`reorder ${fileName(source)}`, () =>
+      sendJson("PUT", "/api/folders/order", { space_id: spaceId, path: parent, order }),
+    );
+  }
+
+  /** Where dropping `source` on the row of `path` ("" for the CONTENT section) would put it. */
+  function targetFor(event: DragEvent, source: string | null, path: string, isFolder: boolean): DropTarget | null {
+    if (path === "") return canDrop(source, "") ? { path, position: "inside" } : null;
+    const position = dropPosition(source, path, isFolder, event.currentTarget.getBoundingClientRect(), event.clientY);
+    return position && { path, position };
+  }
+
   const drag: DragActions = {
     start: setDragging,
     end: () => {
       setDragging(null);
       setDropTarget(null);
     },
-    over: (event, folder) => {
+    over: (event, path, isFolder) => {
       if (!event.dataTransfer.types.includes(DRAG_TYPE)) return;
       // The innermost row decides, so a folder's own rows never fall through to content/.
       event.stopPropagation();
-      if (!canDrop(dragging, folder)) return;
+      const target = targetFor(event, dragging, path, isFolder);
+      if (!target) {
+        setDropTarget((prev) => (prev?.path === path ? null : prev));
+        return;
+      }
       event.preventDefault();
       event.dataTransfer.dropEffect = "move";
-      setDropTarget(folder);
+      setDropTarget((prev) => (prev?.path === target.path && prev.position === target.position ? prev : target));
     },
-    leave: (folder) => setDropTarget((prev) => (prev === folder ? null : prev)),
-    drop: (event, folder) => {
+    leave: (path) => setDropTarget((prev) => (prev?.path === path ? null : prev)),
+    drop: (event, path, isFolder) => {
       if (!event.dataTransfer.types.includes(DRAG_TYPE)) return;
       event.preventDefault();
       event.stopPropagation();
       const source = event.dataTransfer.getData(DRAG_TYPE);
+      const target = targetFor(event, source, path, isFolder);
       drag.end();
-      if (canDrop(source, folder)) moveItem(source, folder);
+      if (!target) return;
+      if (target.position === "inside") moveItem(source, target.path);
+      else reorderItem(source, target);
     },
   };
 
@@ -418,10 +472,10 @@ export default function Sidebar({ onCollapse }: { onCollapse: () => void }) {
 
         {/* Dropping on the header or between rows moves the item to the top of content/. */}
         <div
-          onDragOver={(e) => drag.over(e, "")}
+          onDragOver={(e) => drag.over(e, "", true)}
           onDragLeave={() => drag.leave("")}
-          onDrop={(e) => drag.drop(e, "")}
-          className={`rounded-md ${dropTarget === "" ? "bg-surface-hover/60 ring-1 ring-accent/70" : ""}`}
+          onDrop={(e) => drag.drop(e, "", true)}
+          className={`rounded-md ${dropTarget?.path === "" ? "bg-surface-hover/60 ring-1 ring-accent/70" : ""}`}
         >
           <SectionHeader
             actions={
@@ -685,9 +739,9 @@ function SmallButton({
 type DragActions = {
   start: (path: string) => void;
   end: () => void;
-  over: (event: DragEvent, folder: string) => void;
-  leave: (folder: string) => void;
-  drop: (event: DragEvent, folder: string) => void;
+  over: (event: DragEvent, path: string, isFolder: boolean) => void;
+  leave: (path: string) => void;
+  drop: (event: DragEvent, path: string, isFolder: boolean) => void;
 };
 
 type TreeProps = {
@@ -698,7 +752,7 @@ type TreeProps = {
   current: string;
   renaming: string | null;
   dragging: string | null;
-  dropTarget: string | null;
+  dropTarget: DropTarget | null;
   drag: DragActions;
   onMenu: (event: ReactMouseEvent<HTMLElement>, item: TreeItem, add: boolean) => void;
   onContextMenu: (event: ReactMouseEvent, item: TreeItem) => void;
@@ -783,7 +837,7 @@ function FolderRow({ folder, ...props }: TreeProps & { folder: FolderNode }) {
   );
 }
 
-/** A note or folder row: draggable, a drop target (a note's row stands for its folder), with
+/** A note or folder row: draggable, a drop target (into a folder, or before or after a sibling), with
  *  "+" (folders) and "…" menus on hover, or an inline name field while renaming. */
 function TreeRow({
   item,
@@ -800,7 +854,8 @@ function TreeRow({
 }: TreeProps & { item: TreeItem; children: ReactNode }) {
   const path = itemPath(item);
   const label = itemLabel(item);
-  const folder = item.kind === "folder" ? path : parentOf(path);
+  const isFolder = item.kind === "folder";
+  const position = dropTarget?.path === path ? dropTarget.position : null;
   const indent = { paddingLeft: 6 + depth * 14 };
 
   if (renaming === path) {
@@ -821,15 +876,24 @@ function TreeRow({
         drag.start(path);
       }}
       onDragEnd={drag.end}
-      onDragOver={(e) => drag.over(e, folder)}
-      onDragLeave={() => drag.leave(folder)}
-      onDrop={(e) => drag.drop(e, folder)}
+      onDragOver={(e) => drag.over(e, path, isFolder)}
+      onDragLeave={() => drag.leave(path)}
+      onDrop={(e) => drag.drop(e, path, isFolder)}
       onContextMenu={(e) => onContextMenu(e, item)}
       className={`group relative flex min-h-7 items-center rounded-md hover:bg-surface-hover ${
-        item.kind === "folder" && dropTarget === path ? "bg-surface-hover ring-1 ring-accent/70" : ""
+        position === "inside" ? "bg-surface-hover ring-1 ring-accent/70" : ""
       } ${dragging === path ? "opacity-50" : ""}`}
       style={indent}
     >
+      {(position === "before" || position === "after") && (
+        <span
+          aria-hidden
+          className={`pointer-events-none absolute right-0 z-[1] h-0.5 rounded-full bg-accent ${
+            position === "before" ? "-top-px" : "-bottom-px"
+          }`}
+          style={{ left: indent.paddingLeft }}
+        />
+      )}
       {children}
       <span className="absolute right-1 top-1/2 flex -translate-y-1/2 items-center gap-0.5 rounded bg-surface-hover opacity-0 focus-within:opacity-100 group-hover:opacity-100">
         {item.kind === "folder" && (

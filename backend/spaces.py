@@ -9,6 +9,7 @@ Folders under `content/` can be marked as a Project (Epic) and/or Reference Data
 those flags live in the `folder_meta` table (see `models.FolderMeta`).
 """
 
+import json
 import logging
 import shutil
 from pathlib import Path
@@ -330,6 +331,30 @@ def _sort_key(name: str) -> tuple[str, str]:
     return (name.lower(), name)
 
 
+# A folder's custom order of its notes and sub-folders (drag and drop in the tree), as a JSON list of names.
+ORDER_FILE = ".order.json"
+
+
+def read_order(folder: Path) -> dict[str, int]:
+    """`{name: index}` from the folder's order file; empty when it is missing or invalid."""
+    try:
+        names = json.loads((folder / ORDER_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(names, list):
+        return {}
+    order: dict[str, int] = {}
+    for name in names:
+        if isinstance(name, str):
+            order.setdefault(name, len(order))
+    return order
+
+
+def write_order(folder: Path, names: list[str]) -> None:
+    """Save the custom order of a folder's entries; entries left out sort after these, by name."""
+    (folder / ORDER_FILE).write_text(json.dumps(names, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def build_tree(space_id: int, metas: dict[str, FolderMeta]) -> FolderNode:
     """The content/ folder tree, empty folders included; hidden files and folders are skipped."""
     root_path = content_dir(space_id)
@@ -344,7 +369,10 @@ def build_tree(space_id: int, metas: dict[str, FolderMeta]) -> FolderNode:
             project_id=meta.project_id if meta and meta.is_project else None,
         )
         try:
-            entries = sorted(folder.iterdir(), key=lambda p: _sort_key(p.name))
+            order = read_order(folder)
+            entries = sorted(
+                folder.iterdir(), key=lambda p: (order.get(p.name, float("inf")), *_sort_key(p.name))
+            )
         except OSError:
             return node
         for entry in entries:
