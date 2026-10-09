@@ -10,10 +10,13 @@ import { getJson, message, sendJson } from "../lib/api";
 import { useSpace } from "../lib/space";
 import { useTitle } from "../lib/title";
 import { isOverdue, STATUS_LABELS, taskIdFromHref, useTaskChanges, useTaskPanel, type TaskItem } from "../lib/tasks";
-import MediaLightbox, { ExpandButton, isPdfUrl, isTyping, MarkupOverlay } from "../components/MediaLightbox";
+import MediaLightbox, { ExpandButton, isPdfUrl, MarkupOverlay } from "../components/MediaLightbox";
+import { isTyping } from "../components/markupCore";
 import NoteEditor from "../components/NoteEditor";
 import { PillIcon, refKind, StatusTag, useTaskStatus } from "../components/referencePill";
 import { NOTE_COLUMN, NOTE_HTML_SCHEMA, layoutMedia, liftCellColors } from "../components/noteFormatting";
+import WhiteboardView from "../components/WhiteboardView";
+import { WhiteboardFrame } from "../components/WhiteboardWidget";
 
 // GET /api/notes/file (see NoteFile in backend/schemas.py).
 type NoteFile = { path: string; frontmatter: Record<string, unknown>; content: string };
@@ -24,8 +27,11 @@ type NoteState = "draft" | "published";
 const noteState = (frontmatter: Record<string, unknown>): NoteState =>
   frontmatter.state === "draft" ? "draft" : "published";
 
+/** A `type: whiteboard` note is a whiteboard page: its body is the board's JSON (see whiteboard.ts), not markdown. */
+const isWhiteboardNote = (frontmatter: Record<string, unknown>) => frontmatter.type === "whiteboard";
+
 // Front-matter keys that aren't listed: the title is the heading, the tags are pills in the header, and
-// priorities belong to tasks, not notes.
+// priorities belong to tasks, not notes. (A whiteboard's `type` isn't listed either: it shows in how it's laid out.)
 const HIDDEN_PROPS = new Set(["title", "tags", "priority"]);
 
 // A draft is saved once it's been left alone this long (ms).
@@ -50,7 +56,8 @@ function show(value: unknown): string {
 /**
  * A note or template (`/note?space=1&path=...[&root=templates]`). A draft note is edited in place, saved as it's
  * edited, and published when done; a published note (and a template) is read-only here, so click Edit or ask the
- * Co-pilot to change it.
+ * Co-pilot to change it. A whiteboard note (`type: whiteboard`) fills the page with its board instead of a document,
+ * drawn on while it's a draft and read-only once published, saved the same way.
  */
 export default function NotePage() {
   const [params] = useSearchParams();
@@ -80,7 +87,12 @@ export default function NotePage() {
   // The edited title, saved to the `title` front-matter; a blank one is ignored.
   const newTitle = titleDraft.trim() !== (fm.title || '') ? titleDraft.trim() : null;
   const props = Object.entries(fm).filter(
-    ([key, value]) => !HIDDEN_PROPS.has(key) && !(key === "state" && !isTemplate) && value !== null && value !== "",
+    ([key, value]) =>
+      !HIDDEN_PROPS.has(key) &&
+      !(key === "state" && !isTemplate) &&
+      !(key === "type" && value === "whiteboard") &&
+      value !== null &&
+      value !== "",
   );
   const state = isTemplate || note.state !== "ok" ? null : noteState(fm);
   const dirty = note.state === "ok" && (body !== note.note.content || newTitle !== null);
@@ -229,13 +241,16 @@ export default function NotePage() {
         Edit
       </button>
     ) : undefined;
+  const whiteboard = note.state === "ok" && isWhiteboardNote(fm);
   // Printing (or saving as PDF from the print dialog) shows just the note; see the print styles in index.css.
   const actions = (
     <div className="flex items-center gap-3 print:hidden">
       {status}
-      <button type="button" className="btn" onClick={() => window.print()} disabled={note.state !== "ok"}>
-        Print / PDF
-      </button>
+      {!whiteboard && (
+        <button type="button" className="btn" onClick={() => window.print()} disabled={note.state !== "ok"}>
+          Print / PDF
+        </button>
+      )}
     </div>
   );
 
@@ -271,18 +286,67 @@ export default function NotePage() {
       </>
     ) : null;
 
+  const breadcrumb = (
+    <div className="flex min-w-0 items-center gap-3">
+      <span className="truncate font-mono text-xs tracking-[0.06em] text-text-muted">
+        {isTemplate ? "TEMPLATE" : parts.slice(0, -1).join(" / ").toUpperCase() || "NOTES"}
+      </span>
+      {whiteboard && <Tag className={NEUTRAL_TAG}>whiteboard</Tag>}
+      {state && <Tag className={state === "draft" ? DRAFT_TAG : NEUTRAL_TAG}>{state}</Tag>}
+    </div>
+  );
+
+  if (whiteboard && note.state === "ok") {
+    const editable = state === "draft" && saving !== "state";
+    return (
+      // The board takes the rest of the page's height, under the title, the actions and the properties.
+      <div className="flex h-full min-h-[560px] w-full flex-col gap-3 px-9 py-5">
+        <div className="flex min-h-10 flex-wrap items-center justify-between gap-4">
+          {breadcrumb}
+          {actions}
+        </div>
+        {saveError && <p className="text-[15px] text-accent">Could not save {path} ({saveError}).</p>}
+        {state === "draft" ? (
+          <input
+            aria-label="Title"
+            placeholder="Untitled"
+            value={titleDraft}
+            disabled={!editable}
+            onChange={(e) => setTitleDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") e.currentTarget.blur();
+              else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+                e.preventDefault();
+                if (dirty) void save();
+              }
+            }}
+            className="w-full bg-transparent text-[26px] font-semibold leading-tight text-text-primary placeholder:text-text-muted focus:outline-none"
+          />
+        ) : (
+          <h1 className="text-[26px] font-semibold leading-tight">{title}</h1>
+        )}
+        {details && <div className="flex flex-col gap-3">{details}</div>}
+        <WhiteboardView
+          key={path}
+          value={body}
+          onChange={setBody}
+          editable={editable}
+          spaceId={spaceId}
+          captureWheel
+          onSave={() => dirty && void save()}
+          className="min-h-[360px] flex-1 rounded-lg border border-border-default"
+        />
+      </div>
+    );
+  }
+
   return (
     // The page fills the canvas, so the editor's toolbar spans it; the note sits in a centered text column, out of
     // which resized images and tables can break.
     <div className="flex w-full flex-col gap-5 px-9 py-7 print:gap-4 print:p-0">
       {/* Breadcrumb and actions sit above the document, so the title reads as its first line. */}
       <div className="flex min-h-10 flex-wrap items-center justify-between gap-4 print:hidden">
-        <div className="flex min-w-0 items-center gap-3">
-          <span className="truncate font-mono text-xs tracking-[0.06em] text-text-muted">
-            {isTemplate ? "TEMPLATE" : parts.slice(0, -1).join(" / ").toUpperCase() || "NOTES"}
-          </span>
-          {state && <Tag className={state === "draft" ? DRAFT_TAG : NEUTRAL_TAG}>{state}</Tag>}
-        </div>
+        {breadcrumb}
         {actions}
       </div>
       {saveError && <p className={`${NOTE_COLUMN} text-[15px] print:hidden text-accent`}>Could not save {path} ({saveError}).</p>}
@@ -516,6 +580,16 @@ function NoteImage({ node: _node, className, style, src, alt, title, ...props }:
 
 const NOTE_COMPONENTS: Components = {
   img: NoteImage,
+  // A ```whiteboard block (see noteFormatting) shows as its board, read-only; any other code block as code.
+  pre: ({ node, ...props }) => {
+    const code = node?.children[0];
+    const classes = code?.type === "element" && code.tagName === "code" ? code.properties.className : null;
+    if (code?.type === "element" && Array.isArray(classes) && classes.includes("language-whiteboard")) {
+      const json = code.children.map((child) => (child.type === "text" ? child.value : "")).join("");
+      return <WhiteboardFrame value={json.trim()} editable={false} />;
+    }
+    return <pre {...props} />;
+  },
   a: ({ node: _node, ref, ...props }) => {
     // A task or note pill opens in the app, a URL pill in a new tab (see referencePill).
     const kind = refKind(props.title);

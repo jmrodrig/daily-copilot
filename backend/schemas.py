@@ -7,7 +7,7 @@ notes and emails live as markdown files with YAML front-matter (see `file_layer`
 import re
 from datetime import date, datetime
 from enum import Enum
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -886,6 +886,11 @@ class NoteCreate(BaseModel):
     path: str = Field(min_length=1, description="Relative to content/; `.md` is added if missing")
     template: str | None = Field(default=None, description="Template path relative to templates/")
     title: str | None = Field(default=None, max_length=200)
+    type: Literal["whiteboard"] | None = Field(
+        default=None,
+        description="`whiteboard` for a whiteboard page: `type: whiteboard` front-matter and an empty board's JSON as its "
+        "body (see WhiteboardView.tsx); a template is ignored",
+    )
 
 
 class ContentKind(str, Enum):

@@ -14,6 +14,7 @@ import { getJson, message, sendJson } from "../lib/api";
 import { tint } from "../lib/colors";
 import { notePath, useSpace } from "../lib/space";
 import { VIEW_TYPES, VIEWS_CHANGED, viewPath, type TaskView, type ViewType } from "../lib/views";
+import { WhiteboardIcon } from "./markupUi";
 
 // GET /api/tree (see TreeResponse and FolderNode in backend/schemas.py).
 type NoteSummary = { path: string; title: string };
@@ -92,7 +93,7 @@ function storedExpanded(): Set<string> {
 type Health = "loading" | "ok" | "error";
 type Menu = { x: number; y: number; item: TreeItem; add: boolean }; // add: a folder's "+" menu
 type ViewMenu = { x: number; y: number; view: TaskView | null }; // null: the TASKS "+" menu
-type Dialog = { kind: "note" | "folder"; parent: string; template?: string };
+type Dialog = { kind: "note" | "whiteboard" | "folder"; parent: string; template?: string };
 
 export default function Sidebar({ onCollapse }: { onCollapse: () => void }) {
   const { spaceId, treeVersion, refreshTree } = useSpace();
@@ -316,6 +317,7 @@ export default function Sidebar({ onCollapse }: { onCollapse: () => void }) {
       return [
         { label: "New folder", onClick: create({ kind: "folder", parent }) },
         { label: "New note", onClick: create({ kind: "note", parent }) },
+        { label: "New whiteboard", onClick: create({ kind: "whiteboard", parent }) },
         ...(tree?.space_id === spaceId ? tree.templates : []).map((template, i) => ({
           label: `From template: ${template.title}`,
           separator: i === 0,
@@ -482,6 +484,9 @@ export default function Sidebar({ onCollapse }: { onCollapse: () => void }) {
               <>
                 <SmallButton label="New note" onClick={() => setDialog({ kind: "note", parent: "" })}>
                   +
+                </SmallButton>
+                <SmallButton label="New whiteboard" onClick={() => setDialog({ kind: "whiteboard", parent: "" })}>
+                  <WhiteboardIcon size={12} />
                 </SmallButton>
                 <SmallButton label="New folder" onClick={() => setDialog({ kind: "folder", parent: "" })}>
                   <FolderIcon className="h-3 w-3" />
@@ -897,7 +902,7 @@ function TreeRow({
       {children}
       <span className="absolute right-1 top-1/2 flex -translate-y-1/2 items-center gap-0.5 rounded bg-surface-hover opacity-0 focus-within:opacity-100 group-hover:opacity-100">
         {item.kind === "folder" && (
-          <RowAction label={`New in ${label}`} title="New folder, note or note from a template" onClick={(e) => onMenu(e, item, true)}>
+          <RowAction label={`New in ${label}`} title="New folder, note, whiteboard or note from a template" onClick={(e) => onMenu(e, item, true)}>
             +
           </RowAction>
         )}
@@ -1134,6 +1139,8 @@ function NewItemDialog({
   const [error, setError] = useState<string | null>(null);
   const navigate = useNavigate();
   const isNote = dialog.kind === "note";
+  const isWhiteboard = dialog.kind === "whiteboard";
+  const heading = isWhiteboard ? "New whiteboard" : isNote ? "New note" : "New folder";
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -1143,12 +1150,13 @@ function NewItemDialog({
     setSaving(true);
     setError(null);
     try {
-      if (isNote) {
+      if (isNote || isWhiteboard) {
+        // A whiteboard is a note whose body is the board (see WhiteboardView).
         const note = await sendJson<{ path: string }>("POST", "/api/notes", {
           space_id: spaceId,
           path,
           title: name.trim(),
-          template: template || null,
+          ...(isWhiteboard ? { type: "whiteboard" } : { template: template || null }),
         });
         onCreated(dialog.parent);
         onClose();
@@ -1171,17 +1179,17 @@ function NewItemDialog({
         onMouseDown={(e) => e.stopPropagation()}
         onKeyDown={(e) => e.key === "Escape" && onClose()}
         className="panel flex w-[420px] flex-col gap-3"
-        aria-label={isNote ? "New note" : "New folder"}
+        aria-label={heading}
       >
-        <h2 className="text-base font-semibold">{isNote ? "New note" : "New folder"}</h2>
+        <h2 className="text-base font-semibold">{heading}</h2>
         <p className="font-mono text-xs text-text-muted">in content/{dialog.parent && `${dialog.parent}/`}</p>
         <label className="flex flex-col gap-1 text-xs text-text-muted">
-          {isNote ? "Title" : "Folder name"}
+          {isNote || isWhiteboard ? "Title" : "Folder name"}
           <input
             autoFocus
             value={name}
             onChange={(e) => setName(e.target.value)}
-            placeholder={isNote ? "e.g. Design review 2026-10-04" : "e.g. Meetings"}
+            placeholder={isWhiteboard ? "e.g. Deck layout sketches" : isNote ? "e.g. Design review 2026-10-04" : "e.g. Meetings"}
             className="field"
           />
         </label>

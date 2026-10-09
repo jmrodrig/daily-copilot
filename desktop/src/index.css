@@ -172,6 +172,14 @@ body {
 .note-body img:not([width], .note-media) {
   @apply w-full;
 }
+/* A whiteboard embedded in a note (see WhiteboardWidget) lays itself out: the note's image and paragraph styles stay
+   off what's on it. */
+.note-body [data-whiteboard-frame] img.whiteboard-image {
+  @apply m-0 h-full w-full max-w-none rounded-none border-0;
+}
+.note-body [data-whiteboard-frame] p {
+  @apply m-0;
+}
 /*
  * A resized image or table (see noteFormatting): its width is `--media-scale` times its column's, up to the page's
  * (100cqw), centered on the column even when wider than it. Tables sit in a column-wide `note-table` for it.

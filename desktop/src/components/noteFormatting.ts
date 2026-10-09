@@ -1,5 +1,6 @@
 import {
   Extension,
+  Node,
   decodeHtmlEntities,
   encodeHtmlEntities,
   type JSONContent,
@@ -52,6 +53,15 @@ import { defaultSchema, type Options as SanitizeSchema } from "rehype-sanitize";
  *
  * Widths over 100% break out of the text column, up to the page's full width: `FULL_WIDTH` is wider than any page,
  * so it always fills it. Both views lay them out with the `note-media` class (see index.css and `layoutMedia`).
+ *
+ * A whiteboard embedded in a note is a fenced block of its JSON (see whiteboard.ts), on one line:
+ *
+ *   ```whiteboard
+ *   {"grid": true, "elements": [], "markup": {"strokes": [], "comments": []}}
+ *   ```
+ *
+ * which the editor shows as a live board (`WhiteboardBlock`) and the read-only view as a read-only one; other
+ * markdown renderers show the JSON as code.
  */
 
 /** The text column a note's title, properties and body sit in, centered on the page (see `.note-body` in index.css). */
@@ -458,3 +468,53 @@ export function layoutMedia() {
     visit(tree);
   };
 }
+
+/** An empty embedded whiteboard's JSON. */
+export const EMPTY_WHITEBOARD_JSON = '{"grid":true,"elements":[],"markup":{"strokes":[],"comments":[]}}';
+
+const WHITEBOARD_FENCE = /^ {0,3}```whiteboard[ \t]*\n([\s\S]*?)\n? {0,3}```[ \t]*(?:\n+|$)/;
+
+/**
+ * An embedded whiteboard (see the top): a block atom holding the board's JSON in `data`, read from and saved as a
+ * ```whiteboard fenced block. It's read by its own tokenizer, before the code block's, so it's never taken for code.
+ * The live board is a node view, added by the editor (see WhiteboardWidget).
+ */
+export const WhiteboardBlock = Node.create({
+  name: "whiteboard",
+  group: "block",
+  atom: true,
+  selectable: true,
+  draggable: false,
+  addAttributes() {
+    return {
+      data: {
+        default: EMPTY_WHITEBOARD_JSON,
+        parseHTML: (element: HTMLElement) => element.getAttribute("data-whiteboard") ?? EMPTY_WHITEBOARD_JSON,
+        renderHTML: (attrs: Record<string, unknown>) => ({ "data-whiteboard": String(attrs.data ?? EMPTY_WHITEBOARD_JSON) }),
+      },
+    };
+  },
+  parseHTML() {
+    return [{ tag: "div[data-whiteboard]" }];
+  },
+  renderHTML({ HTMLAttributes }) {
+    return ["div", HTMLAttributes];
+  },
+  markdownTokenName: "whiteboard",
+  markdownTokenizer: {
+    name: "whiteboard",
+    level: "block",
+    start: (src: string) => src.indexOf("```whiteboard"),
+    tokenize(src) {
+      const match = WHITEBOARD_FENCE.exec(src);
+      if (!match) return undefined;
+      return { type: "whiteboard", raw: match[0], text: match[1].trim() };
+    },
+  },
+  parseMarkdown: (token, h) => h.createNode("whiteboard", { data: (token.text as string | undefined) || EMPTY_WHITEBOARD_JSON }),
+  renderMarkdown: (node) => {
+    // On one line, with no backtick in it, so it can't end its fence early (see whiteboard.ts).
+    const data = String(node.attrs?.data ?? EMPTY_WHITEBOARD_JSON).replace(/\r?\n/g, " ").replace(/`/g, "\\u0060");
+    return "```whiteboard\n" + data + "\n```";
+  },
+});

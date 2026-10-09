@@ -975,11 +975,16 @@ def _folder_project_code(db: Session, space_id: int, note_path: str) -> str:
     return meta.project.code if meta is not None and meta.project is not None else ""
 
 
+# A new whiteboard page's body: an empty board (see whiteboard.ts in the desktop app).
+EMPTY_WHITEBOARD = '{"grid":true,"elements":[],"markup":{"strokes":[],"comments":[]}}'
+
+
 @app.post("/api/notes", status_code=201)
 def create_note(request: NoteCreate, db: Session = Depends(get_db)) -> NoteFile:
     """Create a note in content/, scaffolded from a template when `template` is given.
 
-    Templates may use `{title}`, `{date}` and `{project}` placeholders (or `{{title}}` etc.) in their body and
+    With `type: whiteboard` it's a whiteboard page, an empty board, instead. Templates may use `{title}`, `{date}` and
+    `{project}` placeholders (or `{{title}}` etc.) in their body and
     front-matter values; `{project}` is the code of the note's project folder, e.g. `tags: ["{project}"]`.
     """
     root = spaces.content_dir(_space_id_or_404(db, request.space_id))
@@ -1002,7 +1007,10 @@ def create_note(request: NoteCreate, db: Session = Depends(get_db)) -> NoteFile:
     content = ""
     project = _folder_project_code(db, request.space_id, rel)
     
-    if request.template:
+    if request.type == "whiteboard":
+        frontmatter["type"] = "whiteboard"
+        content = EMPTY_WHITEBOARD
+    elif request.template:
         try:
             template = file_layer.read_note(request.template, notes_dir=spaces.templates_dir(request.space_id))
         except file_layer.FileLayerError as exc:

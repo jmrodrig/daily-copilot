@@ -22,12 +22,14 @@ import { BubbleMenu } from "@tiptap/react/menus";
 import StarterKit from "@tiptap/starter-kit";
 import { useEffect, useLayoutEffect, useRef, useState, useMemo, useCallback, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 
-import { errorDetail, message } from "../lib/api";
+import { message, uploadFile } from "../lib/api";
 import type { TaskItem as TaskRow } from "../lib/tasks";
 import MediaLightbox, { ExpandButton, isPdfUrl, MarkupOverlay } from "./MediaLightbox";
 import { LinkPanel, panelPosition, TaskPanel, type PanelDraft } from "./refPanels";
 import { pillContent, ReferencePill, taskHref, type RefPillAttrs } from "./referencePill";
 import { SlashCommand, SlashMenu, type SlashItem, type SlashMenuState } from "./slashCommand";
+import { WhiteboardIcon } from "./markupUi";
+import { WhiteboardNode } from "./WhiteboardWidget";
 import {
   ALIGNMENTS,
   AlignedBlocks,
@@ -45,6 +47,7 @@ import {
   nearestWidth,
   snapWidths,
   widthLabel,
+  EMPTY_WHITEBOARD_JSON,
   type Alignment,
 } from "./noteFormatting";
 
@@ -92,7 +95,7 @@ export default function NoteEditor({
   onSaveRef.current = onSave;
   const [uploads, setUploads] = useState(0);
   const [uploadError, setUploadError] = useState<string | null>(null);
-  const [panel, setPanel] = useState<{ type: SlashItem["id"]; draft: PanelDraft } | null>(null);
+  const [panel, setPanel] = useState<{ type: "task" | "link"; draft: PanelDraft } | null>(null);
   const [slashMenu, setSlashMenu] = useState<SlashMenuState | null>(null);
   // The `/` menu's key handling while it's shown (see SlashMenu), and what picking one of its items does.
   const slashKeyRef = useRef<(event: KeyboardEvent) => boolean>(() => false);
@@ -120,6 +123,8 @@ export default function NoteEditor({
       // column-wide and centered, with handles to resize it to a layout column or the page (see noteFormatting). Its
       // markup is kept beside it (see MediaLightbox), so the image itself is never changed.
       ResizableImage.configure({ inline: true, allowBase64: false }),
+      // A ```whiteboard block, shown as a live board (see WhiteboardWidget).
+      WhiteboardNode.configure({ spaceId, onSave: () => onSaveRef.current() }),
       Markdown,
       UploadPlaceholders,
       ReferencePill,
@@ -237,7 +242,7 @@ export default function NoteEditor({
   }, [editor, disabled]);
 
   /** Open a panel for the text at `from`..`to` (or the caret, if they're the same). */
-  function openPanel(type: SlashItem["id"], from: number, to: number) {
+  function openPanel(type: "task" | "link", from: number, to: number) {
     if (!editor) return;
     const text = editor.state.doc.textBetween(from, to, " ").replace(/\s+/g, " ").trim();
     setPanel({ type, draft: { text, from, to, ...panelPosition(editor.view.coordsAtPos(from), editor.view.coordsAtPos(to)) } });
@@ -246,6 +251,10 @@ export default function NoteEditor({
   // The `/` and what was typed after it go, and the picked item's panel opens where they were.
   slashPickRef.current = (item, range) => {
     if (!editor) return;
+    if (item.id === "whiteboard") {
+      editor.chain().focus().deleteRange(range).insertContent({ type: "whiteboard", attrs: { data: EMPTY_WHITEBOARD_JSON } }).run();
+      return;
+    }
     editor.chain().focus().deleteRange(range).run();
     openPanel(item.id, range.from, range.from);
   };
@@ -334,7 +343,7 @@ export default function NoteEditor({
 }
 
 /** The menu over selected text (not a link, which has its own): turn the selection into a task or a link. */
-function SelectionMenu({ editor, onOpen }: { editor: Editor; onOpen: (type: SlashItem["id"]) => void }) {
+function SelectionMenu({ editor, onOpen }: { editor: Editor; onOpen: (type: "task" | "link") => void }) {
   const options = useMemo(() => ({ placement: "top" as const, offset: 8 }), []);
   const shouldShow = useCallback(
     ({ editor: e, state, from, to }: { editor: Editor; state: EditorState; from: number; to: number }) =>
@@ -921,32 +930,6 @@ function extractFiles(data: DataTransfer | null): File[] {
   return Array.from(data?.files ?? []);
 }
 
-/**
- * POST /api/notes/image: store an image or other file in the space, returning the URL it's served from and its name.
- * Sent with XHR rather than fetch, so `onProgress` hears how much of the file has gone (0 to 1).
- */
-function uploadFile(spaceId: number, file: File, onProgress?: (fraction: number) => void): Promise<{ url: string; name: string }> {
-  const form = new FormData();
-  form.append("space_id", String(spaceId));
-  form.append("file", file);
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open("POST", "/api/notes/image");
-    xhr.upload.onprogress = (event) => {
-      if (event.lengthComputable) onProgress?.(event.loaded / event.total);
-    };
-    xhr.onload = () => {
-      // Wrapped in a Response so errors read the same as the rest of the API's.
-      const res = new Response(xhr.responseText, { status: xhr.status, statusText: xhr.statusText });
-      if (!res.ok) return void errorDetail(res).then((detail) => reject(new Error(detail)), reject);
-      res.json().then((body: { url: string }) => resolve({ url: body.url, name: file.name }), reject);
-    };
-    xhr.onerror = () => reject(new Error("network error"));
-    xhr.onabort = () => reject(new Error("aborted"));
-    xhr.send(form);
-  });
-}
-
 type PlaceholderMeta = { add: { id: string; pos: number; dom: HTMLElement; order: number } } | { remove: string };
 
 /**
@@ -1166,6 +1149,14 @@ function Toolbar({
           }
         }}
       />
+      <ToolButton
+        label="Insert whiteboard"
+        on={false}
+        disabled={off}
+        onClick={() => chain().insertContent({ type: "whiteboard", attrs: { data: EMPTY_WHITEBOARD_JSON } }).run()}
+      >
+        <WhiteboardIcon />
+      </ToolButton>
       <ToolButton
         label="Insert table"
         on={false}

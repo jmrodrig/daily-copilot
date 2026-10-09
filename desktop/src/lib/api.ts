@@ -25,6 +25,32 @@ export async function sendJson<T>(method: string, url: string, body?: unknown): 
   return res.status === 204 ? (undefined as T) : res.json();
 }
 
+/**
+ * POST /api/notes/image: store an image or other file in the space, returning the URL it's served from and its name.
+ * Sent with XHR rather than fetch, so `onProgress` hears how much of the file has gone (0 to 1).
+ */
+export function uploadFile(spaceId: number, file: File, onProgress?: (fraction: number) => void): Promise<{ url: string; name: string }> {
+  const form = new FormData();
+  form.append("space_id", String(spaceId));
+  form.append("file", file);
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "/api/notes/image");
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) onProgress?.(event.loaded / event.total);
+    };
+    xhr.onload = () => {
+      // Wrapped in a Response so errors read the same as the rest of the API's.
+      const res = new Response(xhr.responseText, { status: xhr.status, statusText: xhr.statusText });
+      if (!res.ok) return void errorDetail(res).then((detail) => reject(new Error(detail)), reject);
+      res.json().then((body: { url: string }) => resolve({ url: body.url, name: file.name }), reject);
+    };
+    xhr.onerror = () => reject(new Error("network error"));
+    xhr.onabort = () => reject(new Error("aborted"));
+    xhr.send(form);
+  });
+}
+
 export function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }

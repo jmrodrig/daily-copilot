@@ -218,6 +218,22 @@ def test_create_folder_and_note_from_template(client, monkeypatch):
     assert template.json()["frontmatter"] == {"type": "meeting"}
 
 
+def test_create_whiteboard_note(client, monkeypatch):
+    monkeypatch.setattr(main, "_today", lambda: date(2026, 10, 9))
+
+    response = client.post("/api/notes", json={"space_id": 1, "path": "Boards/Plan", "title": "Plan", "type": "whiteboard"})
+
+    assert response.status_code == 201
+    note = response.json()
+    assert note["path"] == "Boards/Plan.md"
+    assert note["frontmatter"] == {"type": "whiteboard", "created": "2026-10-09", "state": "draft"}
+    assert json.loads(note["content"]) == {"grid": True, "elements": [], "markup": {"strokes": [], "comments": []}}
+    stored = file_layer.read_note(note["path"], notes_dir=spaces.content_dir(1))
+    assert stored["frontmatter"]["type"] == "whiteboard"
+    assert json.loads(stored["content"]) == json.loads(note["content"])
+    assert client.post("/api/notes", json={"space_id": 1, "path": "x", "type": "sketch"}).status_code == 422
+
+
 def test_template_project_placeholder_is_the_folder_project_code(client, monkeypatch):
     monkeypatch.setattr(main, "_today", lambda: date(2026, 10, 4))
     (spaces.content_dir(1) / "C7801" / "Meetings").mkdir(parents=True)

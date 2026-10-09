@@ -1,89 +1,60 @@
 import type { PDFDocumentLoadingTask, PDFDocumentProxy, RenderTask } from "pdfjs-dist";
-import { useEffect, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { createPortal } from "react-dom";
-import { getStroke } from "perfect-freehand";
 
 import { getJson, message, sendJson } from "../lib/api";
+import {
+  distance,
+  drawLassoOutline,
+  drawSelection,
+  drawStrokes,
+  ERASER_MIN_REACH,
+  HANDLE_CURSORS,
+  INKS,
+  isEraser,
+  isShape,
+  isTyping,
+  lassoed,
+  loadPdf,
+  MAX_CANVAS_AREA,
+  MAX_CANVAS_SIDE,
+  midpoint,
+  newId,
+  PDF_RENDER_DELAY,
+  PDF_SCALE,
+  selectionBox,
+  selectionHandle,
+  SIZES,
+  strokesByPage,
+  textFont,
+  textSize,
+  textWidth,
+  touches,
+  transformStrokes,
+  type Comment,
+  type Eraser,
+  type Handle,
+  type MediaMarkup,
+  type Point,
+  type Stroke,
+  type TextEntry,
+  type Tool,
+  type Transform,
+} from "./markupCore";
+import { CommentPin, MarkupTools, Segment, ToolbarDivider } from "./markupUi";
+
+// The markup engine lives in markupCore (shared with the whiteboard); these are re-exported for the notes' views.
+export type { MediaMarkup } from "./markupCore";
+export { drawStrokes, isTyping, strokesByPage } from "./markupCore";
+export { CommentPin } from "./markupUi";
 
 /** The view: the image's scale (1 is its natural size) and its center's offset from the stage's, in screen pixels. */
 type View = { zoom: number; x: number; y: number };
-type Point = { x: number; y: number };
-type Tool = "draw" | "pan" | "select" | "erase" | "lasso-erase" | "line" | "arrow" | "rect" | "circle" | "text" | "comment";
-type Eraser = "erase" | "lasso-erase";
-/** A markup stroke, in image pixels; each point carries its line width. A freehand one ("draw") has a point for each
- * the pointer passed; a shape has two, where its drag started and where it is (or ended); a text has one, its top
- * left, whose width is its font size, and is turned by `angle` (in radians) about it. A freehand stroke with a `taper`
- * is drawn as perfect-freehand's outline, thinned by a pen's pressure (kept on each point) or by the pointer's speed;
- * one without (an older one, or a turned rectangle or ellipse) as a line whose width follows its points'.
- * The erasers leave no strokes: they delete the ones they touch (or loop around). */
-type Stroke = {
-  type: Exclude<Tool, "pan" | "select" | "comment" | Eraser>;
-  color: string;
-  points: (Point & { width: number; pressure?: number })[];
-  text?: string;
-  angle?: number;
-  taper?: "pen" | "speed";
-};
-/** A sticky-note comment pinned to a point on the image or a PDF's page (counted from 0), in its pixels. */
-type Comment = Point & { id: string; text: string; isExpanded: boolean; page: number };
-/** `GET`/`PUT /api/notes/image/{name}/markup` (MediaMarkup in backend/schemas.py): the sidecar beside the file. An
- * older one may still hold eraser strokes, which are dropped when it's read (see `strokesByPage`). */
-export type MediaMarkup = { strokes: ((Stroke | (Omit<Stroke, "type"> & { type: Eraser })) & { page?: number })[]; comments: Comment[] };
-/** A text being typed: where it goes, in image pixels, its font size, in them too, its ink and what's typed so far. */
-type TextEntry = Point & { size: number; color: string; value: string };
-/** A box, in image pixels. */
-type Box = { left: number; top: number; right: number; bottom: number };
-type Corner = "nw" | "ne" | "se" | "sw";
-/** What a drag on the selection does: move it, turn it, or scale it from one of its corners. */
-type Handle = "move" | "rotate" | Corner;
-/** A drag transforming the selection: the strokes as they were when it started, as they are now (in `strokes`), the
- * box they were in, where it started, and the angle it's turned them by so far. */
-type Transform = { pointerId: number; handle: Handle; from: Point; box: Box; originals: Stroke[]; current: Stroke[]; angle: number };
-
-const isShape = (type: Tool) => type === "line" || type === "arrow" || type === "rect" || type === "circle";
-const isEraser = (type: Tool): type is Eraser => type === "erase" || type === "lasso-erase";
 
 const MIN_ZOOM = 0.05;
 const MAX_ZOOM = 8;
 const ZOOM_STEP = 1.25;
 const clampZoom = (zoom: number) => Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoom));
-
-/** Ink that reads on most images. */
-const INKS = [
-  { name: "Red", value: "#ef4444" },
-  { name: "Yellow", value: "#facc15" },
-  { name: "Green", value: "#22c55e" },
-  { name: "Blue", value: "#3b82f6" },
-  { name: "Black", value: "#111111" },
-  { name: "White", value: "#ffffff" },
-];
-/** Line widths, in screen pixels at the zoom a stroke is drawn at. */
-const SIZES = [2, 4, 8];
-/** A text's font size, in screen pixels at the zoom it's placed at, for each line width. */
-const textSize = (lineSize: number) => 8 + lineSize * 3;
-/** A text's font, at a size in pixels. */
-const textFont = (size: number) => `600 ${size}px "IBM Plex Sans", sans-serif`;
-/** The markup canvas's limits, in device pixels: a larger one fails to allocate (and draws nothing) or eats memory. */
-const MAX_CANVAS_SIDE = 16384;
-const MAX_CANVAS_AREA = 4096 * 4096;
-/** A PDF page's pixels per point, as browsers show PDFs at 100%. */
-const PDF_SCALE = 96 / 72;
-/** How long a zoom rests before a PDF's page is rendered again at its resolution, in milliseconds. */
-const PDF_RENDER_DELAY = 150;
-/** The selection's handles' size, and how far above its box the rotate handle sits, in screen pixels. */
-const HANDLE_SIZE = 9;
-const ROTATE_OFFSET = 24;
-/** The least a corner's drag scales the selection to, so it can't collapse to nothing. */
-const MIN_SCALE = 0.05;
-/** The cursor over each of the selection's handles. */
-const HANDLE_CURSORS: Record<Handle, string> = {
-  move: "cursor-move",
-  rotate: "cursor-grab",
-  nw: "cursor-nwse-resize",
-  se: "cursor-nwse-resize",
-  ne: "cursor-nesw-resize",
-  sw: "cursor-nesw-resize",
-};
 
 /** Whether a URL is a PDF's, by its name. */
 export const isPdfUrl = (url: string) => /\.pdf$/i.test(new URL(url, window.location.href).pathname);
@@ -95,13 +66,6 @@ export function markupUrlOf(src: string): string | null {
   return `${url.pathname}/markup${url.search}`;
 }
 
-/** Start loading a PDF with pdf.js, which (with its worker) is only fetched once one is opened. */
-async function loadPdf(url: string): Promise<PDFDocumentLoadingTask> {
-  const [pdfjs, worker] = await Promise.all([import("pdfjs-dist"), import("pdfjs-dist/build/pdf.worker.min.mjs?url")]);
-  pdfjs.GlobalWorkerOptions.workerSrc = worker.default;
-  return pdfjs.getDocument({ url });
-}
-
 /** The sidecar holding strokes kept by page (the image's are page 0's) and comments; a comment's open state isn't
  * kept, so opening one doesn't count as a change. */
 function snapshot(byPage: Map<number, Stroke[]>, comments: Comment[]): MediaMarkup {
@@ -109,17 +73,6 @@ function snapshot(byPage: Map<number, Stroke[]>, comments: Comment[]): MediaMark
     strokes: [...byPage].sort(([a], [b]) => a - b).flatMap(([page, list]) => list.map((s) => ({ ...s, page }))),
     comments: comments.map((c) => ({ ...c, isExpanded: false })),
   };
-}
-
-/** A sidecar's strokes, by the page they're on. An older sidecar's eraser strokes (which once masked the ink under
- * them) are dropped: erasing now deletes strokes instead. */
-export function strokesByPage(markup: MediaMarkup): Map<number, Stroke[]> {
-  const byPage = new Map<number, Stroke[]>();
-  for (const { page = 0, ...stroke } of markup.strokes) {
-    if (isEraser(stroke.type)) continue;
-    byPage.set(page, [...(byPage.get(page) ?? []), stroke as Stroke]);
-  }
-  return byPage;
 }
 
 /**
@@ -167,7 +120,6 @@ export default function MediaLightbox({
   const eraserRef = useRef(eraser);
   eraserRef.current = eraser;
   const [eraserMenu, setEraserMenu] = useState(false);
-  const eraserMenuRef = useRef<HTMLSpanElement>(null);
   const [ink, setInk] = useState(INKS[0].value);
   const [lineSize, setLineSize] = useState(SIZES[1]);
   // The strokes on the page shown (an image's all are), the other pages' strokes, and the comments on every page.
@@ -479,16 +431,6 @@ export default function MediaLightbox({
     setHover(null);
   }, [tool]);
 
-  // The eraser's menu closes on a click outside it.
-  useEffect(() => {
-    if (!eraserMenu) return;
-    const outside = (e: PointerEvent) => {
-      if (!eraserMenuRef.current?.contains(e.target as Node)) setEraserMenu(false);
-    };
-    window.addEventListener("pointerdown", outside, true);
-    return () => window.removeEventListener("pointerdown", outside, true);
-  }, [eraserMenu]);
-
   // A text's field takes the focus once the click that placed it is done: the click's own mousedown would blur it.
   const textAt = textEntry && `${textEntry.x},${textEntry.y}`;
   useEffect(() => {
@@ -609,8 +551,7 @@ export default function MediaLightbox({
       if (tool === "comment") {
         // A click pins a comment, open to be written in; any other open one closes.
         commitText();
-        const newId = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2);
-        const comment: Comment = { id: newId, x: point.x, y: point.y, text: "", isExpanded: true, page };
+        const comment: Comment = { id: newId(), x: point.x, y: point.y, text: "", isExpanded: true, page };
         setComments((all) => [
           ...all.filter((c) => !c.isExpanded || c.text.trim()).map((c) => ({ ...c, isExpanded: false })),
           comment,
@@ -787,93 +728,26 @@ export default function MediaLightbox({
       </header>
       {editing && (
         <div role="toolbar" aria-label="Markup" className="flex flex-wrap items-center gap-2 border-b border-border-default px-5 py-1.5">
-          {TOOLS.map((t) =>
-            !isEraser(t.tool) ? (
-              <Segment key={t.tool} on={tool === t.tool} label={t.label} onClick={() => setTool(t.tool)}>
-                <ToolIcon path={t.icon} dashed={t.dashed} />
-              </Segment>
-            ) : (
-              // The erasers share a split button: the eraser last picked, and a menu to pick the other.
-              t.tool === eraser && (
-                <span key="eraser" ref={eraserMenuRef} className="relative flex items-center">
-                  <Segment on={tool === t.tool} label={`${t.label} (or hold Shift)`} onClick={() => setTool(t.tool)}>
-                    <ToolIcon path={t.icon} />
-                  </Segment>
-                  <button
-                    type="button"
-                    title="Choose the eraser"
-                    aria-label="Choose the eraser"
-                    aria-haspopup="menu"
-                    aria-expanded={eraserMenu}
-                    onClick={() => setEraserMenu((open) => !open)}
-                    className="flex h-8 w-4 items-center justify-center rounded text-text-muted hover:bg-surface-raised hover:text-text-primary"
-                  >
-                    <svg aria-hidden width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M1.5 3l2.5 2.5L6.5 3" />
-                    </svg>
-                  </button>
-                  {eraserMenu && (
-                    <div role="menu" aria-label="Eraser" className="absolute left-0 top-full z-20 mt-1 min-w-[200px] rounded-lg border border-border-light bg-surface-raised py-1 shadow-xl">
-                      {ERASERS.map((e) => (
-                        <button
-                          key={e.tool}
-                          type="button"
-                          role="menuitemradio"
-                          aria-checked={eraser === e.tool}
-                          onClick={() => {
-                            setEraser(e.tool);
-                            setTool(e.tool);
-                            setEraserMenu(false);
-                          }}
-                          className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-[15px] hover:bg-surface-hover hover:text-text-primary focus:bg-surface-hover focus:outline-none ${
-                            eraser === e.tool ? "text-accent-soft" : "text-text-secondary"
-                          }`}
-                        >
-                          <ToolIcon path={e.icon} />
-                          {e.name}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </span>
-              )
-            ),
-          )}
-          <span aria-hidden className="mx-1 h-5 w-px bg-border-default" />
-          {INKS.map((c) => (
-            <button
-              key={c.value}
-              type="button"
-              title={c.name}
-              aria-label={c.name}
-              aria-pressed={ink === c.value}
-              onClick={() => {
-                setInk(c.value);
-                // Ink is for drawing: picking one recolours the selection, or else swaps Move, Select or an eraser
-                // for the pen, but keeps a shape or text.
-                if (tool === "select" && selection.length) {
-                  replaceStrokes(new Map(selection.map((s) => [s, { ...s, color: c.value }])));
-                } else if (tool === "pan" || tool === "select" || isEraser(tool)) setTool("draw");
-              }}
-              className={`h-6 w-6 rounded-full border-2 ${ink === c.value ? "border-text-primary" : "border-transparent"}`}
-              style={{ background: c.value }}
-            />
-          ))}
-          <span aria-hidden className="mx-1 h-5 w-px bg-border-default" />
-          {SIZES.map((s) => (
-            <button
-              key={s}
-              type="button"
-              title={`Line width ${s}`}
-              aria-label={`Line width ${s}`}
-              aria-pressed={lineSize === s}
-              onClick={() => setLineSize(s)}
-              className={`flex h-8 w-8 items-center justify-center rounded ${lineSize === s ? "bg-accent/[0.16]" : "hover:bg-surface-raised"}`}
-            >
-              <span className="rounded-full bg-text-primary" style={{ width: s + 2, height: s + 2 }} />
-            </button>
-          ))}
-          <span aria-hidden className="mx-1 h-5 w-px bg-border-default" />
+          <MarkupTools
+            tool={tool}
+            onTool={setTool}
+            eraser={eraser}
+            onEraser={setEraser}
+            eraserMenu={eraserMenu}
+            onEraserMenu={setEraserMenu}
+            ink={ink}
+            onInk={(value) => {
+              setInk(value);
+              // Ink is for drawing: picking one recolours the selection, or else swaps Move, Select or an eraser
+              // for the pen, but keeps a shape or text.
+              if (tool === "select" && selection.length) {
+                replaceStrokes(new Map(selection.map((s) => [s, { ...s, color: value }])));
+              } else if (tool === "pan" || tool === "select" || isEraser(tool)) setTool("draw");
+            }}
+            lineSize={lineSize}
+            onLineSize={setLineSize}
+          />
+          <ToolbarDivider />
           <Segment on={false} label="Undo the last stroke" disabled={!strokes.length || saving} onClick={() => setStrokes((s) => s.slice(0, -1))}>
             Undo
           </Segment>
@@ -1000,7 +874,7 @@ export default function MediaLightbox({
         <Segment on={false} label="Zoom in" onClick={() => zoomTo(view.zoom * ZOOM_STEP)}>
           +
         </Segment>
-        <span aria-hidden className="mx-1 h-5 w-px bg-border-default" />
+        <ToolbarDivider />
         <Segment on={false} label="Fit to the screen" onClick={fit}>
           Fit
         </Segment>
@@ -1009,7 +883,7 @@ export default function MediaLightbox({
         </Segment>
         {pdf && pdf.numPages > 1 && (
           <>
-            <span aria-hidden className="mx-1 h-5 w-px bg-border-default" />
+            <ToolbarDivider />
             <Segment on={false} label="Previous page" disabled={page === 0 || saving} onClick={() => goToPage(page - 1)}>
               ‹
             </Segment>
@@ -1024,501 +898,6 @@ export default function MediaLightbox({
       </footer>
     </div>,
     document.body,
-  );
-}
-
-const midpoint = (a: Point, b: Point): Point => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
-const distance = (a: Point, b: Point) => Math.hypot(a.x - b.x, a.y - b.y);
-
-/** The erasers, which share a split button in the toolbar, with their icons (paths in a 16 × 16 box). */
-const ERASERS: { tool: Eraser; name: string; label: string; icon: string }[] = [
-  {
-    tool: "lasso-erase",
-    name: "Lasso eraser",
-    label: "Lasso eraser: loop around ink to delete it",
-    // A lasso's loop, its rope running down to an eraser's block.
-    icon: "M7 2c2.8 0 5 1.3 5 3s-2.2 3-5 3-5-1.3-5-3 2.2-3 5-3z M5.4 7.8c-.6 1.2-.2 2.6 1.2 3.2.9.4 1.9.7 2.7 1.5 M8.6 13.2l3.6-3.6a.7.7 0 0 1 1 0l1.2 1.2a.7.7 0 0 1 0 1L12 14.2H9.6z M10.4 11.4l2.2 2.2",
-  },
-  {
-    tool: "erase",
-    name: "Stroke eraser",
-    label: "Stroke eraser: a stylus or the mouse deletes the ink it touches",
-    icon: "M6 13.5h7.5 M2.8 9.7l6.5-6.5a1 1 0 0 1 1.4 0l2.6 2.6a1 1 0 0 1 0 1.4L7.6 13H5.1z M6 6.5l4 4",
-  },
-];
-
-/** A speech bubble, in a 16 × 16 box. */
-const COMMENT_ICON = "M2.5 3.5h11v7h-6l-3 2.5v-2.5h-2z";
-
-/** The markup tools, with their icons (paths in a 16 × 16 box, dashed for some). */
-const TOOLS: { tool: Tool; label: string; icon: string; dashed?: boolean }[] = [
-  { tool: "draw", label: "Pen: a stylus or the mouse draws", icon: "M10.5 2.5l3 3-8 8H2.5v-3z M8.5 4.5l3 3" },
-  ...ERASERS,
-  {
-    tool: "select",
-    label: "Select: loop around ink, then drag it to move it, its corners to scale it or its top handle to turn it (Delete removes it)",
-    icon: "M8 2.5c3.3 0 5.5 1.6 5.5 3.6S11.3 9.7 8 9.7 2.5 8.1 2.5 6.1 4.7 2.5 8 2.5z M5.2 9.2c-.9.9-.8 2.4.3 3 .9.5 1.4 1 1.2 2.3",
-    dashed: true,
-  },
-  { tool: "line", label: "Line: drag to draw one", icon: "M3 13L13 3" },
-  { tool: "arrow", label: "Arrow: drag from its tail to its head", icon: "M3 13L13 3 M7 3h6v6" },
-  { tool: "rect", label: "Rectangle: drag across its corners", icon: "M2.5 4h11v8h-11z" },
-  { tool: "circle", label: "Ellipse: drag across its bounds", icon: "M14 8a6 4.5 0 1 1-12 0a6 4.5 0 1 1 12 0z" },
-  { tool: "text", label: "Text: click to type some", icon: "M3 4.5V3h10v1.5 M8 3v10 M6 13h4" },
-  { tool: "comment", label: "Comment: click to pin a sticky note there", icon: COMMENT_ICON },
-  { tool: "pan", label: "Move: a stylus or the mouse pans", icon: "M8 1.5v13 M1.5 8h13 M6 3.5l2-2 2 2 M6 12.5l2 2 2-2 M3.5 6l-2 2 2 2 M12.5 6l2 2-2 2" },
-];
-
-/** Draw whole strokes, in image pixels. */
-export function drawStrokes(context: CanvasRenderingContext2D, strokes: Stroke[]) {
-  for (const stroke of strokes) {
-    if (isShape(stroke.type)) drawShape(context, stroke);
-    else if (stroke.type === "text") drawText(context, stroke);
-    else if (stroke.taper) drawFreehand(context, stroke);
-    else {
-      for (let i = 1; i < stroke.points.length; i++) drawSegment(context, stroke, i);
-      if (stroke.points.length === 1) drawDot(context, stroke);
-    }
-  }
-}
-
-/** Set the context up to draw a stroke, in its ink. */
-function inkFor(context: CanvasRenderingContext2D, stroke: Stroke) {
-  context.strokeStyle = stroke.color;
-  context.fillStyle = stroke.color;
-  context.lineCap = "round";
-  context.lineJoin = "round";
-}
-
-/** Draw a stroke's segment ending at its `i`th point, at that point's width. */
-function drawSegment(context: CanvasRenderingContext2D, stroke: Stroke, i: number) {
-  const from = stroke.points[i - 1];
-  const to = stroke.points[i];
-  inkFor(context, stroke);
-  context.lineWidth = to.width;
-  context.beginPath();
-  context.moveTo(from.x, from.y);
-  context.lineTo(to.x, to.y);
-  context.stroke();
-}
-
-/** Draw a tapered freehand stroke as the polygon perfect-freehand outlines around its points, filled. */
-function drawFreehand(context: CanvasRenderingContext2D, stroke: Stroke) {
-  const pen = stroke.taper === "pen";
-  const outline = getStroke(
-    stroke.points.map((p) => [p.x, p.y, p.pressure ?? 0.5]),
-    { size: stroke.points[0].width, thinning: 0.5, smoothing: 0.5, streamline: 0.5, simulatePressure: !pen },
-  );
-  if (!outline.length) return;
-  inkFor(context, stroke);
-  context.beginPath();
-  outline.forEach(([x, y], i) => (i ? context.lineTo(x, y) : context.moveTo(x, y)));
-  context.closePath();
-  context.fill();
-}
-
-/** Draw a stroke's first point: a tap leaves a dot. */
-function drawDot(context: CanvasRenderingContext2D, stroke: Stroke) {
-  const { x, y, width } = stroke.points[0];
-  inkFor(context, stroke);
-  context.beginPath();
-  context.arc(x, y, width / 2, 0, Math.PI * 2);
-  context.fill();
-}
-
-/** Trace a lasso's loop, closed. */
-function traceLasso(context: CanvasRenderingContext2D, points: Point[]) {
-  context.beginPath();
-  points.forEach(({ x, y }, i) => (i ? context.lineTo(x, y) : context.moveTo(x, y)));
-  context.closePath();
-}
-
-/** Stroke the path traced dashed black on white, so it shows on any ink or image, and thin at any `zoom`. */
-function strokeDashed(context: CanvasRenderingContext2D, zoom: number) {
-  context.save();
-  context.lineWidth = 1.5 / zoom;
-  context.lineJoin = "round";
-  context.strokeStyle = "#ffffff";
-  context.stroke();
-  context.setLineDash([4 / zoom, 4 / zoom]);
-  context.strokeStyle = "#111111";
-  context.stroke();
-  context.restore();
-}
-
-/** Outline a lasso being drawn, at `zoom`. */
-function drawLassoOutline(context: CanvasRenderingContext2D, points: Point[], zoom: number) {
-  traceLasso(context, points);
-  strokeDashed(context, zoom);
-}
-
-/** Draw the selection's box, its corners' handles to scale it and the handle above it to turn it, turned by `angle`
- * about its center, at `zoom`. */
-function drawSelection(context: CanvasRenderingContext2D, box: Box, zoom: number, angle: number) {
-  const center = boxCenter(box);
-  const rotateAt = rotateHandle(box, zoom);
-  const size = HANDLE_SIZE / zoom;
-  context.save();
-  context.translate(center.x, center.y);
-  context.rotate(angle);
-  context.translate(-center.x, -center.y);
-  context.beginPath();
-  context.rect(box.left, box.top, box.right - box.left, box.bottom - box.top);
-  context.moveTo(center.x, box.top);
-  context.lineTo(rotateAt.x, rotateAt.y);
-  strokeDashed(context, zoom);
-  context.lineWidth = 1.5 / zoom;
-  context.fillStyle = "#ffffff";
-  context.strokeStyle = "#111111";
-  context.beginPath();
-  for (const { x, y } of Object.values(boxCorners(box))) context.rect(x - size / 2, y - size / 2, size, size);
-  context.moveTo(rotateAt.x + size / 2, rotateAt.y);
-  context.arc(rotateAt.x, rotateAt.y, size / 2, 0, Math.PI * 2);
-  context.fill();
-  context.stroke();
-  context.restore();
-}
-
-/** Draw a text, from its top left, at its font size, turned by its angle about it. */
-function drawText(context: CanvasRenderingContext2D, stroke: Stroke) {
-  const { x, y, width: size } = stroke.points[0];
-  inkFor(context, stroke);
-  context.save();
-  context.translate(x, y);
-  context.rotate(stroke.angle ?? 0);
-  context.font = textFont(size);
-  context.textBaseline = "top";
-  context.fillText(stroke.text ?? "", 0, 0);
-  context.restore();
-}
-
-/** A text's width, in the pixels its size is in. */
-let measure: CanvasRenderingContext2D | null = null;
-function textWidth(text: string, size: number): number {
-  measure ??= document.createElement("canvas").getContext("2d");
-  if (!measure) return text.length * size;
-  measure.font = textFont(size);
-  return measure.measureText(text).width;
-}
-
-/** Draw a shape, from its start point to its end. */
-function drawShape(context: CanvasRenderingContext2D, stroke: Stroke) {
-  const [start, end] = stroke.points;
-  if (!end) return;
-  inkFor(context, stroke);
-  context.lineWidth = start.width;
-  context.beginPath();
-  if (stroke.type === "rect") {
-    context.rect(start.x, start.y, end.x - start.x, end.y - start.y);
-  } else if (stroke.type === "circle") {
-    // The ellipse that fills the box the drag spans.
-    const center = midpoint(start, end);
-    context.ellipse(center.x, center.y, Math.abs(end.x - start.x) / 2, Math.abs(end.y - start.y) / 2, 0, 0, Math.PI * 2);
-  } else {
-    context.moveTo(start.x, start.y);
-    context.lineTo(end.x, end.y);
-    if (stroke.type === "arrow") {
-      // The head: a barb either side of the line, back from its end, sized to its width but at most half its length.
-      const angle = Math.atan2(end.y - start.y, end.x - start.x);
-      const head = Math.min(distance(start, end) / 2, start.width * 5);
-      for (const side of [-1, 1]) {
-        context.moveTo(end.x, end.y);
-        context.lineTo(end.x - head * Math.cos(angle + (side * Math.PI) / 6), end.y - head * Math.sin(angle + (side * Math.PI) / 6));
-      }
-    }
-  }
-  context.stroke();
-}
-
-/** The points that outline a stroke, in image pixels: a freehand one's own, a shape's corners (or, for an ellipse,
- * `segments` points around it), a line's ends and middle, and a text's box's corners. */
-function outline(stroke: Stroke, segments = 8): Point[] {
-  const [start, end] = stroke.points;
-  if (stroke.type === "text") {
-    const size = start.width;
-    const width = textWidth(stroke.text ?? "", size);
-    const cos = Math.cos(stroke.angle ?? 0);
-    const sin = Math.sin(stroke.angle ?? 0);
-    return [[0, 0], [width, 0], [width, size], [0, size]].map(([u, v]) => ({ x: start.x + u * cos - v * sin, y: start.y + u * sin + v * cos }));
-  }
-  if (!isShape(stroke.type) || !end) return stroke.points;
-  if (stroke.type === "rect") return [start, { x: end.x, y: start.y }, end, { x: start.x, y: end.y }];
-  if (stroke.type === "circle") {
-    const center = midpoint(start, end);
-    const rx = Math.abs(end.x - start.x) / 2;
-    const ry = Math.abs(end.y - start.y) / 2;
-    return Array.from({ length: segments }, (_, i) => {
-      const a = (i / segments) * Math.PI * 2;
-      return { x: center.x + rx * Math.cos(a), y: center.y + ry * Math.sin(a) };
-    });
-  }
-  return [start, midpoint(start, end), end];
-}
-
-/** Whether a point is inside a loop (ray casting: a ray from it crosses the loop's edges an odd number of times). */
-function insideLoop({ x, y }: Point, loop: Point[]): boolean {
-  let inside = false;
-  for (let i = 0, j = loop.length - 1; i < loop.length; j = i++) {
-    const a = loop[i];
-    const b = loop[j];
-    if (a.y > y !== b.y > y && x < ((b.x - a.x) * (y - a.y)) / (b.y - a.y) + a.x) inside = !inside;
-  }
-  return inside;
-}
-
-/** Whether a lasso's loop picks a stroke: whether it encloses all of its outline (an ellipse's checked all round),
- * so one it only crosses, or mostly encloses, is left out. */
-function lassoed(stroke: Stroke, loop: Point[]): boolean {
-  return outline(stroke, 48).every((p) => insideLoop(p, loop));
-}
-
-/** The least the stroke eraser reaches from the pointer, in screen pixels, so the thinnest line size still hits ink. */
-const ERASER_MIN_REACH = 6;
-
-/** How far a point is from the segment between `a` and `b`. */
-function segmentDistance(p: Point, a: Point, b: Point): number {
-  const dx = b.x - a.x;
-  const dy = b.y - a.y;
-  const length = dx * dx + dy * dy;
-  const t = length ? Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / length)) : 0;
-  return distance(p, { x: a.x + t * dx, y: a.y + t * dy });
-}
-
-/** Whether a stroke's ink is within `reach` of a point: a text's anywhere over its box, any other's along its line
- * (a rectangle's or ellipse's closed), widened by half its width. */
-function touches(stroke: Stroke, point: Point, reach: number): boolean {
-  const points = outline(stroke, 48);
-  const closed = stroke.type === "text" || stroke.type === "rect" || stroke.type === "circle";
-  if (stroke.type === "text" && insideLoop(point, points)) return true;
-  const near = reach + (stroke.type === "text" ? 0 : Math.max(...stroke.points.map((p) => p.width)) / 2);
-  if (points.length === 1) return distance(point, points[0]) <= near;
-  const segments = closed ? points.length : points.length - 1;
-  for (let i = 0; i < segments; i++) if (segmentDistance(point, points[i], points[(i + 1) % points.length]) <= near) return true;
-  return false;
-}
-
-/** The box around strokes' ink. */
-function selectionBox(strokes: Stroke[]): Box {
-  const box = { left: Infinity, top: Infinity, right: -Infinity, bottom: -Infinity };
-  for (const stroke of strokes) {
-    // A text's box is its ink's; a line's is half its width wider all round.
-    const pad = stroke.type === "text" ? 0 : Math.max(...stroke.points.map((p) => p.width)) / 2;
-    for (const { x, y } of outline(stroke)) {
-      box.left = Math.min(box.left, x - pad);
-      box.top = Math.min(box.top, y - pad);
-      box.right = Math.max(box.right, x + pad);
-      box.bottom = Math.max(box.bottom, y + pad);
-    }
-  }
-  return box;
-}
-
-const boxCenter = (box: Box): Point => ({ x: (box.left + box.right) / 2, y: (box.top + box.bottom) / 2 });
-const boxCorners = (box: Box): Record<Corner, Point> => ({
-  nw: { x: box.left, y: box.top },
-  ne: { x: box.right, y: box.top },
-  se: { x: box.right, y: box.bottom },
-  sw: { x: box.left, y: box.bottom },
-});
-const OPPOSITE: Record<Corner, Corner> = { nw: "se", ne: "sw", se: "nw", sw: "ne" };
-/** Where the handle that turns the selection is: above its box's middle, at `zoom`. */
-const rotateHandle = (box: Box, zoom: number): Point => ({ x: (box.left + box.right) / 2, y: box.top - ROTATE_OFFSET / zoom });
-
-/** The selection's handle at a point, at `zoom`: the rotate handle, a corner, or its box, to move it; or none. */
-function selectionHandle(box: Box, point: Point, zoom: number): Handle | null {
-  const reach = HANDLE_SIZE / zoom;
-  if (distance(point, rotateHandle(box, zoom)) <= reach) return "rotate";
-  for (const [corner, at] of Object.entries(boxCorners(box)) as [Corner, Point][]) {
-    if (distance(point, at) <= reach) return corner;
-  }
-  const inside = point.x >= box.left && point.x <= box.right && point.y >= box.top && point.y <= box.bottom;
-  return inside ? "move" : null;
-}
-
-/** A stroke with each point mapped by `map` and its width scaled by `scale`, and, if it's a text, turned by `angle`. */
-function mapStroke(stroke: Stroke, map: (p: Point) => Point, scale = 1, angle = 0): Stroke {
-  const points = stroke.points.map((p) => ({ ...map(p), width: p.width * scale }));
-  return stroke.type === "text" ? { ...stroke, points, angle: (stroke.angle ?? 0) + angle } : { ...stroke, points };
-}
-
-/** A rectangle or ellipse as the freehand line around it, which, unlike the shape, can be turned; any other stroke
- * as it is. */
-function asPath(stroke: Stroke): Stroke {
-  if (stroke.type !== "rect" && stroke.type !== "circle") return stroke;
-  const points = outline(stroke, 48);
-  const width = stroke.points[0].width;
-  return { type: "draw", color: stroke.color, points: [...points, points[0]].map((p) => ({ ...p, width })) };
-}
-
-/** The strokes as a drag of the selection's `handle`, from `from` to `to`, leaves them, given the box they were in
- * when it started: moved by it, turned about the box's center (by the angle returned), or scaled, evenly, from the
- * corner opposite the one dragged. */
-function transformStrokes(strokes: Stroke[], box: Box, handle: Handle, from: Point, to: Point): { strokes: Stroke[]; angle: number } {
-  if (handle === "move") {
-    const dx = to.x - from.x;
-    const dy = to.y - from.y;
-    return { strokes: strokes.map((s) => mapStroke(s, (p) => ({ x: p.x + dx, y: p.y + dy }))), angle: 0 };
-  }
-  if (handle === "rotate") {
-    const center = boxCenter(box);
-    const angle = Math.atan2(to.y - center.y, to.x - center.x) - Math.atan2(from.y - center.y, from.x - center.x);
-    const cos = Math.cos(angle);
-    const sin = Math.sin(angle);
-    const turn = (p: Point) => ({
-      x: center.x + (p.x - center.x) * cos - (p.y - center.y) * sin,
-      y: center.y + (p.x - center.x) * sin + (p.y - center.y) * cos,
-    });
-    return { strokes: strokes.map((s) => mapStroke(asPath(s), turn, 1, angle)), angle };
-  }
-  const corners = boxCorners(box);
-  const anchor = corners[OPPOSITE[handle]];
-  // The dragged corner follows the pointer; the scale is how far along the box's diagonal it's gone.
-  const diagonal = { x: corners[handle].x - anchor.x, y: corners[handle].y - anchor.y };
-  const length = diagonal.x ** 2 + diagonal.y ** 2;
-  if (!length) return { strokes, angle: 0 };
-  const dragged = { x: corners[handle].x + to.x - from.x - anchor.x, y: corners[handle].y + to.y - from.y - anchor.y };
-  const scale = Math.max(MIN_SCALE, (dragged.x * diagonal.x + dragged.y * diagonal.y) / length);
-  const grow = (p: Point) => ({ x: anchor.x + (p.x - anchor.x) * scale, y: anchor.y + (p.y - anchor.y) * scale });
-  return { strokes: strokes.map((s) => mapStroke(s, grow, scale)), angle: 0 };
-}
-
-/** Whether a key's going to a field being typed in. */
-export const isTyping = (target: EventTarget | null) =>
-  target instanceof HTMLElement && (target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName));
-
-/** A tool's icon: a path in a 16 × 16 box, maybe dashed. */
-function ToolIcon({ path, dashed }: { path: string; dashed?: boolean }) {
-  return (
-    <svg aria-hidden width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-      <path d={path} strokeDasharray={dashed ? "2 2.5" : undefined} />
-    </svg>
-  );
-}
-
-function Segment({
-  on,
-  label,
-  disabled,
-  onClick,
-  children,
-}: {
-  on: boolean;
-  label: string;
-  disabled?: boolean;
-  onClick: () => void;
-  children: ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      title={label}
-      aria-label={label}
-      aria-pressed={on}
-      disabled={disabled}
-      onClick={onClick}
-      className={`flex h-8 min-w-8 items-center justify-center rounded px-2 text-[15px] disabled:cursor-not-allowed disabled:opacity-40 ${
-        on ? "bg-accent/[0.16] text-accent-soft" : "text-text-secondary hover:bg-surface-raised hover:text-text-primary"
-      }`}
-    >
-      {children}
-    </button>
-  );
-}
-
-/**
- * A comment, pinned where it was placed: in image pixels, like the canvas, so it stays on its spot as the view pans
- * and zooms, but scaled back to stay the same size on screen. Collapsed, it's an icon, which a click opens to a
- * sticky note: written in and saved (which collapses it again) while `editable`, else just read.
- */
-export function CommentPin({
-  comment,
-  zoom,
-  editable,
-  onToggle,
-  onSave,
-  onDelete,
-}: {
-  comment: Comment;
-  zoom: number;
-  editable: boolean;
-  onToggle: () => void;
-  onSave: (text: string) => void;
-  onDelete: () => void;
-}) {
-  const [draft, setDraft] = useState(comment.text);
-  const fieldRef = useRef<HTMLTextAreaElement>(null);
-
-  // Opening it starts from what's saved, in the field, once the click that opened it is done.
-  useEffect(() => {
-    if (!comment.isExpanded) return;
-    setDraft(comment.text);
-    const timer = setTimeout(() => fieldRef.current?.focus());
-    return () => clearTimeout(timer);
-  }, [comment.isExpanded]);
-
-  return (
-    <div
-      className="absolute"
-      style={{ left: comment.x, top: comment.y, transform: `scale(${1 / zoom})`, transformOrigin: "0 0" }}
-      // Clicking and typing in it isn't drawing on, or panning, the stage.
-      onPointerDown={(e) => e.stopPropagation()}
-      onDoubleClick={(e) => e.stopPropagation()}
-    >
-      <button
-        type="button"
-        title={comment.text || "Comment"}
-        aria-label={comment.isExpanded ? "Close the comment" : "Open the comment"}
-        aria-expanded={comment.isExpanded}
-        onClick={onToggle}
-        className={`absolute flex h-7 w-7 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border-2 border-white shadow-lg ${
-          comment.isExpanded ? "bg-accent text-white" : "bg-yellow-300 text-neutral-900 hover:scale-110"
-        }`}
-      >
-        <svg aria-hidden width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round">
-          <path d={COMMENT_ICON} />
-        </svg>
-      </button>
-      {comment.isExpanded && (
-        <div role="note" className="absolute left-5 top-2 w-64 cursor-auto rounded-md bg-yellow-100 p-2 text-neutral-900 shadow-xl">
-          {editable ? (
-            <>
-              <textarea
-                ref={fieldRef}
-                aria-label="Comment"
-                value={draft}
-                rows={4}
-                placeholder="Write a comment…"
-                onChange={(e) => setDraft(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
-                    e.preventDefault();
-                    onSave(draft);
-                  }
-                }}
-                className="block w-full resize-none select-text rounded border border-yellow-300 bg-yellow-50 p-1.5 text-sm text-neutral-900 placeholder:text-neutral-500 focus:outline-none"
-              />
-              <div className="mt-2 flex items-center justify-end gap-2">
-                {comment.text && (
-                  <button type="button" onClick={onDelete} className="mr-auto rounded px-2 py-1 text-xs font-medium text-neutral-600 hover:bg-yellow-200">
-                    Delete
-                  </button>
-                )}
-                <button
-                  type="button"
-                  onClick={() => onSave(draft)}
-                  title="Save (Ctrl+Enter)"
-                  className="rounded bg-neutral-900 px-3 py-1 text-xs font-medium text-yellow-50 hover:bg-neutral-700"
-                >
-                  Save
-                </button>
-              </div>
-            </>
-          ) : (
-            <p className="max-h-60 select-text overflow-auto whitespace-pre-wrap text-sm">{comment.text}</p>
-          )}
-        </div>
-      )}
-    </div>
   );
 }
 
