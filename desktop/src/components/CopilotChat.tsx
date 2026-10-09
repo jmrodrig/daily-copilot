@@ -164,6 +164,11 @@ export default function CopilotChat({
   const [prompts, setPrompts] = useState<SavedPrompt[]>([]);
   const [menuIndex, setMenuIndex] = useState(0);
   const [menuDismissed, setMenuDismissed] = useState(false);
+  // The entry whose reply was just copied, shown as "Copied" for a moment.
+  const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
+  const copiedTimerRef = useRef<number | null>(null);
+  // Aborts the question in flight (Stop, a space change, or unmounting).
+  const abortControllerRef = useRef<AbortController | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const location = useLocation();
@@ -172,9 +177,17 @@ export default function CopilotChat({
 
   // A conversation (and its proposed edits) belongs to one space: start over when it changes.
   useEffect(() => {
+    abortControllerRef.current?.abort();
     setEntries([]);
     setError(null);
   }, [spaceId]);
+
+  useEffect(() => {
+    return () => {
+      abortControllerRef.current?.abort();
+      if (copiedTimerRef.current !== null) window.clearTimeout(copiedTimerRef.current);
+    };
+  }, []);
 
   useEffect(() => {
     getJson<{ chat_model?: string }>("/health")
@@ -277,9 +290,12 @@ export default function CopilotChat({
     setMenuDismissed(false);
     setError(null);
     setSending(true);
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
+        signal: controller.signal,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           messages: next.map((entry) => ({ role: entry.role, content: historyContent(entry) })),
@@ -303,13 +319,53 @@ export default function CopilotChat({
         },
       ]);
     } catch (err: unknown) {
+      if ((err as { name?: string })?.name === "AbortError") {
+        // Stopped on purpose: keep the question in the chat, from where it can be edited and sent again.
+        setError(null);
+        return;
+      }
       // Put the question back so it can be retried without two user turns in a row.
       setEntries(entries);
       setInput(text);
       setError(message(err));
     } finally {
       setSending(false);
+      if (abortControllerRef.current === controller) abortControllerRef.current = null;
     }
+  }
+
+  function stop() {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+  }
+
+  async function copyReply(index: number, text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      return;
+    }
+    setCopiedIndex(index);
+    if (copiedTimerRef.current !== null) window.clearTimeout(copiedTimerRef.current);
+    copiedTimerRef.current = window.setTimeout(() => {
+      setCopiedIndex(null);
+      copiedTimerRef.current = null;
+    }, 2000);
+  }
+
+  /** Puts a past question back in the input, cursor at the end, to be changed and sent again. */
+  function editPrompt(entry: Extract<Entry, { role: "user" }>) {
+    const text = entry.prompt ? `${entry.prompt.command}${entry.prompt.rest ? ` ${entry.prompt.rest}` : ""}` : entry.content;
+    setInput(text);
+    setMenuDismissed(true);
+    setTimeout(() => {
+      if (inputRef.current) {
+        inputRef.current.focus();
+        inputRef.current.setSelectionRange(text.length, text.length);
+      }
+    }, 0);
   }
 
   function setEditStatus(entryIndex: number, path: string, status: EditStatus) {
@@ -534,20 +590,28 @@ export default function CopilotChat({
         )}
         {entries.map((entry, i) =>
           entry.role === "user" ? (
-            <div
-              key={i}
-              className="max-w-[85%] self-end whitespace-pre-wrap rounded-xl bg-surface-active px-3.5 py-2.5 text-sm"
-            >
-              {entry.prompt ? (
-                <>
-                  <span className="font-mono text-accent" title={entry.prompt.instruction}>
-                    {entry.prompt.command}
-                  </span>
-                  {entry.prompt.rest && ` ${entry.prompt.rest}`}
-                </>
-              ) : (
-                entry.content
-              )}
+            <div key={i} className="group flex max-w-[85%] flex-col items-end gap-1 self-end">
+              <div className="whitespace-pre-wrap rounded-xl bg-surface-active px-3.5 py-2.5 text-sm">
+                {entry.prompt ? (
+                  <>
+                    <span className="font-mono text-accent" title={entry.prompt.instruction}>
+                      {entry.prompt.command}
+                    </span>
+                    {entry.prompt.rest && ` ${entry.prompt.rest}`}
+                  </>
+                ) : (
+                  entry.content
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={() => editPrompt(entry)}
+                title="Edit prompt"
+                className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs text-text-muted opacity-60 hover:bg-surface-raised hover:text-text-primary focus-visible:opacity-100 group-hover:opacity-100"
+              >
+                <PencilIcon />
+                Edit
+              </button>
             </div>
           ) : (
             <div key={i} className="flex flex-col gap-2">
@@ -566,6 +630,17 @@ export default function CopilotChat({
                     ))}
                   </div>
                 )}
+                <div className="mt-2 flex justify-end">
+                  <button
+                    type="button"
+                    onClick={() => copyReply(i, entry.content)}
+                    title="Copy response"
+                    className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs text-text-muted hover:bg-surface-active hover:text-text-primary"
+                  >
+                    {copiedIndex === i ? <CheckIcon /> : <CopyIcon />}
+                    {copiedIndex === i ? "Copied" : "Copy"}
+                  </button>
+                </div>
               </div>
               {entry.edits.map((edit) => (
                 <EditCard
@@ -578,7 +653,19 @@ export default function CopilotChat({
             </div>
           ),
         )}
-        {sending && <p className="text-[15px] text-text-muted">Thinking…</p>}
+        {sending && (
+          <div className="flex items-center gap-2.5">
+            <p className="text-[15px] text-text-muted">Thinking…</p>
+            <button
+              type="button"
+              onClick={stop}
+              className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs text-text-muted hover:bg-surface-raised hover:text-text-primary"
+            >
+              <StopIcon />
+              Stop
+            </button>
+          </div>
+        )}
         {error && <p className="text-[15px] text-accent">Could not get an answer ({error}).</p>}
         <div ref={bottomRef} />
       </div>
@@ -601,9 +688,20 @@ export default function CopilotChat({
             aria-expanded={menuItems.length > 0}
           />
         </label>
-        <button type="button" onClick={send} disabled={sending || !input.trim()} className="btn-primary min-h-11">
-          Send
-        </button>
+        {sending ? (
+          <button
+            type="button"
+            onClick={stop}
+            className="btn min-h-11 gap-1.5 border-accent/40 bg-accent/10 text-accent hover:bg-accent/20"
+          >
+            <StopIcon />
+            Stop
+          </button>
+        ) : (
+          <button type="button" onClick={send} disabled={!input.trim()} className="btn-primary min-h-11">
+            Send
+          </button>
+        )}
       </div>
     </section>
   );
@@ -620,6 +718,40 @@ function BrainIcon() {
     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 text-text-muted" aria-hidden>
       <path d="M9.5 3A2.5 2.5 0 0 0 7 5.5v.1A3 3 0 0 0 4.5 10a3 3 0 0 0 .4 5.4A3 3 0 0 0 9.5 19a2.5 2.5 0 0 0 2.5-2.5v-11A2.5 2.5 0 0 0 9.5 3z" />
       <path d="M14.5 3A2.5 2.5 0 0 1 17 5.5v.1a3 3 0 0 1 2.5 4.4 3 3 0 0 1-.4 5.4 3 3 0 0 1-4.6 3.6 2.5 2.5 0 0 1-2.5-2.5" />
+    </svg>
+  );
+}
+
+function CopyIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0" aria-hidden>
+      <rect x="9" y="9" width="12" height="12" rx="2" />
+      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+    </svg>
+  );
+}
+
+function CheckIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 text-project-p5002" aria-hidden>
+      <path d="M3.5 8.5l3 3 6-6" />
+    </svg>
+  );
+}
+
+function StopIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" className="shrink-0" aria-hidden>
+      <rect x="3" y="3" width="10" height="10" rx="1.5" />
+    </svg>
+  );
+}
+
+function PencilIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0" aria-hidden>
+      <path d="M12 20h9" />
+      <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z" />
     </svg>
   );
 }
