@@ -1348,9 +1348,18 @@ def list_tasks(
 
 @app.get("/api/spaces/{space_id}/tags")
 def list_tags(space_id: int, db: Session = Depends(get_db)) -> list[str]:
-    """Every tag used on the tasks of a space, sorted case-insensitively (for the tag filter)."""
-    query = select(Task.tags).where(_in_space(_space_id_or_404(db, space_id)))
+    """Every tag used on the tasks and notes of a space, sorted case-insensitively (tag filter, tag autocomplete)."""
+    space_id = _space_id_or_404(db, space_id)
+    query = select(Task.tags).where(_in_space(space_id))
     tags = {tag for task_tags in db.scalars(query) for tag in schemas.clean_tags(task_tags)}
+    root = spaces.content_dir(space_id)
+    for path in file_layer.list_notes("**/*.md", notes_dir=root):
+        if _hidden(path):
+            continue
+        try:
+            tags.update(schemas.clean_tags(file_layer.read_note(path, notes_dir=root)["frontmatter"].get("tags")))
+        except (file_layer.FileLayerError, OSError, UnicodeDecodeError):
+            continue  # A hand-edited note with broken front-matter must not break the whole list.
     return sorted(tags, key=lambda tag: (tag.lower(), tag))
 
 

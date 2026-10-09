@@ -259,6 +259,19 @@ def test_update_note_sets_the_tags(client):
     assert "tags" not in file_layer.read_note("Keel.md", notes_dir=root)["frontmatter"]
 
 
+def test_space_tags_include_note_tags(client):
+    other = client.post("/api/spaces", json={"name": "Other"}).json()["id"]
+    client.post("/api/tasks", json={"space_id": 1, "title": "Weld", "tags": ["weld"]})
+    write(1, "C7801/Keel.md", "---\ntags: [hull, weld]\n---\nBody\n")
+    write(1, "Loose.md", "---\ntags: urgent\n---\n")
+    write(1, ".trash/Gone.md", "---\ntags: [deleted]\n---\n")
+    write(1, "Broken.md", "---\ntags: [unclosed\n---\n")
+    write(other, "Secret.md", "---\ntags: [secret]\n---\n")
+
+    assert client.get("/api/spaces/1/tags").json() == ["hull", "urgent", "weld"]
+    assert client.get(f"/api/spaces/{other}/tags").json() == ["secret"]
+
+
 def test_update_note_saves_the_body_and_state(client):
     write(1, "C7801/Keel.md", "---\ncreated: 2026-09-30\ntitle: Keel\n---\nOld body\n")
     root = spaces.content_dir(1)

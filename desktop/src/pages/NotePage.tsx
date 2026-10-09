@@ -5,7 +5,7 @@ import rehypeRaw from "rehype-raw";
 import rehypeSanitize from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 
-import { formatDay, LABEL_TAG, NEUTRAL_TAG, PROJECT_TAG, ProjectTag, Tag, TagPills } from "../components/TriageBoard";
+import { formatDay, LABEL_TAG, NEUTRAL_TAG, ProjectTag, Tag, TagPills } from "../components/TriageBoard";
 import { getJson, message, sendJson } from "../lib/api";
 import { useSpace } from "../lib/space";
 import { useTitle } from "../lib/title";
@@ -257,7 +257,7 @@ export default function NotePage() {
             </dl>
           )}
           {tagsEditable ? (
-            <NoteTags tags={tags} onChange={saveTags} disabled={saving !== null || savingTags} />
+            <NoteTags spaceId={spaceId} tags={tags} onChange={saveTags} disabled={saving !== null || savingTags} />
           ) : (
             tags.length > 0 && (
               <div className="flex flex-wrap items-center gap-1.5">
@@ -332,61 +332,144 @@ const DRAFT_TAG = "border-accent/60 text-accent";
 
 /**
  * A note's tags as `#tag` pills (project codes in their project's color): hovering a pill shows an × that removes
- * it, and "+ Add tag" opens an inline input (Enter adds, Escape closes). Each change is saved through `onChange`.
+ * it, and "+ Add tag" opens an inline input (Enter adds, Escape closes). While typing, a dropdown suggests the
+ * space's existing tags (arrows move through it, Enter picks the highlighted one). Each change is saved through
+ * `onChange`.
  */
-function NoteTags({ tags, onChange, disabled }: { tags: string[]; onChange: (tags: string[]) => void; disabled: boolean }) {
+function NoteTags({
+  spaceId,
+  tags,
+  onChange,
+  disabled,
+}: {
+  spaceId: number;
+  tags: string[];
+  onChange: (tags: string[]) => void;
+  disabled: boolean;
+}) {
+  const { projects } = useSpace();
   const [adding, setAdding] = useState(false);
   const [draft, setDraft] = useState("");
+  const [known, setKnown] = useState<string[]>([]);
+  // The highlighted suggestion, or -1 for none (Enter then adds the typed tag).
+  const [active, setActive] = useState(-1);
 
-  function add() {
-    const tag = draft.trim().replace(/^#+/, "").trim();
+  useEffect(() => {
+    if (!adding) return;
+    const controller = new AbortController();
+    getJson<string[]>(`/api/spaces/${spaceId}/tags`, controller.signal)
+      .then(setKnown)
+      .catch(() => {}); // Suggestions are a convenience; typing a tag still works without them.
+    return () => controller.abort();
+  }, [adding, spaceId]);
+
+  const query = draft.trim().replace(/^#+/, "").trim().toLowerCase();
+  const taken = new Set(tags.map((t) => t.toLowerCase()));
+  const suggestions = query ? known.filter((t) => !taken.has(t.toLowerCase()) && t.toLowerCase().includes(query)) : [];
+
+  function add(tag = draft.trim().replace(/^#+/, "").trim()) {
     setDraft("");
+    setActive(-1);
     if (tag && !tags.includes(tag)) onChange([...tags, tag]);
+  }
+
+  function tagStyle(tag: string) {
+    const color = projects.find((p) => p.code.toLowerCase() === tag.toLowerCase())?.color;
+    return color ? { className: "", style: { color, borderColor: `${color}99` } } : { className: LABEL_TAG };
   }
 
   return (
     <div role="group" aria-label="Tags" className="flex flex-wrap items-center gap-1.5">
-      {tags.map((tag) => (
-        <span
-          key={tag}
-          className={`group inline-flex items-center gap-1 rounded border px-1.5 py-px font-mono text-[12px] leading-4 ${PROJECT_TAG[tag.toLowerCase()] ?? LABEL_TAG}`}
-        >
-          {`#${tag}`}
-          <button
-            type="button"
-            aria-label={`Remove tag ${tag}`}
-            title="Remove tag"
-            disabled={disabled}
-            onClick={() => onChange(tags.filter((t) => t !== tag))}
-            className="hidden leading-none text-text-muted hover:text-accent focus-visible:inline group-hover:inline group-focus-within:inline disabled:opacity-50"
+      {tags.map((tag) => {
+        const { className, style } = tagStyle(tag);
+        return (
+          <span
+            key={tag}
+            style={style}
+            className={`group inline-flex items-center gap-1 rounded border px-1.5 py-px font-mono text-[12px] leading-4 ${className}`}
           >
-            ×
-          </button>
-        </span>
-      ))}
+            {`#${tag}`}
+            <button
+              type="button"
+              aria-label={`Remove tag ${tag}`}
+              title="Remove tag"
+              disabled={disabled}
+              onClick={() => onChange(tags.filter((t) => t !== tag))}
+              className="hidden leading-none text-text-muted hover:text-accent focus-visible:inline group-hover:inline group-focus-within:inline disabled:opacity-50"
+            >
+              ×
+            </button>
+          </span>
+        );
+      })}
       {adding ? (
-        <input
-          autoFocus
-          aria-label="New tag"
-          placeholder="tag"
-          value={draft}
-          disabled={disabled}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") {
-              e.preventDefault();
+        <div className="relative">
+          <input
+            autoFocus
+            role="combobox"
+            aria-label="New tag"
+            aria-autocomplete="list"
+            aria-expanded={suggestions.length > 0}
+            aria-controls="note-tag-suggestions"
+            aria-activedescendant={active >= 0 ? `note-tag-suggestion-${active}` : undefined}
+            placeholder="tag"
+            value={draft}
+            disabled={disabled}
+            onChange={(e) => {
+              setDraft(e.target.value);
+              setActive(-1);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "ArrowDown" && suggestions.length > 0) {
+                e.preventDefault();
+                setActive((i) => (i + 1) % suggestions.length);
+              } else if (e.key === "ArrowUp" && suggestions.length > 0) {
+                e.preventDefault();
+                setActive((i) => (i <= 0 ? suggestions.length - 1 : i - 1));
+              } else if (e.key === "Enter") {
+                e.preventDefault();
+                add(active >= 0 && active < suggestions.length ? suggestions[active] : undefined);
+              } else if (e.key === "Escape") {
+                setDraft("");
+                setActive(-1);
+                setAdding(false);
+              }
+            }}
+            onBlur={() => {
               add();
-            } else if (e.key === "Escape") {
-              setDraft("");
               setAdding(false);
-            }
-          }}
-          onBlur={() => {
-            add();
-            setAdding(false);
-          }}
-          className="w-28 rounded border border-border-default bg-transparent print:hidden px-1.5 py-px font-mono text-[12px] leading-4 text-text-primary outline-none focus:border-accent/60"
-        />
+            }}
+            className="w-28 rounded border border-border-default bg-transparent print:hidden px-1.5 py-px font-mono text-[12px] leading-4 text-text-primary outline-none focus:border-accent/60"
+          />
+          {suggestions.length > 0 && (
+            <ul
+              id="note-tag-suggestions"
+              role="listbox"
+              aria-label="Existing tags"
+              className="absolute left-0 top-full z-20 mt-1 max-h-48 min-w-full overflow-y-auto rounded border border-border-strong bg-surface-active py-0.5 shadow-xl shadow-black/40 print:hidden"
+            >
+              {suggestions.map((tag, i) => (
+                <li
+                  key={tag}
+                  id={`note-tag-suggestion-${i}`}
+                  role="option"
+                  aria-selected={i === active}
+                  // Picked on mouse down, before the input's blur adds the half-typed draft instead.
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    add(tag);
+                  }}
+                  onMouseEnter={() => setActive(i)}
+                  className={`cursor-pointer whitespace-nowrap px-2 py-0.5 font-mono text-[12px] leading-4 ${
+                    i === active ? "bg-accent/15 text-accent" : "text-text-secondary"
+                  }`}
+                >
+                  {`#${tag}`}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
       ) : (
         <button
           type="button"
