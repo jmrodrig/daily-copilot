@@ -8,7 +8,10 @@ import { loadPdf, strokesByPage, type Comment, type MediaMarkup, type Stroke } f
  * images and PDF pages pinned on the canvas, stacked by `z` (higher is in front).
  *
  *   {"grid": true, "elements": [{"id": "…", "kind": "pdf", "src": "/api/notes/image/…", "page": 0, "x": 0, …}],
- *    "markup": {"strokes": [], "comments": []}}
+ *    "markup": {"strokes": [], "comments": []}, "lockedLayers": [{"id": "…", "name": "Locked Layer 1", "elements": [], "strokes": []}]}
+ *
+ * Locked layers hold strokes and elements set into the background: drawn behind the rest, and out of reach of the
+ * tools till they're unlocked.
  */
 export type FloatingElement = {
   id: string;
@@ -25,10 +28,14 @@ export type FloatingElement = {
   angle?: number;
 };
 
+/** Strokes and floating elements locked into the board's background, together. */
+export type LockedLayer = { id: string; name: string; elements: FloatingElement[]; strokes: Stroke[] };
+
 export type WhiteboardState = {
   grid: boolean;
   elements: FloatingElement[];
   markup: MediaMarkup;
+  lockedLayers?: LockedLayer[];
 };
 
 /** A whiteboard as it's edited: its markup's strokes and comments unpacked. */
@@ -37,6 +44,7 @@ export type WhiteboardDoc = {
   elements: FloatingElement[];
   strokes: Stroke[];
   comments: Comment[];
+  lockedLayers?: LockedLayer[];
 };
 
 export const EMPTY_WHITEBOARD: WhiteboardState = { grid: true, elements: [], markup: { strokes: [], comments: [] } };
@@ -53,10 +61,30 @@ export function parseWhiteboard(json: string): WhiteboardDoc {
     raw = null;
   }
   if (!raw || typeof raw !== "object") raw = {};
-  const elements = (Array.isArray(raw.elements) ? raw.elements : [])
+  const elements = parseElements(raw.elements, "element");
+  const markup = raw.markup && typeof raw.markup === "object" ? raw.markup : { strokes: [], comments: [] };
+  const strokes = parseStrokes(markup.strokes);
+  const comments = (Array.isArray(markup.comments) ? markup.comments : [])
+    .filter((c): c is Comment => !!c && typeof c === "object" && typeof c.id === "string" && typeof c.text === "string")
+    .map((c) => ({ id: c.id, text: c.text, x: finite(c.x, 0), y: finite(c.y, 0), page: 0, isExpanded: false }));
+  const lockedLayers = (Array.isArray(raw.lockedLayers) ? raw.lockedLayers : [])
+    .filter((l): l is LockedLayer => !!l && typeof l === "object")
+    .map((l, i) => ({
+      id: typeof l.id === "string" && l.id ? l.id : `layer-${i}`,
+      name: typeof l.name === "string" && l.name ? l.name : `Locked Layer ${i + 1}`,
+      elements: parseElements(l.elements, `layer-${i}-element`),
+      strokes: parseStrokes(l.strokes),
+    }))
+    .filter((l) => l.elements.length || l.strokes.length);
+  return { grid: raw.grid !== false, elements, strokes, comments, ...(lockedLayers.length > 0 && { lockedLayers }) };
+}
+
+/** The floating elements read from a payload, stacked back to front; one without an id gets one from `fallbackId`. */
+function parseElements(value: unknown, fallbackId: string): FloatingElement[] {
+  const elements = (Array.isArray(value) ? (value as FloatingElement[]) : [])
     .filter((e): e is FloatingElement => !!e && typeof e === "object" && (e.kind === "image" || e.kind === "pdf") && typeof e.src === "string")
     .map((e, i) => ({
-      id: typeof e.id === "string" && e.id ? e.id : `element-${i}`,
+      id: typeof e.id === "string" && e.id ? e.id : `${fallbackId}-${i}`,
       kind: e.kind,
       src: e.src,
       ...(e.kind === "pdf" && { page: Math.max(0, Math.floor(finite(e.page, 0))) }),
@@ -67,14 +95,12 @@ export function parseWhiteboard(json: string): WhiteboardDoc {
       z: finite(e.z, i),
       ...(finite(e.angle, 0) ? { angle: finite(e.angle, 0) } : {}),
     }));
-  const markup = raw.markup && typeof raw.markup === "object" ? raw.markup : { strokes: [], comments: [] };
-  const strokes = [
-    ...strokesByPage({ strokes: Array.isArray(markup.strokes) ? markup.strokes.filter(isStroke) : [], comments: [] }).values(),
-  ].flat();
-  const comments = (Array.isArray(markup.comments) ? markup.comments : [])
-    .filter((c): c is Comment => !!c && typeof c === "object" && typeof c.id === "string" && typeof c.text === "string")
-    .map((c) => ({ id: c.id, text: c.text, x: finite(c.x, 0), y: finite(c.y, 0), page: 0, isExpanded: false }));
-  return { grid: raw.grid !== false, elements: normalizeZ(elements), strokes, comments };
+  return normalizeZ(elements);
+}
+
+/** The drawable strokes read from a payload (erasers' and pages dropped). */
+function parseStrokes(value: unknown): Stroke[] {
+  return [...strokesByPage({ strokes: Array.isArray(value) ? value.filter(isStroke) : [], comments: [] }).values()].flat();
 }
 
 /** Whether something read from a payload is drawable as a stroke. */
@@ -100,6 +126,9 @@ export function serializeWhiteboard(doc: WhiteboardDoc): string {
     grid: doc.grid,
     elements: normalizeZ(doc.elements),
     markup: { strokes: doc.strokes, comments: doc.comments.map((c) => ({ ...c, isExpanded: false, page: 0 })) },
+    ...(!!doc.lockedLayers?.length && {
+      lockedLayers: doc.lockedLayers.map((l) => ({ id: l.id, name: l.name, elements: normalizeZ(l.elements), strokes: l.strokes })),
+    }),
   };
   return JSON.stringify(state, round).replace(/`/g, "\\u0060");
 }

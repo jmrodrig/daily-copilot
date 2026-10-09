@@ -13,6 +13,7 @@ import {
 
 import { message, uploadFile } from "../lib/api";
 import MediaLightbox from "./MediaLightbox";
+import Popover from "./Popover";
 import {
   boxCenter,
   distance,
@@ -63,6 +64,7 @@ import {
   restack,
   serializeWhiteboard,
   type FloatingElement,
+  type LockedLayer,
   type WhiteboardDoc,
 } from "./whiteboard";
 
@@ -107,11 +109,14 @@ const toSelectionFrame = (frame: { box: Box; angle: number }, point: Point): Poi
 const isPdfFile = (file: File) => file.type === "application/pdf" || /\.pdf$/i.test(file.name);
 const isImageFile = (file: File) => file.type.startsWith("image/");
 
-/** The box around everything on a board, or null for an empty one. */
+/** The box around everything on a board, locked or not, or null for an empty one. */
 function contentBounds(doc: WhiteboardDoc): Box | null {
+  const layers = doc.lockedLayers ?? [];
+  const elements = [...layers.flatMap((l) => l.elements), ...doc.elements];
+  const strokes = [...layers.flatMap((l) => l.strokes), ...doc.strokes];
   const boxes: Box[] = [
-    ...doc.elements.map(frameBounds),
-    ...(doc.strokes.length ? [selectionBox(doc.strokes)] : []),
+    ...elements.map(frameBounds),
+    ...(strokes.length ? [selectionBox(strokes)] : []),
     ...doc.comments.map((c) => ({ left: c.x, top: c.y, right: c.x, bottom: c.y })),
   ];
   if (!boxes.length) return null;
@@ -137,6 +142,9 @@ function contentBounds(doc: WhiteboardDoc): Box | null {
  * goes round: whatever's picked is dragged, turned and scaled from its corners together. Picked elements can be
  * restacked or deleted from the mini-toolbar over them, and one alone opened or, for a PDF, turned to another page.
  * Ctrl/Cmd+Z and Ctrl/Cmd+Shift+Z undo and redo.
+ *
+ * The selection can be locked into the background as a layer: drawn behind everything else and out of the tools'
+ * reach (they only see the board's own strokes and elements) till it's unlocked from the toolbar's Locked layers menu.
  */
 export default function WhiteboardView({
   value,
@@ -209,7 +217,8 @@ export default function WhiteboardView({
   const eraserRef = useRef(eraser);
   eraserRef.current = eraser;
   const [eraserMenu, setEraserMenu] = useState(false);
-  const [ink, setInk] = useState(INKS[3].value);
+  // White, which shows on the dark stage.
+  const [ink, setInk] = useState(INKS.find((i) => i.name === "White")?.value ?? INKS[5].value);
   const [lineSize, setLineSize] = useState(SIZES[1]);
   // Space held pans, whatever the tool; the tool Shift swapped for the eraser, while it's held.
   const [spaceHeld, setSpaceHeld] = useState(false);
@@ -247,9 +256,13 @@ export default function WhiteboardView({
   const [dropping, setDropping] = useState(false);
   // The floating element opened in the lightbox.
   const [opened, setOpened] = useState<FloatingElement | null>(null);
+  // The Locked layers menu, and the button it hangs from.
+  const [layersMenu, setLayersMenu] = useState(false);
+  const layersButtonRef = useRef<HTMLSpanElement>(null);
+  const lockedLayers = doc.lockedLayers ?? [];
 
   const canInsert = editable && spaceId !== undefined;
-  const isEmpty = !doc.elements.length && !doc.strokes.length && !doc.comments.length;
+  const isEmpty = !doc.elements.length && !doc.strokes.length && !doc.comments.length && !lockedLayers.length;
 
   // ---- The board's state and history ----
 
@@ -350,6 +363,50 @@ export default function WhiteboardView({
     }));
     setSelected(new Set());
     setSelectedElements(new Set());
+  }
+
+  /** Lock the selection into the background, as a new layer behind everything else. */
+  function lockSelection() {
+    if (!selection.length && !pickedElements.length) return;
+    const strokes = new Set(selection);
+    const elements = new Set(pickedElements.map((e) => e.id));
+    setDoc((d) => {
+      const layers = d.lockedLayers ?? [];
+      const layer: LockedLayer = {
+        id: newId(),
+        name: `Locked Layer ${layers.length + 1}`,
+        strokes: d.strokes.filter((s) => strokes.has(s)),
+        elements: normalizeZ(d.elements.filter((e) => elements.has(e.id))),
+      };
+      if (!layer.strokes.length && !layer.elements.length) return d;
+      return {
+        ...d,
+        strokes: layer.strokes.length ? d.strokes.filter((s) => !strokes.has(s)) : d.strokes,
+        elements: layer.elements.length ? normalizeZ(d.elements.filter((e) => !elements.has(e.id))) : d.elements,
+        lockedLayers: [...layers, layer],
+      };
+    });
+    dropSelection();
+  }
+
+  /** Unlock a layer: its strokes and elements go back on the board, in front, and are picked to show what came back. */
+  function unlockLayer(id: string) {
+    const layer = lockedLayers.find((l) => l.id === id);
+    if (!layer || busy || dragging()) return;
+    commitText();
+    setDoc((d) => {
+      const rest = (d.lockedLayers ?? []).filter((l) => l.id !== id);
+      return {
+        ...d,
+        strokes: [...d.strokes, ...layer.strokes],
+        elements: normalizeZ([...d.elements, ...layer.elements.map((e) => ({ ...e, z: d.elements.length + e.z }))]),
+        lockedLayers: rest.length ? rest : undefined,
+      };
+    });
+    setTool("select");
+    setSelected(new Set(layer.strokes));
+    setSelectedElements(new Set(layer.elements.map((e) => e.id)));
+    if (lockedLayers.length <= 1) setLayersMenu(false);
   }
 
   // ---- The view ----
@@ -487,6 +544,7 @@ export default function WhiteboardView({
   function escape(): boolean {
     if (textEntryRef.current) cancelText();
     else if (eraserMenu) setEraserMenu(false);
+    else if (layersMenu) setLayersMenu(false);
     else if (newComment || expanded) {
       setNewComment(null);
       setExpanded(null);
@@ -626,7 +684,7 @@ export default function WhiteboardView({
 
   // The canvas shows the strokes, over the elements, and the selection's box: redrawn whole when they or the view
   // change. Before paint, so a pan or zoom doesn't flash it blank.
-  useLayoutEffect(redraw, [doc.strokes, doc.elements, selected, selectedElements, view, stageSize, busy]);
+  useLayoutEffect(redraw, [doc.strokes, doc.elements, doc.lockedLayers, selected, selectedElements, view, stageSize, busy]);
 
   /** Redraw the canvas whole, with the stroke being drawn, the lasso being drawn and the selection's box. */
   function redraw() {
@@ -637,6 +695,8 @@ export default function WhiteboardView({
     context.resetTransform();
     context.clearRect(0, 0, canvas.width, canvas.height);
     context.setTransform(ratio * view.zoom, 0, 0, ratio * view.zoom, ratio * view.x, ratio * view.y);
+    // The locked layers' strokes, first, under the board's own.
+    for (const layer of doc.lockedLayers ?? []) drawStrokes(context, layer.strokes);
     const current = drawing.current?.stroke;
     drawStrokes(context, current ? [...doc.strokes, current] : doc.strokes);
     if (selecting.current) drawLassoOutline(context, selecting.current.points, view.zoom);
@@ -1011,6 +1071,35 @@ export default function WhiteboardView({
           <Segment on={doc.grid} label="Grid (G)" onClick={toggleGrid}>
             <ToolIcon path="M2.5 2.5h11v11h-11z M6.2 2.5v11 M9.8 2.5v11 M2.5 6.2h11 M2.5 9.8h11" />
           </Segment>
+          {lockedLayers.length > 0 && (
+            <>
+              <span ref={layersButtonRef} className="flex">
+                <Segment on={layersMenu} label="Locked layers" onClick={() => setLayersMenu((open) => !open)}>
+                  <span className="flex items-center gap-1.5">
+                    <ToolIcon path={LOCK_ICON} />
+                    <span className="text-[14px]">Locked layers</span>
+                    <span className="font-mono text-xs text-text-muted">{lockedLayers.length}</span>
+                  </span>
+                </Segment>
+              </span>
+              <Popover anchor={layersButtonRef} open={layersMenu} onClose={() => setLayersMenu(false)} label="Locked layers" role="menu">
+                {lockedLayers.map((layer) => (
+                  <div key={layer.id} className="flex items-center gap-3 rounded-md px-2 py-1">
+                    <span className="min-w-0 flex-1 truncate text-text-secondary">{layer.name}</span>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      aria-label={`Unlock ${layer.name}`}
+                      onClick={() => unlockLayer(layer.id)}
+                      className="rounded px-2 py-0.5 text-xs text-text-secondary hover:bg-surface-raised hover:text-text-primary focus:bg-surface-raised focus:outline-none"
+                    >
+                      Unlock
+                    </button>
+                  </div>
+                ))}
+              </Popover>
+            </>
+          )}
           <span className="ml-auto flex items-center gap-2">
             {status && (
               <span role="status" className="text-xs text-text-muted">
@@ -1046,20 +1135,13 @@ export default function WhiteboardView({
         onDragLeave={() => setDropping(false)}
         onDrop={drop}
       >
-        {/* The floating elements, back to front, under the markup. */}
+        {/* The floating elements, back to front (the locked layers' first, behind the rest), under the markup. */}
         <div aria-hidden className="pointer-events-none absolute left-0 top-0" style={world}>
+          {lockedLayers.map((layer) =>
+            [...layer.elements].sort((a, b) => a.z - b.z).map((element) => <BoardElement key={element.id} element={element} zoom={view.zoom} />),
+          )}
           {stacked.map((element) => (
-            <div
-              key={element.id}
-              className="absolute overflow-hidden shadow-lg shadow-black/40"
-              style={{ left: element.x, top: element.y, width: element.w, height: element.h, transform: rotation(element) }}
-            >
-              {element.kind === "pdf" ? (
-                <PdfPage src={element.src} page={element.page ?? 0} width={element.w} zoom={view.zoom} />
-              ) : (
-                <ImageElement src={element.src} />
-              )}
-            </div>
+            <BoardElement key={element.id} element={element} zoom={view.zoom} />
           ))}
         </div>
         <canvas ref={canvasRef} width={canvasWidth} height={canvasHeight} className="pointer-events-none absolute inset-0 h-full w-full" />
@@ -1132,7 +1214,7 @@ export default function WhiteboardView({
             />
           )}
         </div>
-        {frame && pickedElements.length > 0 && !transformingNow && (
+        {frame && editable && !transformingNow && (
           <ElementToolbar
             elements={pickedElements}
             extent={selectionExtent(frame.box, frame.angle, view.zoom)}
@@ -1141,6 +1223,7 @@ export default function WhiteboardView({
             onRestack={restackSelected}
             onPage={(id, page) => void setElementPage(id, page)}
             onOpen={setOpened}
+            onLock={lockSelection}
             onDelete={deleteSelection}
           />
         )}
@@ -1187,6 +1270,25 @@ export default function WhiteboardView({
 /** A floating element's CSS turn, about its box's center. */
 const rotation = (e: FloatingElement) => (e.angle ? `rotate(${e.angle}rad)` : undefined);
 
+/** A padlock, for locking into the background and the locked layers. */
+const LOCK_ICON = "M3.5 7.5h9v6h-9z M5.5 7.5V5a2.5 2.5 0 0 1 5 0v2.5";
+
+/** A floating element on the stage, in its box. */
+function BoardElement({ element, zoom }: { element: FloatingElement; zoom: number }) {
+  return (
+    <div
+      className="absolute overflow-hidden shadow-lg shadow-black/40"
+      style={{ left: element.x, top: element.y, width: element.w, height: element.h, transform: rotation(element) }}
+    >
+      {element.kind === "pdf" ? (
+        <PdfPage src={element.src} page={element.page ?? 0} width={element.w} zoom={zoom} />
+      ) : (
+        <ImageElement src={element.src} />
+      )}
+    </div>
+  );
+}
+
 /** Stops a native drag starting from the board: a press held to draw would otherwise pick it up. */
 function preventDrag(e: ReactDragEvent) {
   e.preventDefault();
@@ -1215,8 +1317,8 @@ function gridStyle(view: View): CSSProperties {
 }
 
 /**
- * The picked elements' mini-toolbar, over the selection (or under it, if it's near the stage's top): restack them or
- * delete the selection, and, for an element picked alone, open it fullscreen or turn a PDF's page. In screen pixels,
+ * The selection's mini-toolbar, over it (or under it, if it's near the stage's top): restack its elements, lock it
+ * into the background or delete it, and, for an element picked alone, open it fullscreen or turn a PDF's page. In screen pixels,
  * so it stays the same size as the view zooms.
  */
 function ElementToolbar({
@@ -1227,6 +1329,7 @@ function ElementToolbar({
   onRestack,
   onPage,
   onOpen,
+  onLock,
   onDelete,
 }: {
   elements: FloatingElement[];
@@ -1237,6 +1340,7 @@ function ElementToolbar({
   onRestack: (move: "forward" | "backward" | "front" | "back") => void;
   onPage: (id: string, page: number) => void;
   onOpen: (element: FloatingElement) => void;
+  onLock: () => void;
   onDelete: () => void;
 }) {
   const element = elements.length === 1 ? elements[0] : null;
@@ -1251,7 +1355,7 @@ function ElementToolbar({
   const bottom = extent.bottom * view.zoom + view.y;
   const above = top > 52;
   // Kept on the stage, roughly half its own width in from either side.
-  const half = pdf ? 230 : element ? 130 : 110;
+  const half = pdf ? 245 : element ? 145 : elements.length ? 125 : 45;
   const center = Math.min(Math.max(((extent.left + extent.right) / 2) * view.zoom + view.x, half), Math.max(half, stageWidth - half));
 
   function commitPage() {
@@ -1269,18 +1373,22 @@ function ElementToolbar({
       onPointerDown={(e) => e.stopPropagation()}
       onDoubleClick={(e) => e.stopPropagation()}
     >
-      <Segment on={false} label="Bring forward" onClick={() => onRestack("forward")}>
-        <ToolIcon path="M5.5 5.5h8v8h-8z M2.5 10.5v-8h8" />
-      </Segment>
-      <Segment on={false} label="Send backward" onClick={() => onRestack("backward")}>
-        <ToolIcon path="M10.5 5.5v-3h-8v8h3 M5.5 5.5h8v8h-8z" dashed />
-      </Segment>
-      <Segment on={false} label="Bring to front" onClick={() => onRestack("front")}>
-        <ToolIcon path="M8 13.5v-9 M4.5 8L8 4.5 11.5 8 M3 2.5h10" />
-      </Segment>
-      <Segment on={false} label="Send to back" onClick={() => onRestack("back")}>
-        <ToolIcon path="M8 2.5v9 M4.5 8L8 11.5 11.5 8 M3 13.5h10" />
-      </Segment>
+      {elements.length > 0 && (
+        <>
+          <Segment on={false} label="Bring forward" onClick={() => onRestack("forward")}>
+            <ToolIcon path="M5.5 5.5h8v8h-8z M2.5 10.5v-8h8" />
+          </Segment>
+          <Segment on={false} label="Send backward" onClick={() => onRestack("backward")}>
+            <ToolIcon path="M10.5 5.5v-3h-8v8h3 M5.5 5.5h8v8h-8z" dashed />
+          </Segment>
+          <Segment on={false} label="Bring to front" onClick={() => onRestack("front")}>
+            <ToolIcon path="M8 13.5v-9 M4.5 8L8 4.5 11.5 8 M3 2.5h10" />
+          </Segment>
+          <Segment on={false} label="Send to back" onClick={() => onRestack("back")}>
+            <ToolIcon path="M8 2.5v9 M4.5 8L8 11.5 11.5 8 M3 13.5h10" />
+          </Segment>
+        </>
+      )}
       {pdf && (
         <>
           <ToolbarDivider />
@@ -1313,12 +1421,15 @@ function ElementToolbar({
           </Segment>
         </>
       )}
-      <ToolbarDivider />
+      {elements.length > 0 && <ToolbarDivider />}
       {element && (
         <Segment on={false} label="Open fullscreen" onClick={() => onOpen(element)}>
           <ToolIcon path="M9.5 2.5h4v4 M13.5 2.5L9 7 M6.5 13.5h-4v-4 M2.5 13.5L7 9" />
         </Segment>
       )}
+      <Segment on={false} label="Lock to background" onClick={onLock}>
+        <ToolIcon path={LOCK_ICON} />
+      </Segment>
       <Segment on={false} label="Delete (Del)" onClick={onDelete}>
         <ToolIcon path="M2.5 4.5h11 M6 4.5V3h4v1.5 M4 4.5l.7 9h6.6l.7-9 M6.8 7v4.5 M9.2 7v4.5" />
       </Segment>
