@@ -8,8 +8,8 @@ The tools the model may call:
 - `read_note`: read one note with its front-matter.
 - `list_tasks`: the space's tasks from SQLite (status, dates, overdue flag).
 - `write_note`: create or replace a note. Only offered outside `read_only` mode.
-- `list_local_directory` / `read_local_file`: crawl and read the local file system (design data such as
-  PDFs, CAD and Maxsurf files outside the notes; see `local_files`).
+- `search_local_files` / `list_local_directory` / `read_local_file`: search, crawl and read the local file system
+  (design data such as PDFs, CAD and Maxsurf files outside the notes; see `local_files`).
 
 Context injected into the system prompt (see `space_context`):
 
@@ -51,7 +51,7 @@ from schemas import AccessMode, ChatMessage, ChatResponse, ProposedEdit, Status,
 AGENT_SOURCE = "copilot_agent"
 APPROVED_SOURCE = "copilot_agent_approved"
 
-MAX_TOOL_ROUNDS = 8
+MAX_TOOL_ROUNDS = 16
 SEARCH_LIMIT = 10
 READ_LIMIT = 20_000  # characters of note content returned to the model
 _SNIPPET_RADIUS = 80
@@ -108,10 +108,12 @@ Rules:
 - A message starting with `[Saved prompt /<command>]` is one of the user's saved routines (e.g. /prep for \
 meeting prep): carry out its instruction with the tools, using any `User input:` that follows it.
 - `[The user is looking at ...]` says which page or note the user has open; "this page" or "this note" means it.
-- You can crawl the local file system with `list_local_directory` and `read_local_file` to find design data \
-outside the notes (PDF drawings and reports, CAD files, Maxsurf models, spreadsheets, ...). Use absolute paths, \
-e.g. ones linked from a note (`file:///C:/...`, `C:\\...`, `\\\\server\\share\\...`). Text and PDF files can be read; \
-for other formats you get only their size and dates. Cite the file paths you relied on.
+- You can search the local file system with `search_local_files`, crawl it with `list_local_directory` and read \
+files with `read_local_file` to find design data outside the notes (PDF drawings and reports, CAD files, Maxsurf \
+models, spreadsheets, ...). To find files on a topic, start with `search_local_files` on the root folder rather than \
+browsing folder by folder. Use absolute paths, e.g. ones linked from a note (`file:///C:/...`, `C:\\...`, \
+`\\\\server\\share\\...`). Text and PDF files can be read; for other formats you get only their size and dates. \
+Cite the file paths you relied on.
 {write_rules}{context}"""
 
 _WRITE_RULES = {
@@ -178,6 +180,25 @@ TOOLS: dict[str, dict[str, Any]] = {
                 },
             },
             "required": ["path", "content"],
+        },
+    },
+    "search_local_files": {
+        "description": "Recursively search a local directory tree for files and subfolders whose names match a "
+        "keyword or glob pattern (e.g. `scantling`, `*.xlsx`, `lines plan`). Much faster than browsing folder by "
+        "folder with list_local_directory.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "The root folder to search in, e.g. `O:\\Lawrences Files` or `Y:\\`",
+                },
+                "query": {
+                    "type": "string",
+                    "description": "Keywords (all must be in the name) or a glob pattern to match file and folder names",
+                },
+            },
+            "required": ["path", "query"],
         },
     },
     "list_local_directory": {
@@ -369,7 +390,7 @@ def _rag_block(folders: list[str]) -> str:
     crawls them with the local-file tools when a command or question calls for it."""
     lines = [
         "\n\nConfigured Local Folders in this space (crawled when instructed via commands or query, using "
-        "`list_local_directory` and `read_local_file`):"
+        "`search_local_files`, `list_local_directory` and `read_local_file`):"
     ]
     for folder in folders:
         lines.append(f"- `{folder}`")
@@ -468,6 +489,7 @@ class _Turn:
             "read_note": functools.partial(read_note, notes_dir=self.root),
             "list_tasks": functools.partial(list_tasks, space_id=self.space_id),
             "write_note": self.write_note,
+            "search_local_files": local_files.search_local_files,
             "list_local_directory": local_files.list_local_directory,
             "read_local_file": local_files.read_local_file,
         }
@@ -570,6 +592,22 @@ def _run_tool(turn: _Turn, name: str, raw_arguments: str | None) -> tuple[str, T
     return json.dumps(result, default=str, ensure_ascii=False), _summary(name, arguments, ok)
 
 
+FINAL_ANSWER_PROMPT = (
+    "You have reached the tool call limit. Based on all the files, notes, and data you have gathered so far, "
+    "synthesize and provide your complete, detailed final answer now."
+)
+
+
+def _fallback_reply(summaries: Sequence[ToolCallSummary]) -> str:
+    """What to show when the model gives no text at all: which tools it ran, so the user can ask again."""
+    if not summaries:
+        return "(The model returned no answer.)"
+    lines = [
+        f"- `{s.name}` {json.dumps(s.arguments, ensure_ascii=False)}" + ("" if s.ok else " (failed)") for s in summaries
+    ]
+    return "The model stopped without writing an answer. It had looked at:\n" + "\n".join(lines)
+
+
 def run_chat(
     messages: Sequence[ChatMessage],
     access_mode: AccessMode,
@@ -601,13 +639,17 @@ def run_chat(
 
     for round_ in range(MAX_TOOL_ROUNDS + 1):
         last = round_ == MAX_TOOL_ROUNDS  # Out of rounds: make the model answer with what it has.
+        if last:
+            # Gemini ignores tool_choice="none" while tools are declared and keeps calling them, so the last
+            # round declares no tools at all and asks outright for the answer.
+            history.append({"role": "user", "content": FINAL_ANSWER_PROMPT})
         kwargs: dict[str, Any] = {
             "model": chosen_model,
             "api_key": settings.gemini_api_key.get_secret_value(),
             "messages": history,
-            "tools": _tool_specs(mode),
-            "tool_choice": "none" if last else "auto",
         }
+        if not last:
+            kwargs.update(tools=_tool_specs(mode), tool_choice="auto")
         if reasoning_effort:
             kwargs["reasoning_effort"] = reasoning_effort
         try:
@@ -626,7 +668,7 @@ def run_chat(
         tool_calls = getattr(message, "tool_calls", None) or []
         if not tool_calls or last:
             return ChatResponse(
-                reply=message.content or "(The model returned no answer.)",
+                reply=message.content or getattr(message, "reasoning_content", None) or _fallback_reply(summaries),
                 proposed_edits=list(turn.proposed.values()),
                 written_paths=turn.written,
                 tool_calls=summaries,

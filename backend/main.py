@@ -586,8 +586,8 @@ DEFAULT_PROMPTS = (
         command="/design-search",
         description="Search configured local folders for design data",
         instruction=(
-            "Search the space's configured local folders using list_local_directory and read_local_file to answer "
-            "the following: "
+            "Search the space's configured local folders using search_local_files, list_local_directory and "
+            "read_local_file to answer the following: "
         ),
     ),
     schemas.SavedPromptIn(
@@ -596,7 +596,7 @@ DEFAULT_PROMPTS = (
         instruction=(
             "Find information in the RCD regulations in "
             r"'Y:\Classification, Certification & Documentation\RCD\All harmonized standards' "
-            "using list_local_directory and read_local_file to answer the following: "
+            "using search_local_files, list_local_directory and read_local_file to answer the following: "
         ),
     ),
 )

@@ -46,6 +46,57 @@ def test_list_local_directory_lists_folders_first(design):
     ]
 
 
+def test_search_local_files_matches_names_at_any_depth(design):
+    (design / "Hull" / "Scantlings").mkdir()
+    (design / "Hull" / "Scantlings" / "C7801 scantling calc.xlsx").write_bytes(b"xlsx")
+    (design / ".git").mkdir()
+    (design / ".git" / "scantling.txt").write_text("hidden", encoding="utf-8")
+
+    result = local_files.search_local_files(str(design), "SCANTLING")
+
+    assert result["path"] == str(design) and result["query"] == "SCANTLING"
+    assert result["count"] == 2 and result["truncated"] is False
+    assert result["matches"] == [
+        {"name": "Scantlings", "path": str(design / "Hull" / "Scantlings"), "type": "directory", "size": 0},
+        {
+            "name": "C7801 scantling calc.xlsx",
+            "path": str(design / "Hull" / "Scantlings" / "C7801 scantling calc.xlsx"),
+            "type": "file",
+            "size": 4,
+        },
+    ]
+
+
+def test_search_local_files_takes_keywords_and_globs(design):
+    def names(query):
+        return [m["name"] for m in local_files.search_local_files(design.as_uri(), query)["matches"]]
+
+    assert names("keel") == []
+    assert names("lines pdf") == ["lines.pdf"]
+    assert names("*.PDF") == ["lines.pdf"]
+    assert names("read*") == ["readme.md"]
+    with pytest.raises(local_files.LocalFileError):
+        local_files.search_local_files(str(design), "  ")
+    with pytest.raises(local_files.LocalFileError):
+        local_files.search_local_files(str(design / "readme.md"), "x")
+    with pytest.raises(FileNotFoundError):
+        local_files.search_local_files(str(design / "missing"), "x")
+
+
+def test_search_local_files_stops_at_its_limits(design, monkeypatch):
+    for i in range(5):
+        (design / f"match {i}.txt").write_text("x", encoding="utf-8")
+
+    monkeypatch.setattr(local_files, "SEARCH_MATCH_LIMIT", 3)
+    result = local_files.search_local_files(str(design), "match")
+    assert result["count"] == 3 and result["truncated"] is True
+
+    monkeypatch.setattr(local_files, "SEARCH_MATCH_LIMIT", 100)
+    monkeypatch.setattr(local_files, "SEARCH_SCAN_LIMIT", 2)
+    result = local_files.search_local_files(str(design), "match")
+    assert result["truncated"] is True
+
+
 def test_read_local_file_reads_text_and_pdfs_and_describes_other_formats(design):
     assert local_files.read_local_file(str(design / "readme.md"))["content"] == "# C7801 design"
 

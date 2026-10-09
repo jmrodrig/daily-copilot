@@ -184,7 +184,45 @@ def test_chat_stops_calling_tools_after_max_rounds(client, model):
 
     assert body["reply"] == "Best effort answer"
     assert len(model.calls) == agent.MAX_TOOL_ROUNDS + 1
-    assert [c["tool_choice"] for c in model.calls] == ["auto"] * agent.MAX_TOOL_ROUNDS + ["none"]
+    assert [c["tool_choice"] for c in model.calls[:-1]] == ["auto"] * agent.MAX_TOOL_ROUNDS
+    # Gemini keeps calling declared tools despite tool_choice="none", so the last round declares none.
+    final = model.calls[-1]
+    assert "tools" not in final and "tool_choice" not in final
+    assert final["messages"][-1] == {"role": "user", "content": agent.FINAL_ANSWER_PROMPT}
+
+
+def test_chat_never_returns_an_empty_reply_after_max_rounds(client, model):
+    looping = reply(tool_calls=[tool_call("search_notes", {"query": "keel"})])
+    model.script += [looping] * agent.MAX_TOOL_ROUNDS + [reply(tool_calls=[tool_call("search_notes", {"query": ""})])]
+
+    body = chat(client, "Loop").json()
+
+    assert body["reply"] != "(The model returned no answer.)"
+    assert "search_notes" in body["reply"] and '"keel"' in body["reply"]
+
+
+def test_chat_falls_back_to_reasoning_content(client, model):
+    message = SimpleNamespace(content=None, tool_calls=None, reasoning_content="Thought-out answer")
+    model.script.append(SimpleNamespace(choices=[SimpleNamespace(message=message)]))
+
+    assert chat(client, "Hi").json()["reply"] == "Thought-out answer"
+
+
+def test_chat_searches_local_files(client, model, tmp_path):
+    (tmp_path / "Hull").mkdir()
+    (tmp_path / "Hull" / "Scantlings C7801.pdf").write_bytes(b"%PDF")
+    model.script += [
+        reply(tool_calls=[tool_call("search_local_files", {"path": str(tmp_path), "query": "scantling"})]),
+        reply("Found it"),
+    ]
+
+    body = chat(client, "Find the scantlings").json()
+
+    assert body["tool_calls"] == [
+        {"name": "search_local_files", "arguments": {"path": str(tmp_path), "query": "scantling"}, "ok": True}
+    ]
+    [result] = tool_results(model.calls[1])
+    assert [m["name"] for m in result["matches"]] == ["Scantlings C7801.pdf"]
 
 
 def test_chat_without_api_key(client, settings, model):
@@ -234,7 +272,14 @@ def test_read_only_does_not_offer_or_allow_writes(client, notes_dir, model):
     body = chat(client, "Write a note", mode="read_only").json()
 
     offered = [t["function"]["name"] for t in model.calls[0]["tools"]]
-    assert offered == ["search_notes", "read_note", "list_tasks", "list_local_directory", "read_local_file"]
+    assert offered == [
+        "search_notes",
+        "read_note",
+        "list_tasks",
+        "search_local_files",
+        "list_local_directory",
+        "read_local_file",
+    ]
     assert "READ ONLY" in model.calls[0]["messages"][0]["content"]
     assert tool_results(model.calls[1]) == [{"error": "Unknown tool: write_note"}]
     assert body["proposed_edits"] == [] and body["written_paths"] == []
@@ -571,7 +616,7 @@ def test_space_context_names_rag_folders_without_listing_them(client, tmp_path):
 
     assert "Configured Local Folders in this space" in context
     assert f"- `{folder}`" in context
-    assert "list_local_directory" in context
+    assert "search_local_files" in context and "list_local_directory" in context
     assert "spec.pdf" not in context and "C7801" not in context
 
 

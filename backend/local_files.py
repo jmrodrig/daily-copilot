@@ -5,9 +5,11 @@ Notes may link to local files and folders (`file:///C:/Projects/C7801/Lines.pdf`
 program (`open_path`); a remote client gets a Windows shortcut to the same file on the network share instead
 (`generate_shortcut_content`, with the share's UNC path from `to_unc_path`), so nothing large crosses HTTP.
 
-The agent crawls the same file system with `list_local_directory` and `read_local_file` to find design data.
+The agent crawls the same file system with `search_local_files`, `list_local_directory` and `read_local_file` to find
+design data.
 """
 
+import fnmatch
 import os
 import re
 import shutil
@@ -15,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import zipfile
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -24,6 +27,9 @@ TEXT_SUFFIXES = {".txt", ".md", ".csv", ".json", ".tsv", ".log", ".xml", ".yaml"
 READ_LIMIT = 20_000  # characters of a file's text returned to the agent
 LIST_LIMIT = 500  # entries of a directory listed for the agent
 STAT_LIMIT = 1_000  # files counted towards a folder's size, so a huge network share can't hang the request
+SEARCH_SCAN_LIMIT = 10_000  # files and folders looked at by one search, so a huge network share can't hang the agent
+SEARCH_MATCH_LIMIT = 100  # matches returned by one search
+_SKIPPED_NAMES = {"__pycache__", "node_modules", "$recycle.bin", "system volume information"}
 
 _WINDOWS_DRIVE = re.compile(r"^/?[A-Za-z]:[\\/]")
 
@@ -234,6 +240,58 @@ def list_local_directory(path: str) -> dict[str, Any]:
     if len(entries) > LIST_LIMIT:
         result["truncated"] = f"Only the first {LIST_LIMIT} entries are listed"
     return result
+
+
+def _skipped(name: str) -> bool:
+    """Hidden and system entries (`.git`, `$RECYCLE.BIN`, `__pycache__`, ...) a search doesn't look into."""
+    return name.startswith((".", "$", "~$")) or name.lower() in _SKIPPED_NAMES
+
+
+def _matcher(query: str) -> Callable[[str], bool]:
+    """A case-insensitive test of a name: a glob (`*.xlsx`, `lines*.pdf`) when the query has wildcards, else every
+    word of the query must be in the name (`lines plan` matches `C7801 Lines Plan rev B.pdf`)."""
+    text = query.strip().lower()
+    if not text:
+        raise LocalFileError("Give a name or keyword to search for")
+    if any(c in text for c in "*?["):
+        return lambda name: fnmatch.fnmatchcase(name.lower(), text)
+    terms = text.split()
+    return lambda name: all(term in name.lower() for term in terms)
+
+
+def search_local_files(path: str, query: str) -> dict[str, Any]:
+    """The files and folders under a local folder, at any depth, whose names match `query`:
+    `{path, query, count, matches: [{name, path, type, size}], truncated}`. It stops after looking at
+    `SEARCH_SCAN_LIMIT` entries or finding `SEARCH_MATCH_LIMIT` matches (`truncated`), and skips hidden folders."""
+    folder = _existing(path)
+    if not folder.is_dir():
+        raise LocalFileError(f"Not a folder: {folder}; use read_local_file to read a file")
+    matches = _matcher(query)
+    found: list[dict[str, Any]] = []
+    scanned, truncated, pending = 0, False, [folder]
+    while pending and not truncated:
+        try:
+            with os.scandir(pending.pop(0)) as entries:
+                children = sorted(entries, key=lambda e: e.name.lower())
+        except OSError:
+            continue  # A folder we may not read is left out.
+        for entry in children:
+            if _skipped(entry.name):
+                continue
+            if scanned >= SEARCH_SCAN_LIMIT or len(found) >= SEARCH_MATCH_LIMIT:
+                truncated = True
+                break
+            scanned += 1
+            try:
+                is_dir = entry.is_dir(follow_symlinks=False)
+                if is_dir:
+                    pending.append(Path(entry.path))
+                if matches(entry.name):
+                    size = 0 if is_dir else entry.stat().st_size
+                    found.append({"name": entry.name, "path": entry.path, "type": "directory" if is_dir else "file", "size": size})
+            except OSError:
+                continue  # Broken links and files we may not stat are left out.
+    return {"path": str(folder), "query": query, "count": len(found), "matches": found, "truncated": truncated}
 
 
 def _truncate(text: str) -> str:
