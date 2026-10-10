@@ -229,9 +229,28 @@ a new note) and `base_hash`, the SHA-256 of the note file when it was proposed.
 `history` with source `copilot_agent_approved`. Without `COPILOT_GEMINI_API_KEY`,
 `/api/chat` returns 503; a failing model call returns 502.
 
-Optional `model` picks the Gemini model and `reasoning_effort` (`"low"`, `"medium"` or
+Optional `model` picks the model and `reasoning_effort` (`"low"`, `"medium"` or
 `"high"`) how hard it thinks; left out, the model uses its own default. A model that
-does not support an effort level answers without one.
+does not support an effort level answers without one. `GET /api/models` lists the
+configured model, the Claude CLI models and the Gemini models.
+
+The agent can also research online: `search_web` (DuckDuckGo results: title, URL,
+snippet) and `fetch_web_page` (the readable text of an http(s) page, up to 20,000
+characters).
+
+### Claude CLI models (no API key)
+
+`claude-opus-4-6`, `claude-sonnet-4-6` and `claude-haiku-4-5` run the turn on the local
+`claude` CLI (Claude Code), signed in with the user's Claude subscription; no API key is
+used (`ANTHROPIC_API_KEY` is removed from its environment) and `COPILOT_GEMINI_API_KEY`
+is not needed. The CLI gets the system prompt, the space's open tasks and the
+conversation on stdin (cmd.exe can't take them on the command line), and runs with
+`Read`, `Glob`, `Grep`, `WebSearch` and `WebFetch` over the space's `content/` folder
+and its existing local folders. It writes notes by replying with
+`<write_note path="C7801/Report.md">` blocks (optional YAML front-matter, then the full
+content); the server applies each block in the access mode like `write_note`, removes it
+from the reply and lists it in `tool_calls`. Without `claude` on the `PATH`,
+`/api/chat` returns 503; a CLI failure returns 502.
 
 A space's configured local folders (`rag_folders`) are only named in the system prompt;
 the agent crawls them with `list_local_directory` and `read_local_file` when a command
@@ -257,7 +276,8 @@ letters, digits, `-` or `_`. A command already used by another live prompt in th
 space returns 409. Changes are logged in `history` with source `settings`. On startup
 (and when a space is created) each space gets the default commands it has never had,
 deleted ones included: `/prep` for meeting prep, `/design-search` for the space's local
-folders and `/rcd` for the RCD harmonized standards. They are edited in the desktop
+folders, `/rcd` for the RCD harmonized standards and `/online-research` for a structured
+engineering brief researched on the web. They are edited in the desktop
 app's Space Preferences.
 
 The prompt is expanded by the desktop app, not the server: the user message sent to

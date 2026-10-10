@@ -41,7 +41,7 @@ const MODES: { value: AccessMode; label: string }[] = [
   { value: "write_directly", label: "Write directly" },
 ];
 const MODE_KEY = "copilot.accessMode";
-// The Gemini model last picked in the chat (a bare name, e.g. "gemini-2.5-pro").
+// The model last picked in the chat (a bare name, e.g. "gemini-2.5-pro" or "claude-opus-4-6").
 const MODEL_KEY = "copilot_chat_model";
 type Effort = "auto" | "low" | "medium" | "high";
 const EFFORTS: { value: Effort; label: string; hint: string }[] = [
@@ -54,6 +54,13 @@ const EFFORTS: { value: Effort; label: string; hint: string }[] = [
 const EFFORT_KEY = "copilot_reasoning_effort";
 const CONTEXT_LINES = 3;
 const COMMAND_RE = /^(\/[a-z0-9][a-z0-9_-]*)(?:\s+([\s\S]*))?$/i;
+
+// The model picker's sections: Claude models run on the local `claude` CLI (no API key), the rest on the Gemini API.
+const isClaudeModel = (name: string) => name.startsWith("claude-");
+const MODEL_GROUPS: { label: string; badge?: string; matches: (name: string) => boolean }[] = [
+  { label: "Claude Agent", badge: "Local CLI · No API", matches: isClaudeModel },
+  { label: "Gemini API Models", matches: (name) => !isClaudeModel(name) },
+];
 
 /** A litellm model string without its provider (`gemini/gemini-2.5-pro` -> `gemini-2.5-pro`). */
 function bareModel(model: string): string {
@@ -444,7 +451,7 @@ export default function CopilotChat({
             onClick={() => setModelMenu((open) => !open)}
             disabled={sending || (!model && !models.length)}
             className="btn min-h-[34px] gap-2 px-3 text-xs font-medium text-text-primary hover:bg-surface-hover"
-            title="Select Gemini model"
+            title="Select model"
           >
             <span className={`h-2 w-2 shrink-0 rounded-full ${model ? "bg-project-p5002" : "bg-project-neutral"}`} />
             <span className="max-w-[12rem] truncate">{model ?? "Model"}</span>
@@ -456,40 +463,53 @@ export default function CopilotChat({
             anchor={modelButtonRef}
             open={modelMenu}
             onClose={() => setModelMenu(false)}
-            label="Select Gemini model"
+            label="Select model"
             role="listbox"
-            className="w-64 max-h-72 overflow-y-auto"
+            className="w-64 max-h-80 overflow-y-auto"
           >
-            <div className="border-b border-border-default px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wider text-text-muted">
-              Gemini Models
-            </div>
-            <div className="py-1">
-              {(model && !models.includes(model) ? [model, ...models] : models).map((name) => {
-                const isSelected = name === model;
-                return (
-                  <button
-                    key={name}
-                    type="button"
-                    role="option"
-                    aria-selected={isSelected}
-                    onClick={() => {
-                      pickModel(name);
-                      setModelMenu(false);
-                    }}
-                    className={`flex w-full items-center justify-between gap-2 rounded px-2.5 py-1.5 text-left text-xs transition-colors ${
-                      isSelected ? "bg-accent/20 font-medium text-accent-soft" : "text-text-primary hover:bg-surface-hover"
+            {MODEL_GROUPS.map((group, index) => {
+              const names = (model && !models.includes(model) ? [model, ...models] : models).filter(group.matches);
+              if (!names.length) return null;
+              return (
+                <div key={group.label} role="group" aria-label={group.label}>
+                  <div
+                    className={`flex items-baseline justify-between gap-2 border-b border-border-default px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wider text-text-muted ${
+                      index > 0 ? "border-t" : ""
                     }`}
                   >
-                    <span className="truncate">{name}</span>
-                    {isSelected && (
-                      <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 text-accent">
-                        <path d="M3.5 8.5l3 3 6-6" />
-                      </svg>
-                    )}
-                  </button>
-                );
-              })}
-            </div>
+                    <span>{group.label}</span>
+                    {group.badge && <span className="text-[10px] font-normal normal-case tracking-normal">{group.badge}</span>}
+                  </div>
+                  <div className="py-1">
+                    {names.map((name) => {
+                      const isSelected = name === model;
+                      return (
+                        <button
+                          key={name}
+                          type="button"
+                          role="option"
+                          aria-selected={isSelected}
+                          onClick={() => {
+                            pickModel(name);
+                            setModelMenu(false);
+                          }}
+                          className={`flex w-full items-center justify-between gap-2 rounded px-2.5 py-1.5 text-left text-xs transition-colors ${
+                            isSelected ? "bg-accent/20 font-medium text-accent-soft" : "text-text-primary hover:bg-surface-hover"
+                          }`}
+                        >
+                          <span className="truncate">{name}</span>
+                          {isSelected && (
+                            <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 text-accent">
+                              <path d="M3.5 8.5l3 3 6-6" />
+                            </svg>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })}
           </Popover>
           <button
             ref={effortButtonRef}

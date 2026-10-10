@@ -580,7 +580,7 @@ def test_checkin_with_nothing_to_report(client, triage_today):
 # --- Saved prompts (slash commands) -------------------------------------------
 
 
-DEFAULT_COMMANDS = ["/design-search", "/prep", "/rcd"]
+DEFAULT_COMMANDS = ["/design-search", "/online-research", "/prep", "/rcd"]
 
 
 def commands(client, space_id=1):
@@ -593,12 +593,14 @@ def test_default_prompts_are_seeded_once(client):
     assert all(p["instruction"] and p["space_id"] == 1 for p in prompts)
     rcd = next(p for p in prompts if p["command"] == "/rcd")
     assert r"Y:\Classification, Certification & Documentation\RCD\All harmonized standards" in rcd["instruction"]
+    research = next(p for p in prompts if p["command"] == "/online-research")
+    assert "web search" in research["instruction"] and "Topic to investigate" in research["instruction"]
 
     prep = next(p for p in prompts if p["command"] == "/prep")
     client.delete(f"/api/prompts/{prep['id']}")
     with database.SessionLocal() as db:
         main.seed_prompts(db, 1)
-    assert commands(client) == ["/design-search", "/rcd"]
+    assert commands(client) == ["/design-search", "/online-research", "/rcd"]
 
 
 def test_new_spaces_get_their_own_default_prompts(client):

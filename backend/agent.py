@@ -10,6 +10,11 @@ The tools the model may call:
 - `write_note`: create or replace a note. Only offered outside `read_only` mode.
 - `search_local_files` / `list_local_directory` / `read_local_file`: search, crawl and read the local file system
   (design data such as PDFs, CAD and Maxsurf files outside the notes; see `local_files`).
+- `search_web` / `fetch_web_page`: search the live web (DuckDuckGo) and read web pages, for online research.
+
+Models named in `CLAUDE_CLI_MODELS` don't go through litellm: the turn runs on the local `claude` CLI
+(Claude Code, signed in with the user's subscription, no API key) with its own Read/Glob/Grep/WebSearch/WebFetch
+tools, and writes notes by putting `<write_note path="...">` blocks in its reply (see `_run_claude_cli`).
 
 Context injected into the system prompt (see `space_context`):
 
@@ -27,11 +32,16 @@ approve (see `POST /api/notes/apply-edit`).
 import functools
 import glob
 import json
+import os
+import re
+import shutil
+import subprocess
 import time
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Sequence
 from datetime import date
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
@@ -74,6 +84,24 @@ _MODELS_TIMEOUT_SECONDS = 5
 _MODELS_CACHE_SECONDS = 600
 _models_cache: tuple[float, list[str]] | None = None
 
+# Claude models run on the local `claude` CLI (the user's Claude subscription, no API key): chat name -> CLI alias.
+CLAUDE_CLI_MODELS: dict[str, str] = {
+    "claude-opus-4-6": "opus",
+    "claude-sonnet-4-6": "sonnet",
+    "claude-haiku-4-5": "haiku",
+}
+CLAUDE_CLI_TOOLS = "Read,Glob,Grep,WebSearch,WebFetch"
+CLAUDE_CLI_TIMEOUT_SECONDS = 900
+CLI_TASK_LIMIT = 200  # open tasks put into the Claude CLI prompt
+
+# Online research: DuckDuckGo's HTML results page, and plain page fetches.
+WEB_SEARCH_URL = "https://html.duckduckgo.com/html/"
+WEB_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+)
+_WEB_TIMEOUT_SECONDS = 10
+_WEB_MAX_BYTES = 5 * 1024 * 1024
+
 
 class AgentError(Exception):
     """The model could not be reached or answered badly."""
@@ -114,6 +142,9 @@ models, spreadsheets, ...). To find files on a topic, start with `search_local_f
 browsing folder by folder. Use absolute paths, e.g. ones linked from a note (`file:///C:/...`, `C:\\...`, \
 `\\\\server\\share\\...`). Text and PDF files can be read; for other formats you get only their size and dates. \
 Cite the file paths you relied on.
+- You can search the live internet with `search_web` and read web pages with `fetch_web_page` for online technical \
+research: standards, classification rules, vendor and product data, papers and publications. Search first, then \
+read the most relevant pages. Cite the URLs you relied on.
 {write_rules}{context}"""
 
 _WRITE_RULES = {
@@ -209,6 +240,23 @@ TOOLS: dict[str, dict[str, Any]] = {
         "description": "Read a file on the local file system: text files (.txt, .md, .csv, .json, ...) as they are and "
         "the text of PDFs; other formats (Word, Excel, CAD, Maxsurf, ...) return only their size and dates.",
         "parameters": {"type": "object", "properties": {"path": _LOCAL_PATH_PARAM}, "required": ["path"]},
+    },
+    "search_web": {
+        "description": "Search the live web. Returns up to 10 results with title, URL and snippet; read the useful "
+        "ones with fetch_web_page.",
+        "parameters": {
+            "type": "object",
+            "properties": {"query": {"type": "string", "description": "Search terms, e.g. `ISO 12215-5 scantlings`"}},
+            "required": ["query"],
+        },
+    },
+    "fetch_web_page": {
+        "description": "Fetch a web page (http or https) and return its title and readable text.",
+        "parameters": {
+            "type": "object",
+            "properties": {"url": {"type": "string", "description": "The page URL, e.g. `https://www.iso.org/...`"}},
+            "required": ["url"],
+        },
     },
 }
 
@@ -344,6 +392,140 @@ def list_tasks(
         )
     tasks.sort(key=lambda t: (t["project"] or "", t["deadline"] is None, t["deadline"] or "", t["id"]))
     return {"today": today.isoformat(), "count": len(tasks), "tasks": tasks}
+
+
+# --- Web ----------------------------------------------------------------------
+
+
+def _web_get(url: str) -> tuple[str, str]:
+    """(content type, text) of the page at `url`, reading at most `_WEB_MAX_BYTES` of it."""
+    request = urllib.request.Request(url, headers={"User-Agent": WEB_USER_AGENT, "Accept-Language": "en"})
+    try:
+        with urllib.request.urlopen(request, timeout=_WEB_TIMEOUT_SECONDS) as response:
+            raw = response.read(_WEB_MAX_BYTES)
+            content_type = response.headers.get("Content-Type", "")
+            charset = response.headers.get_content_charset()
+    except Exception as exc:  # noqa: BLE001 - network, HTTP and TLS errors all go back to the model
+        raise ToolError(f"Could not fetch {url}: {exc}") from exc
+    try:
+        return content_type, raw.decode(charset or "utf-8", errors="replace")
+    except LookupError:  # an unknown charset
+        return content_type, raw.decode("utf-8", errors="replace")
+
+
+def _unwrap_redirect(href: str) -> str:
+    """The target of a DuckDuckGo redirect link (`//duckduckgo.com/l/?uddg=<url>&rut=...`), else the link itself."""
+    if href.startswith("//"):
+        href = "https:" + href
+    target = urllib.parse.parse_qs(urllib.parse.urlparse(href).query).get("uddg")
+    return target[0] if target else href
+
+
+class _SearchResultsParser(HTMLParser):
+    """The results of a DuckDuckGo HTML page: each `result__a` link and the `result__snippet` after it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.results: list[dict[str, str]] = []
+        self._field: str | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attributes = dict(attrs)
+        classes = (attributes.get("class") or "").split()
+        if "result__a" in classes:
+            self.results.append({"title": "", "url": _unwrap_redirect(attributes.get("href") or ""), "snippet": ""})
+            self._field = "title"
+        elif "result__snippet" in classes and self.results:
+            self._field = "snippet"
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in ("a", "td", "div"):
+            self._field = None
+
+    def handle_data(self, data: str) -> None:
+        if self._field:
+            self.results[-1][self._field] += data
+
+
+def search_web(query: str) -> dict[str, Any]:
+    if not query.strip():
+        raise ToolError("query must not be empty")
+    _content_type, page = _web_get(f"{WEB_SEARCH_URL}?{urllib.parse.urlencode({'q': query})}")
+    parser = _SearchResultsParser()
+    parser.feed(page)
+    results = []
+    for result in parser.results:
+        url = result["url"]
+        if not url.startswith(("http://", "https://")) or "duckduckgo.com/y.js" in url:  # DuckDuckGo's ads
+            continue
+        results.append(
+            {"title": " ".join(result["title"].split()), "url": url, "snippet": " ".join(result["snippet"].split())}
+        )
+        if len(results) == SEARCH_LIMIT:
+            break
+    return {"query": query, "results": results}
+
+
+class _PageTextParser(HTMLParser):
+    """The title and readable text of an HTML page, without scripts, styles, navigation and markup."""
+
+    _SKIP = {"script", "style", "noscript", "svg", "template", "nav", "footer", "aside"}
+    _BLOCK = {"p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6", "section", "article", "table", "pre"}
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.title = ""
+        self.parts: list[str] = []
+        self._skipping = 0
+        self._in_title = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in self._SKIP:
+            self._skipping += 1
+        elif tag == "title":
+            self._in_title = True
+        elif tag in self._BLOCK:
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in self._SKIP:
+            self._skipping = max(self._skipping - 1, 0)
+        elif tag == "title":
+            self._in_title = False
+        elif tag in self._BLOCK:
+            self.parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if self._skipping:
+            return
+        if self._in_title:
+            self.title += data
+        else:
+            self.parts.append(data)
+
+
+def _readable(text: str) -> str:
+    """`text` with the whitespace of each line collapsed and blank lines dropped."""
+    lines = (" ".join(line.split()) for line in text.splitlines())
+    return "\n".join(line for line in lines if line)
+
+
+def fetch_web_page(url: str) -> dict[str, Any]:
+    url = url.strip()
+    if not re.match(r"https?://", url, re.IGNORECASE):
+        raise ToolError("Only http:// and https:// URLs can be fetched")
+    content_type, page = _web_get(url)
+    if not content_type or "html" in content_type:
+        parser = _PageTextParser()
+        parser.feed(page)
+        title, text = " ".join(parser.title.split()), _readable("".join(parser.parts))
+    elif content_type.startswith("text/") or "json" in content_type or "xml" in content_type:
+        title, text = "", _readable(page)
+    else:
+        raise ToolError(f"{url} is not a web page ({content_type.split(';')[0]}); only HTML and text can be read")
+    if len(text) > READ_LIMIT:
+        text = text[:READ_LIMIT] + f"\n\n[… truncated, {len(text)} characters in total]"
+    return {"url": url, "title": title, "content": text}
 
 
 # --- Space context -------------------------------------------------------------
@@ -492,6 +674,8 @@ class _Turn:
             "search_local_files": local_files.search_local_files,
             "list_local_directory": local_files.list_local_directory,
             "read_local_file": local_files.read_local_file,
+            "search_web": search_web,
+            "fetch_web_page": fetch_web_page,
         }
         if name not in tools or (name == "write_note" and self.mode is AccessMode.READ_ONLY):
             raise ToolError(f"Unknown tool: {name}")
@@ -542,7 +726,8 @@ def _fetch_gemini_models(api_key: str) -> list[str]:
 
 
 def list_models(settings: Settings | None = None) -> list[str]:
-    """The Gemini models the chat can use (bare names, e.g. `gemini-2.5-pro`), the configured one first.
+    """The models the chat can use (bare names, e.g. `gemini-2.5-pro`): the configured one first, then the
+    Claude CLI models, then the Gemini ones.
 
     Falls back to `FALLBACK_MODELS` when there is no API key or the API can't be reached.
     """
@@ -559,7 +744,16 @@ def list_models(settings: Settings | None = None) -> list[str]:
         if names:
             _models_cache = (time.monotonic(), names)
     configured = settings.chat_model.removeprefix("gemini/")
-    return list(dict.fromkeys([configured, *(names or FALLBACK_MODELS)]))
+    return list(dict.fromkeys([configured, *CLAUDE_CLI_MODELS, *(names or FALLBACK_MODELS)]))
+
+
+def _cli_model_name(model: str | None) -> str:
+    return (model or "").strip().removeprefix("claude/").removeprefix("models/")
+
+
+def is_claude_cli_model(model: str | None) -> bool:
+    """Whether `model` (e.g. `claude-opus-4-6` or `claude/claude-opus-4-6`) runs on the local Claude CLI."""
+    return _cli_model_name(model) in CLAUDE_CLI_MODELS
 
 
 def chat_model_id(model: str | None, settings: Settings) -> str:
@@ -608,6 +802,215 @@ def _fallback_reply(summaries: Sequence[ToolCallSummary]) -> str:
     return "The model stopped without writing an answer. It had looked at:\n" + "\n".join(lines)
 
 
+# --- Claude CLI ---------------------------------------------------------------
+
+
+_CLI_TOOLS_GUIDE = """
+Tools in this session: you run inside Claude Code with the tools Read, Glob, Grep, WebSearch and WebFetch, not the \
+tools named above. Map them as follows:
+- The space's notes are the markdown files under `{notes_dir}` (paths in this prompt are relative to it): find them \
+with Glob and Grep and read them with Read, instead of `search_notes` and `read_note`.
+- Local design files (instead of `search_local_files`, `list_local_directory`, `read_local_file`): Glob, Grep and \
+Read with absolute paths.
+- Online research (instead of `search_web`, `fetch_web_page`): WebSearch and WebFetch. Cite the URLs you relied on.
+- The space's open tasks are listed below (instead of `list_tasks`)."""
+
+_CLI_WRITE_PROTOCOL = """
+- Do NOT use Write or Edit tools on files directly. To create or update a note in this space, include a \
+`<write_note path="relative/path.md">` block containing the full markdown content (with optional YAML front-matter) \
+in your response, e.g.:
+<write_note path="C7801/Report.md">
+---
+type: report
+---
+# Heading
+...
+</write_note>
+The Co-pilot app will automatically process this block according to the active access mode (proposing a diff card \
+for user approval in ASK FIRST mode, or saving it in WRITE DIRECTLY mode). The block replaces the whole note: to \
+edit one, Read it first and send its full new content. Without front-matter, an existing note keeps its own."""
+
+_CLI_WRITE_RULES = {
+    AccessMode.READ_ONLY: _WRITE_RULES[AccessMode.READ_ONLY],
+    AccessMode.ASK_FIRST: "- You are in ASK FIRST mode: a `<write_note>` block only proposes the change; the user "
+    "approves or rejects it in the chat. Tell the user the edit is waiting for their approval." + _CLI_WRITE_PROTOCOL,
+    AccessMode.WRITE_DIRECTLY: "- You are in WRITE DIRECTLY mode: a `<write_note>` block saves the note immediately. "
+    "Tell the user which note you wrote." + _CLI_WRITE_PROTOCOL,
+}
+
+_WRITE_NOTE_BLOCK = re.compile(r"<write_note\s+path\s*=\s*\"([^\"]+)\"\s*>\r?\n?(.*?)</write_note>", re.DOTALL)
+_FRONTMATTER = re.compile(r"\A---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|\Z)", re.DOTALL)
+
+
+def _cli_prompt(
+    messages: Sequence[ChatMessage], mode: AccessMode, turn: "_Turn", space_id: int, note_path: str | None
+) -> str:
+    """Everything the CLI gets on stdin: the system prompt, the space's notes folder and tasks, and the chat."""
+    space_name, context = space_context(space_id, note_path)
+    system = SYSTEM_PROMPT.format(
+        today=date.today().isoformat(), write_rules=_CLI_WRITE_RULES[mode], space_name=space_name, context=context
+    )
+    tasks = list_tasks(space_id=space_id)["tasks"]
+    task_lines = [_task_line({**t, "title": f"[{t['project'] or 'no project'}] {t['title']}"}) for t in tasks]
+    if len(tasks) > CLI_TASK_LIMIT:
+        task_lines = [*task_lines[:CLI_TASK_LIMIT], f"… and {len(tasks) - CLI_TASK_LIMIT} more."]
+    conversation = "\n\n".join(f"<{m.role.value}>\n{m.content}\n</{m.role.value}>" for m in messages)
+    return (
+        f"<system>\n{system}\n{_CLI_TOOLS_GUIDE.format(notes_dir=turn.root.resolve())}\n</system>\n\n"
+        f"<open_tasks today=\"{date.today().isoformat()}\" count=\"{len(tasks)}\">\n"
+        + ("\n".join(task_lines) or "(no open tasks)")
+        + f"\n</open_tasks>\n\n<conversation>\n{conversation}\n</conversation>\n\n"
+        "Answer the last user message of the conversation."
+    )
+
+
+def _cli_command(claude_bin: str, model: str, turn: "_Turn", reasoning_effort: str | None) -> list[str]:
+    cmd = [
+        claude_bin,
+        "-p",
+        "--model",
+        CLAUDE_CLI_MODELS[model],
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--no-session-persistence",
+        "--dangerously-skip-permissions",
+        "--tools",
+        CLAUDE_CLI_TOOLS,
+        "--add-dir",
+        str(turn.root.resolve()),
+    ]
+    with database.SessionLocal() as session:
+        space = session.get(Space, turn.space_id)
+        rag_folders = clean_rag_folders(space.rag_folders) if space else []
+    for folder in rag_folders:
+        if Path(folder).is_dir():
+            cmd += ["--add-dir", folder]
+    if reasoning_effort in ("low", "medium", "high"):
+        cmd += ["--effort", reasoning_effort]
+    return cmd
+
+
+def _parse_stream(stdout: str) -> tuple[str | None, bool, list[ToolCallSummary]]:
+    """(final result text, whether it is an error, the tool calls made) from the CLI's stream-json output."""
+    calls: dict[str, tuple[str, dict[str, Any], bool]] = {}
+    result, is_error = None, False
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        message = event.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        items = [item for item in content if isinstance(item, dict)] if isinstance(content, list) else []
+        if event.get("type") == "assistant":
+            for item in items:
+                if item.get("type") == "tool_use":
+                    arguments = item.get("input") if isinstance(item.get("input"), dict) else {}
+                    calls[str(item.get("id"))] = (str(item.get("name")), arguments, True)
+        elif event.get("type") == "user":
+            for item in items:
+                if item.get("type") == "tool_result" and str(item.get("tool_use_id")) in calls:
+                    name, arguments, _ok = calls[str(item.get("tool_use_id"))]
+                    calls[str(item.get("tool_use_id"))] = (name, arguments, not item.get("is_error", False))
+        elif event.get("type") == "result":
+            result = event.get("result") if isinstance(event.get("result"), str) else None
+            is_error = bool(event.get("is_error"))
+    return result, is_error, [_summary(name, arguments, ok) for name, arguments, ok in calls.values()]
+
+
+def _apply_write_blocks(reply: str, turn: "_Turn") -> tuple[str, list[ToolCallSummary]]:
+    """Carry out the `<write_note>` blocks of `reply` through `turn` and return the reply without them."""
+    summaries, notes = [], []
+    for match in _WRITE_NOTE_BLOCK.finditer(reply):
+        path, body = match.group(1).strip(), match.group(2)
+        frontmatter = None
+        header = _FRONTMATTER.match(body)
+        if header:
+            try:
+                parsed = yaml.safe_load(header.group(1))
+            except yaml.YAMLError:
+                parsed = None
+            if isinstance(parsed, dict) or parsed is None:
+                frontmatter, body = parsed or {}, body[header.end() :]
+        try:
+            result = turn.write_note(path, body.strip("\r\n"), frontmatter)
+        except (ToolError, file_layer.FileLayerError, OSError) as exc:
+            ok = False
+            notes.append(f"Could not write `{path}`: {exc}")
+        else:
+            ok = True
+            notes.append(
+                {
+                    "proposed": f"Proposed an edit to `{result['path']}`; it is waiting for your approval.",
+                    "written": f"Wrote `{result['path']}`.",
+                    "unchanged": f"`{result['path']}` is unchanged.",
+                }[result["status"]]
+            )
+        summaries.append(_summary("write_note", {"path": path}, ok))
+    if not summaries:
+        return reply, []
+    cleaned = re.sub(r"\n{3,}", "\n\n", _WRITE_NOTE_BLOCK.sub("", reply)).strip()
+    failed = [note for note, summary in zip(notes, summaries) if not summary.ok]
+    if not cleaned:
+        cleaned = "\n".join(f"- {note}" for note in notes)
+    elif failed:
+        cleaned += "\n\n" + "\n".join(f"- {note}" for note in failed)
+    return cleaned, summaries
+
+
+def _run_claude_cli(
+    messages: Sequence[ChatMessage],
+    mode: AccessMode,
+    *,
+    space_id: int,
+    note_path: str | None,
+    model: str,
+    reasoning_effort: str | None,
+) -> ChatResponse:
+    """Answer on the local `claude` CLI (`model` is a `CLAUDE_CLI_MODELS` key), which uses the user's signed-in
+    Claude subscription: no API key needed. The prompt goes on stdin, as on Windows `claude` is a `.cmd` run by
+    cmd.exe, whose command line is limited to 8,191 characters and can't hold newlines."""
+    claude_bin = shutil.which("claude")
+    if claude_bin is None:
+        raise AgentNotConfiguredError("Claude CLI (`claude`) is not installed or not on PATH")
+    turn = _Turn(mode, space_id)
+    prompt = _cli_prompt(messages, mode, turn, space_id, note_path)
+    # Without an API key in its environment the CLI uses the subscription it is signed in with.
+    env = {k: v for k, v in os.environ.items() if k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")}
+    try:
+        process = subprocess.run(
+            _cli_command(claude_bin, model, turn, reasoning_effort),
+            input=prompt,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            cwd=turn.root,
+            env=env,
+            timeout=CLAUDE_CLI_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise AgentError(f"The Claude CLI did not answer within {CLAUDE_CLI_TIMEOUT_SECONDS} seconds") from exc
+    except OSError as exc:
+        raise AgentError(f"The Claude CLI could not be started: {exc}") from exc
+
+    result, is_error, summaries = _parse_stream(process.stdout or "")
+    if result is None or is_error:
+        detail = (result or (process.stderr or "").strip() or f"exit code {process.returncode}")[-2000:]
+        raise AgentError(f"The Claude CLI failed: {detail}")
+    reply, writes = _apply_write_blocks(result, turn)  # refused in read only mode, with a note in the reply
+    summaries += writes
+    return ChatResponse(
+        reply=reply.strip() or _fallback_reply(summaries),
+        proposed_edits=list(turn.proposed.values()),
+        written_paths=turn.written,
+        tool_calls=summaries,
+    )
+
+
 def run_chat(
     messages: Sequence[ChatMessage],
     access_mode: AccessMode,
@@ -619,10 +1022,21 @@ def run_chat(
     settings: Settings | None = None,
 ) -> ChatResponse:
     """Answer the last user message in `space_id`, calling tools as the model asks, for up to
-    `MAX_TOOL_ROUNDS` rounds. `note_path` is the note the user has open, if any; `model` the Gemini model picked
-    in the chat (else `settings.chat_model`); `reasoning_effort` ("low", "medium" or "high") how hard it thinks,
-    left to the model if not given or not supported."""
+    `MAX_TOOL_ROUNDS` rounds. `note_path` is the note the user has open, if any; `model` the model picked
+    in the chat (else `settings.chat_model`; a Claude CLI model runs on the local `claude` CLI instead);
+    `reasoning_effort` ("low", "medium" or "high") how hard it thinks, left to the model if not given or not
+    supported."""
     settings = settings or get_settings()
+    picked = model if model and model.strip() else settings.chat_model
+    if is_claude_cli_model(picked):
+        return _run_claude_cli(
+            messages,
+            AccessMode(access_mode),
+            space_id=space_id,
+            note_path=note_path,
+            model=_cli_model_name(picked),
+            reasoning_effort=reasoning_effort,
+        )
     if settings.gemini_api_key is None:
         raise AgentNotConfiguredError("COPILOT_GEMINI_API_KEY is not set; add it to backend/.env")
 

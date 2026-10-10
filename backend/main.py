@@ -113,7 +113,8 @@ def health() -> dict[str, str]:
 
 @app.get("/api/models")
 def models() -> list[str]:
-    """The Gemini models the Co-pilot chat can answer with (e.g. `gemini-2.5-pro`), the configured default first."""
+    """The models the Co-pilot chat can answer with (e.g. `claude-opus-4-6`, `gemini-2.5-pro`), the configured
+    default first."""
     return agent.list_models()
 
 
@@ -597,6 +598,20 @@ DEFAULT_PROMPTS = (
             "Find information in the RCD regulations in "
             r"'Y:\Classification, Certification & Documentation\RCD\All harmonized standards' "
             "using search_local_files, list_local_directory and read_local_file to answer the following: "
+        ),
+    ),
+    schemas.SavedPromptIn(
+        command="/online-research",
+        description="Conduct thorough online technical research on marine & naval architecture topics",
+        instruction=(
+            "Conduct a thorough, multi-perspective online technical investigation into the following topic using your "
+            "web search and page fetching tools (as well as local notes and files if relevant). Synthesize your "
+            "findings into a rigorous engineering brief structured into: "
+            "1) Executive Summary & Core Engineering Principles, "
+            "2) Regulatory & Compliance Context (ISO Small Craft standards, RCD/CE, classification rules), "
+            "3) Industry State-of-the-Art & Best Practices, "
+            "4) Engineering Trade-offs & Sensitivity Analysis (weight, CoG, hydrodynamics, cost, manufacturability), and "
+            "5) Actionable Recommendations with cited sources and URLs. Topic to investigate: "
         ),
     ),
 )

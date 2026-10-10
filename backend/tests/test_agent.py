@@ -1,5 +1,6 @@
 import json
 from datetime import date
+from email.message import Message
 from types import SimpleNamespace
 
 import pytest
@@ -279,6 +280,8 @@ def test_read_only_does_not_offer_or_allow_writes(client, notes_dir, model):
         "search_local_files",
         "list_local_directory",
         "read_local_file",
+        "search_web",
+        "fetch_web_page",
     ]
     assert "READ ONLY" in model.calls[0]["messages"][0]["content"]
     assert tool_results(model.calls[1]) == [{"error": "Unknown tool: write_note"}]
@@ -527,7 +530,8 @@ def test_list_models_from_the_api(client, monkeypatch, no_models_cache):
     response = client.get("/api/models")
 
     assert response.status_code == 200
-    assert response.json() == ["test-model", "gemini-2.5-pro", "gemini-2.5-flash"]  # the configured one first
+    # The configured one first, then the Claude CLI models.
+    assert response.json() == ["test-model", *agent.CLAUDE_CLI_MODELS, "gemini-2.5-pro", "gemini-2.5-flash"]
     assert keys == ["test-key"]
     client.get("/api/models")
     assert keys == ["test-key"]  # cached
@@ -580,7 +584,7 @@ def test_list_models_without_api_key(settings, monkeypatch, no_models_cache):
     settings.gemini_api_key = None
     monkeypatch.setattr(agent, "_fetch_gemini_models", lambda api_key: pytest.fail("no key, no call"))
 
-    assert agent.list_models(settings)[1:] == list(agent.FALLBACK_MODELS)
+    assert agent.list_models(settings)[1:] == [*agent.CLAUDE_CLI_MODELS, *agent.FALLBACK_MODELS]
 
 
 @pytest.mark.parametrize(
@@ -622,3 +626,334 @@ def test_space_context_names_rag_folders_without_listing_them(client, tmp_path):
 
 def test_space_context_without_rag_folders(client):
     assert "Local Folders" not in agent.space_context(1)[1]
+
+
+# --- Web research ---------------------------------------------------------------
+
+
+class FakeResponse:
+    def __init__(self, body, content_type="text/html; charset=utf-8"):
+        self.body = body.encode() if isinstance(body, str) else body
+        self.headers = Message()
+        self.headers["Content-Type"] = content_type
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self, _limit=None):
+        return self.body
+
+
+SEARCH_PAGE = """
+<div class="result results_links web-result">
+  <h2 class="result__title">
+    <a rel="nofollow" class="result__a"
+       href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.iso.org%2Fstandard%2F12215.html&amp;rut=abc">ISO <b>12215</b>-5</a>
+  </h2>
+  <a class="result__snippet" href="//duckduckgo.com/l/?uddg=x">Hull construction &mdash; <b>scantlings</b>.</a>
+</div>
+<div class="result">
+  <a class="result__a" href="https://duckduckgo.com/y.js?ad_provider=x">Ad</a>
+</div>
+<div class="result">
+  <a class="result__a" href="https://example.com/rcd">RCD guide</a>
+  <a class="result__snippet">Recreational craft directive.</a>
+</div>
+"""
+
+
+def test_search_web_parses_duckduckgo_results(monkeypatch):
+    requests = []
+
+    def urlopen(request, timeout):
+        requests.append((request.full_url, request.get_header("User-agent"), timeout))
+        return FakeResponse(SEARCH_PAGE)
+
+    monkeypatch.setattr(agent.urllib.request, "urlopen", urlopen)
+
+    result = agent.search_web("ISO 12215 scantlings")
+
+    assert result == {
+        "query": "ISO 12215 scantlings",
+        "results": [
+            {
+                "title": "ISO 12215-5",
+                "url": "https://www.iso.org/standard/12215.html",
+                "snippet": "Hull construction — scantlings.",
+            },
+            {"title": "RCD guide", "url": "https://example.com/rcd", "snippet": "Recreational craft directive."},
+        ],
+    }
+    url, user_agent, timeout = requests[0]
+    assert url.startswith(agent.WEB_SEARCH_URL) and "q=ISO+12215+scantlings" in url
+    assert "Mozilla" in user_agent and timeout == 10
+
+
+def test_search_web_network_failure_is_a_tool_error(monkeypatch):
+    def urlopen(request, timeout):
+        raise OSError("offline")
+
+    monkeypatch.setattr(agent.urllib.request, "urlopen", urlopen)
+
+    with pytest.raises(agent.ToolError, match="offline"):
+        agent.search_web("keel")
+
+
+def test_fetch_web_page_extracts_readable_text(monkeypatch):
+    page = (
+        "<html><head><title> Keel  bolts </title><style>p {color: red}</style>"
+        "<script>var secret = 1;</script></head><body><h1>Keel bolts</h1>"
+        "<p>Use   316 stainless.</p><noscript>Enable JS</noscript><p>Torque to spec.</p></body></html>"
+    )
+    monkeypatch.setattr(agent.urllib.request, "urlopen", lambda request, timeout: FakeResponse(page))
+
+    result = agent.fetch_web_page("https://example.com/keel")
+
+    assert result == {
+        "url": "https://example.com/keel",
+        "title": "Keel bolts",
+        "content": "Keel bolts\nUse 316 stainless.\nTorque to spec.",
+    }
+
+
+def test_fetch_web_page_truncates_long_pages(monkeypatch):
+    page = "<p>" + "x" * (agent.READ_LIMIT + 50) + "</p>"
+    monkeypatch.setattr(agent.urllib.request, "urlopen", lambda request, timeout: FakeResponse(page))
+
+    content = agent.fetch_web_page("http://example.com")["content"]
+
+    assert content.startswith("x" * agent.READ_LIMIT) and "truncated" in content
+
+
+@pytest.mark.parametrize("url", ["file:///C:/secret.txt", "ftp://example.com", "C:\\notes.md", "javascript:alert(1)"])
+def test_fetch_web_page_rejects_other_schemes(monkeypatch, url):
+    monkeypatch.setattr(agent.urllib.request, "urlopen", lambda *a, **k: pytest.fail("must not fetch"))
+
+    with pytest.raises(agent.ToolError, match="http"):
+        agent.fetch_web_page(url)
+
+
+def test_fetch_web_page_refuses_binary_content(monkeypatch):
+    monkeypatch.setattr(
+        agent.urllib.request, "urlopen", lambda request, timeout: FakeResponse(b"%PDF", "application/pdf")
+    )
+
+    with pytest.raises(agent.ToolError, match="application/pdf"):
+        agent.fetch_web_page("https://example.com/a.pdf")
+
+
+def test_chat_offers_and_runs_the_web_tools(client, model, monkeypatch):
+    monkeypatch.setattr(agent.urllib.request, "urlopen", lambda request, timeout: FakeResponse(SEARCH_PAGE))
+    model.script += [reply(tool_calls=[tool_call("search_web", {"query": "ISO 12215"})]), reply("Found it")]
+
+    body = chat(client, "Research ISO 12215").json()
+
+    offered = [t["function"]["name"] for t in model.calls[0]["tools"]]
+    assert "search_web" in offered and "fetch_web_page" in offered
+    assert "search_web" in model.calls[0]["messages"][0]["content"]
+    assert tool_results(model.calls[1])[0]["results"][0]["url"] == "https://www.iso.org/standard/12215.html"
+    assert body["tool_calls"] == [{"name": "search_web", "arguments": {"query": "ISO 12215"}, "ok": True}]
+
+
+# --- Claude CLI -------------------------------------------------------------------
+
+
+def cli_result(text, tool_uses=(), is_error=False):
+    """The stream-json output of a CLI run that used `tool_uses` ((id, name, input, ok), ...) and answered `text`."""
+    events = [{"type": "system", "subtype": "init"}]
+    for call_id, name, arguments, ok in tool_uses:
+        tool_use = {"type": "tool_use", "id": call_id, "name": name, "input": arguments}
+        tool_result = {"type": "tool_result", "tool_use_id": call_id, "is_error": not ok}
+        events.append({"type": "assistant", "message": {"content": [tool_use]}})
+        events.append({"type": "user", "message": {"content": [tool_result]}})
+    events.append({"type": "result", "subtype": "success", "is_error": is_error, "result": text})
+    return "\n".join(json.dumps(e) for e in events) + "\n"
+
+
+@pytest.fixture
+def cli(monkeypatch):
+    """Replace the `claude` CLI with a script of outputs, so tests never run the real one."""
+    script, runs = [], []
+    monkeypatch.setattr(agent.shutil, "which", lambda name: "C:/npm/claude.cmd" if name == "claude" else None)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-should-not-leak")
+
+    def run(cmd, **kwargs):
+        runs.append({"cmd": cmd, **kwargs})
+        return SimpleNamespace(stdout=script.pop(0), stderr="", returncode=0)
+
+    monkeypatch.setattr(agent.subprocess, "run", run)
+    return SimpleNamespace(script=script, runs=runs)
+
+
+def cli_chat(client, text, mode="ask_first", model_name="claude-opus-4-6", **extra):
+    payload = {"messages": [{"role": "user", "content": text}], "access_mode": mode, "model": model_name, **extra}
+    return client.post("/api/chat", json=payload)
+
+
+def test_is_claude_cli_model():
+    assert agent.is_claude_cli_model("claude-opus-4-6")
+    assert agent.is_claude_cli_model("claude/claude-haiku-4-5")
+    assert agent.is_claude_cli_model("models/claude-sonnet-4-6")
+    assert not agent.is_claude_cli_model("gemini-2.5-pro")
+    assert not agent.is_claude_cli_model("claude-unknown")
+    assert not agent.is_claude_cli_model(None)
+
+
+def test_claude_cli_needs_no_api_key(client, settings, model, cli, notes_dir):
+    settings.gemini_api_key = None
+    cli.script.append(
+        cli_result(
+            "ISO 12215-5 covers scantlings. Source: https://www.iso.org",
+            [("t1", "WebSearch", {"query": "ISO 12215"}, True), ("t2", "Read", {"file_path": "C:/x.md"}, False)],
+        )
+    )
+
+    response = cli_chat(client, "Research ISO 12215", model_name="claude-sonnet-4-6", reasoning_effort="high")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["reply"] == "ISO 12215-5 covers scantlings. Source: https://www.iso.org"
+    assert body["tool_calls"] == [
+        {"name": "WebSearch", "arguments": {"query": "ISO 12215"}, "ok": True},
+        {"name": "Read", "arguments": {"file_path": "C:/x.md"}, "ok": False},
+    ]
+    assert model.calls == []  # litellm is not used
+
+    run = cli.runs[0]
+    cmd = run["cmd"]
+    assert cmd[:2] == ["C:/npm/claude.cmd", "-p"]
+    assert cmd[cmd.index("--model") + 1] == "sonnet"
+    assert cmd[cmd.index("--output-format") + 1] == "stream-json"
+    assert cmd[cmd.index("--tools") + 1] == "Read,Glob,Grep,WebSearch,WebFetch"
+    assert cmd[cmd.index("--add-dir") + 1] == str(notes_dir.resolve())
+    assert cmd[cmd.index("--effort") + 1] == "high"
+    assert {"--verbose", "--no-session-persistence", "--dangerously-skip-permissions"} <= set(cmd)
+    # The prompt goes on stdin, never on the command line.
+    assert "Research ISO 12215" in run["input"] and not any("Research ISO 12215" in arg for arg in cmd)
+    assert str(notes_dir.resolve()) in run["input"]
+    assert "ANTHROPIC_API_KEY" not in run["env"]
+
+
+def test_claude_cli_is_used_as_the_configured_default(client, settings, model, cli):
+    settings.chat_model = "claude-haiku-4-5"
+    cli.script.append(cli_result("Hi"))
+
+    assert client.post("/api/chat", json={"messages": [{"role": "user", "content": "Hi"}]}).json()["reply"] == "Hi"
+    cmd = cli.runs[0]["cmd"]
+    assert cmd[cmd.index("--model") + 1] == "haiku"
+    assert "--effort" not in cmd
+
+
+def test_claude_cli_prompt_has_tasks_history_and_rag_folders(client, cli, tmp_path):
+    rag = tmp_path / "Design data"
+    rag.mkdir()
+    client.put("/api/spaces/1", json={"rag_folders": [str(rag), str(tmp_path / "missing")]})
+    with database.SessionLocal() as session:
+        project = Project(code="C7801", name="Sport 40")
+        session.add(project)
+        session.flush()
+        session.add(Task(title="Lay up hull", project_id=project.id, space_id=1, status=Status.IN_PROGRESS))
+        session.commit()
+    cli.script.append(cli_result("ok"))
+    payload = {
+        "messages": [
+            {"role": "user", "content": "First question"},
+            {"role": "assistant", "content": "First answer"},
+            {"role": "user", "content": "Follow-up"},
+        ],
+        "model": "claude-opus-4-6",
+        "access_mode": "read_only",
+    }
+
+    assert client.post("/api/chat", json=payload).status_code == 200
+
+    prompt, cmd = cli.runs[0]["input"], cli.runs[0]["cmd"]
+    assert "Lay up hull" in prompt and "C7801" in prompt
+    assert prompt.index("First question") < prompt.index("First answer") < prompt.index("Follow-up")
+    assert "READ ONLY" in prompt and "<write_note" not in prompt
+    add_dirs = [cmd[i + 1] for i, arg in enumerate(cmd) if arg == "--add-dir"]
+    assert str(rag) in add_dirs and str(tmp_path / "missing") not in add_dirs
+
+
+def test_claude_cli_write_note_block_is_proposed_in_ask_first(client, notes_dir, cli):
+    cli.script.append(
+        cli_result(
+            "Here is the report.\n\n"
+            '<write_note path="C7801/Report.md">\n---\ntype: report\nproject: C7801\n---\n# Keel\n\nBolts: 316.\n'
+            "</write_note>\n\nApprove it to save."
+        )
+    )
+
+    body = cli_chat(client, "Write a report").json()
+
+    assert body["reply"] == "Here is the report.\n\nApprove it to save."
+    assert body["written_paths"] == []
+    assert [(e["path"], e["content"], e["frontmatter"]) for e in body["proposed_edits"]] == [
+        ("C7801/Report.md", "# Keel\n\nBolts: 316.", {"type": "report", "project": "C7801"})
+    ]
+    assert body["tool_calls"] == [{"name": "write_note", "arguments": {"path": "C7801/Report.md"}, "ok": True}]
+    assert not (notes_dir / "C7801" / "Report.md").exists()
+    assert "ASK FIRST" in cli.runs[0]["input"] and "<write_note" in cli.runs[0]["input"]
+
+
+def test_claude_cli_write_note_block_writes_directly(client, notes_dir, cli):
+    cli.script.append(cli_result('<write_note path="Inbox/Idea.md">\nJust a body\n</write_note>'))
+
+    body = cli_chat(client, "Save an idea", mode="write_directly").json()
+
+    assert body["written_paths"] == ["Inbox/Idea.md"]
+    assert body["reply"] == "- Wrote `Inbox/Idea.md`."
+    assert file_layer.read_note("Inbox/Idea.md")["content"] == "Just a body"
+    assert note_history() == [("Inbox/Idea.md", "create", "copilot_agent")]
+
+
+@pytest.mark.parametrize(("mode", "path"), [("read_only", "Inbox/x.md"), ("write_directly", "../evil.md")])
+def test_claude_cli_write_note_block_refused(client, notes_dir, cli, mode, path):
+    cli.script.append(cli_result(f'Done.\n<write_note path="{path}">\nx\n</write_note>'))
+
+    body = cli_chat(client, "Write", mode=mode).json()
+
+    assert body["written_paths"] == [] and body["proposed_edits"] == []
+    assert body["tool_calls"] == [{"name": "write_note", "arguments": {"path": path}, "ok": False}]
+    assert body["reply"].startswith("Done.\n\n- Could not write")
+    assert "<write_note" not in body["reply"]
+
+
+def test_claude_cli_not_installed(client, model, monkeypatch):
+    monkeypatch.setattr(agent.shutil, "which", lambda name: None)
+
+    response = cli_chat(client, "Hi")
+
+    assert response.status_code == 503
+    assert "Claude CLI" in response.json()["detail"]
+
+
+def test_claude_cli_failure(client, cli):
+    cli.script.append(cli_result("Not logged in", is_error=True))
+
+    response = cli_chat(client, "Hi")
+
+    assert response.status_code == 502
+    assert "Not logged in" in response.json()["detail"]
+
+
+def test_claude_cli_without_result(client, monkeypatch):
+    monkeypatch.setattr(agent.shutil, "which", lambda name: "claude")
+    monkeypatch.setattr(
+        agent.subprocess, "run", lambda cmd, **kwargs: SimpleNamespace(stdout="", stderr="boom", returncode=1)
+    )
+
+    response = cli_chat(client, "Hi")
+
+    assert response.status_code == 502
+    assert "boom" in response.json()["detail"]
+
+
+@pytest.mark.parametrize("picked", ["claude-opus-4-6", "claude/claude-sonnet-4-6"])
+def test_chat_accepts_claude_models(client, cli, picked):
+    cli.script.append(cli_result("ok"))
+
+    assert cli_chat(client, "Hi", model_name=picked).status_code == 200
