@@ -1,6 +1,7 @@
 """FastAPI entry point. Run with `uvicorn main:app --reload` from backend/."""
 
 import html
+import json
 import re
 import secrets
 import urllib.request
@@ -13,7 +14,8 @@ from typing import Any
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse, Response
+import anyio.to_thread
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from starlette.background import BackgroundTask
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
@@ -570,6 +572,47 @@ def chat(request: ChatRequest, db: Session = Depends(get_db)) -> ChatResponse:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except agent.AgentError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.post("/api/chat/stream")
+def chat_stream(request: ChatRequest, db: Session = Depends(get_db)) -> StreamingResponse:
+    """`POST /api/chat`, streamed as NDJSON: one `agent.stream_chat` event per line, ending with `done` (or
+    `error`, with the status code `/api/chat` would have answered). The client closing the stream stops the turn."""
+    _space_id_or_404(db, request.space_id)
+    cancel = agent.StreamCancel()
+    events = agent.stream_chat(
+        request.messages,
+        request.access_mode,
+        space_id=request.space_id,
+        note_path=request.note_path,
+        model=request.model,
+        reasoning_effort=request.reasoning_effort,
+        cancel=cancel,
+    )
+
+    def next_line() -> str | None:
+        try:
+            event = next(events)
+        except StopIteration:
+            return None
+        except agent.AgentNotConfiguredError as exc:
+            event = {"type": "error", "detail": str(exc), "status_code": 503}
+        except agent.AgentError as exc:
+            event = {"type": "error", "detail": str(exc), "status_code": 502}
+        return json.dumps(event, ensure_ascii=False) + "\n"
+
+    async def lines() -> AsyncIterator[str]:
+        try:
+            while True:
+                # Abandoned on disconnect, so Stop doesn't wait for the CLI's next line: `cancel` kills it instead.
+                line = await anyio.to_thread.run_sync(next_line, abandon_on_cancel=True)
+                if line is None:  # done, or failed: a generator that raised is finished
+                    return
+                yield line
+        finally:
+            cancel.cancel()
+
+    return StreamingResponse(lines(), media_type="application/x-ndjson")
 
 
 PROMPTS_SOURCE = "settings"

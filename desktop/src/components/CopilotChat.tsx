@@ -8,7 +8,7 @@ import { notePath, useSpace } from "../lib/space";
 import Popover from "./Popover";
 import { IconButton } from "./Sidebar";
 
-// Shapes of POST /api/chat and POST /api/notes/apply-edit (see ChatResponse etc. in backend/schemas.py).
+// Shapes of POST /api/chat(/stream) and POST /api/notes/apply-edit (see ChatResponse etc. in backend/schemas.py).
 type AccessMode = "read_only" | "ask_first" | "write_directly";
 type Frontmatter = Record<string, unknown>;
 type ProposedEdit = {
@@ -21,6 +21,26 @@ type ProposedEdit = {
 };
 type ToolCall = { name: string; arguments: Record<string, unknown>; ok: boolean };
 type ChatResponse = { reply: string; proposed_edits: ProposedEdit[]; written_paths: string[]; tool_calls: ToolCall[] };
+// The NDJSON lines of POST /api/chat/stream (see stream_chat in backend/agent.py).
+type StreamEvent =
+  | { type: "thought"; subject: string | null; text: string }
+  | { type: "tool_start"; id: string; name: string; arguments: Record<string, unknown> | null }
+  | { type: "tool_end"; id: string; name: string; ok: boolean }
+  | { type: "text_delta"; delta: string }
+  | { type: "done"; response: ChatResponse }
+  | { type: "error"; detail: string; status_code: number };
+
+/** What the agent is doing on the question in flight, as it streams in. */
+type LiveToolCall = { id: string; name: string; arguments: Record<string, unknown>; status: "running" | "ok" | "error" };
+type LiveProgress = {
+  thoughtSubject: string | null;
+  thoughtText: string | null;
+  tools: LiveToolCall[];
+  streamingText: string;
+  // A thought or tool call came after the last text, so the next text starts a new paragraph.
+  textBroken: boolean;
+};
+const NO_PROGRESS: LiveProgress = { thoughtSubject: null, thoughtText: null, tools: [], streamingText: "", textBroken: false };
 
 type EditStatus =
   | { state: "pending" }
@@ -141,6 +161,118 @@ function historyContent(entry: Entry): string {
   return [entry.content, ...outcomes].join("\n\n");
 }
 
+type ProgressEvent = Exclude<StreamEvent, { type: "done" } | { type: "error" }>;
+
+/** The response of a POST /api/chat/stream, passing each progress event on as it arrives. */
+async function readResponse(res: Response, onProgress: (event: ProgressEvent) => void): Promise<ChatResponse> {
+  if (!res.body) throw new Error("the server sent no answer");
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    buffer += decoder.decode(value, { stream: !done });
+    const lines = buffer.split("\n");
+    buffer = done ? "" : (lines.pop() ?? ""); // an incomplete last line waits for the rest
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      const event = JSON.parse(line) as StreamEvent;
+      if (event.type === "error") throw new Error(event.detail || "Chat failed");
+      if (event.type === "done") return event.response;
+      onProgress(event);
+    }
+    if (done) throw new Error("the answer stopped before it was complete");
+  }
+}
+
+function progressWith(progress: LiveProgress, event: ProgressEvent): LiveProgress {
+  switch (event.type) {
+    case "thought":
+      return { ...progress, thoughtSubject: event.subject, thoughtText: event.text || null, textBroken: true };
+    case "tool_start": {
+      const tool: LiveToolCall = { id: event.id, name: event.name, arguments: event.arguments ?? {}, status: "running" };
+      return { ...progress, tools: [...progress.tools, tool], textBroken: true };
+    }
+    case "tool_end": {
+      // The latest running call with this id (ids may repeat across a turn's rounds).
+      let index = -1;
+      progress.tools.forEach((t, i) => {
+        if (t.id === event.id && t.status === "running") index = i;
+      });
+      const status = event.ok ? "ok" : "error";
+      return { ...progress, tools: progress.tools.map((t, i) => (i === index ? { ...t, status } : t)) };
+    }
+    case "text_delta": {
+      const text = progress.streamingText;
+      // Text after a thought or tool call is a new block of the reply, not more of the same sentence.
+      const gap = progress.textBroken && text && !/\s$/.test(text) ? "\n\n" : "";
+      return { ...progress, streamingText: text + gap + event.delta, textBroken: false };
+    }
+  }
+}
+
+const basename = (path: string) => path.split(/[\\/]/).filter(Boolean).pop() ?? path;
+
+/** The last two segments of a folder path, e.g. "Projects/C7801". */
+function shortPath(path: string): string {
+  const parts = path.split(/[\\/]/).filter(Boolean);
+  return parts.length > 2 ? `…/${parts.slice(-2).join("/")}` : parts.join("/") || path;
+}
+
+function shortUrl(url: string): string {
+  try {
+    const { hostname, pathname } = new URL(url);
+    const path = pathname.length > 24 ? `${pathname.slice(0, 24)}…` : pathname;
+    return hostname + (path === "/" ? "" : path);
+  } catch {
+    return url;
+  }
+}
+
+/** What a tool call does, in words: our own tools, and the Claude and Gemini CLIs' ones. */
+function describeToolCall(name: string, args: Record<string, unknown>): { action: string; target: string } {
+  const text = (...values: unknown[]) => String(values.find((v) => v !== undefined && v !== null && v !== "") ?? "");
+  switch (name) {
+    case "search_local_files":
+    case "Glob":
+    case "glob":
+      return { action: "Searching files", target: text(args.query, args.pattern, args.path) };
+    case "Grep":
+    case "grep_search":
+      return { action: "Searching contents", target: text(args.query, args.pattern) };
+    case "list_local_directory":
+    case "list_directory":
+      return { action: "Listing folder", target: shortPath(text(args.path, args.dir_path)) };
+    case "read_local_file":
+    case "Read":
+    case "read_file":
+      return { action: "Reading file", target: basename(text(args.file_path, args.absolute_path, args.path)) };
+    case "search_notes":
+      return { action: "Searching notes", target: text(args.query) || "recent notes" };
+    case "read_note":
+      return { action: "Reading note", target: text(args.path) };
+    case "write_note":
+      return { action: "Writing note", target: text(args.path) };
+    case "list_tasks":
+      return { action: "Checking tasks", target: text(args.project) || "all projects" };
+    case "search_web":
+    case "WebSearch":
+    case "google_web_search":
+      return { action: "Searching the web", target: text(args.query) };
+    case "fetch_web_page":
+    case "WebFetch":
+    case "web_fetch":
+      return { action: "Reading web page", target: shortUrl(text(args.url)) };
+    default:
+      return { action: name, target: Object.values(args).map((v) => (typeof v === "string" ? v : JSON.stringify(v))).join(", ") };
+  }
+}
+
+/** A tool call as the chat lists it, e.g. `search_notes("hull")`. */
+function rawToolCall(name: string, args: Record<string, unknown>): string {
+  return `${name}(${Object.values(args).map((v) => JSON.stringify(v)).join(", ")})`;
+}
+
 /**
  * The chat, in the right-most column (see Layout); `active` is false while it is collapsed. While `pinned`, opening a
  * task leaves the chat expanded.
@@ -160,6 +292,7 @@ export default function CopilotChat({
   const [input, setInput] = useState("");
   const [mode, setMode] = useState<AccessMode>(storedMode);
   const [sending, setSending] = useState(false);
+  const [liveProgress, setLiveProgress] = useState<LiveProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
   // The model picked (else the server's default, once known), and the ones on offer (GET /api/models).
   const [model, setModel] = useState<string | null>(() => localStorage.getItem(MODEL_KEY));
@@ -237,7 +370,7 @@ export default function CopilotChat({
   }, [mode]);
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ block: "end" });
-  }, [entries, sending]);
+  }, [entries, sending, liveProgress]);
   useEffect(() => {
     if (active) inputRef.current?.focus();
   }, [active]);
@@ -298,10 +431,11 @@ export default function CopilotChat({
     setMenuDismissed(false);
     setError(null);
     setSending(true);
+    setLiveProgress(NO_PROGRESS);
     const controller = new AbortController();
     abortControllerRef.current = controller;
     try {
-      const res = await fetch("/api/chat", {
+      const res = await fetch("/api/chat/stream", {
         method: "POST",
         signal: controller.signal,
         headers: { "Content-Type": "application/json" },
@@ -315,7 +449,9 @@ export default function CopilotChat({
         }),
       });
       if (!res.ok) throw new Error(await errorDetail(res));
-      const body: ChatResponse = await res.json();
+      const body = await readResponse(res, (event) =>
+        setLiveProgress((progress) => progressWith(progress ?? NO_PROGRESS, event)),
+      );
       setEntries((prev) => [
         ...prev,
         {
@@ -338,6 +474,7 @@ export default function CopilotChat({
       setError(message(err));
     } finally {
       setSending(false);
+      setLiveProgress(null);
       if (abortControllerRef.current === controller) abortControllerRef.current = null;
     }
   }
@@ -514,19 +651,7 @@ export default function CopilotChat({
             </div>
           ),
         )}
-        {sending && (
-          <div className="flex items-center gap-2.5">
-            <p className="text-xs text-text-muted">Thinking…</p>
-            <button
-              type="button"
-              onClick={stop}
-              className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs text-text-muted hover:bg-surface-raised hover:text-text-primary"
-            >
-              <StopIcon />
-              Stop
-            </button>
-          </div>
-        )}
+        {sending && <LiveActivityCard progress={liveProgress ?? NO_PROGRESS} onStop={stop} />}
         {error && <p className="text-xs text-accent">Could not get an answer ({error}).</p>}
         <div ref={bottomRef} />
       </div>
@@ -774,6 +899,15 @@ function CheckIcon() {
   );
 }
 
+function SpinnerIcon() {
+  return (
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="h-3 w-3 shrink-0 animate-spin text-accent" aria-hidden>
+      <circle cx="8" cy="8" r="6" strokeOpacity="0.25" />
+      <path d="M14 8a6 6 0 0 0-6-6" />
+    </svg>
+  );
+}
+
 function StopIcon() {
   return (
     <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" className="shrink-0" aria-hidden>
@@ -847,15 +981,89 @@ function ToolCalls({ calls }: { calls: ToolCall[] }) {
       <summary className="cursor-pointer select-none">
         Used {calls.length} tool{calls.length === 1 ? "" : "s"}
       </summary>
-      <ul className="mt-1 space-y-0.5 font-mono">
+      <ul className="mt-1 space-y-0.5">
         {calls.map((call, i) => (
-          <li key={i} className={call.ok ? "" : "text-accent"}>
-            {call.name}({Object.values(call.arguments).map((v) => JSON.stringify(v)).join(", ")})
-            {!call.ok && " — failed"}
-          </li>
+          <ToolStep key={i} name={call.name} args={call.arguments} status={call.ok ? "ok" : "error"} />
         ))}
       </ul>
     </details>
+  );
+}
+
+/** One tool call, in words, with whether it is running, done or failed (its raw call in the tooltip). */
+function ToolStep({ name, args, status }: { name: string; args: Record<string, unknown>; status: LiveToolCall["status"] }) {
+  const { action, target } = describeToolCall(name, args);
+  return (
+    <li className="flex min-w-0 items-center gap-1.5" title={rawToolCall(name, args)}>
+      {status === "running" ? (
+        <SpinnerIcon />
+      ) : status === "ok" ? (
+        <CheckIcon />
+      ) : (
+        <span className="w-3 shrink-0 text-center leading-none text-red-400" aria-label="failed">
+          ✕
+        </span>
+      )}
+      <span className="shrink-0 text-text-secondary">{action}</span>
+      {target && <span className="min-w-0 truncate font-mono text-text-muted">{target}</span>}
+    </li>
+  );
+}
+
+/** What the agent is doing while it answers: its current step, latest thought, steps so far and reply so far. */
+function LiveActivityCard({ progress, onStop }: { progress: LiveProgress; onStop: () => void }) {
+  const { thoughtSubject, thoughtText, tools, streamingText } = progress;
+  const running = [...tools].reverse().find((t) => t.status === "running");
+  let status = "Thinking…";
+  if (running) {
+    const { action, target } = describeToolCall(running.name, running.arguments);
+    status = target ? `${action}: ${target}…` : `${action}…`;
+  } else if (thoughtSubject) {
+    status = `${thoughtSubject}…`;
+  } else if (streamingText) {
+    status = "Writing response…";
+  }
+  // Note blocks are carried out (or proposed) once the reply is done, not shown as text.
+  const preview = streamingText.replace(/<write_note[\s\S]*?(?:<\/write_note>|$)/g, "").trim();
+
+  return (
+    <div
+      className="flex flex-col gap-1.5 rounded-lg border border-border-default bg-surface-raised px-3 py-2 text-xs leading-relaxed text-text-secondary"
+      aria-live="polite"
+    >
+      <div className="flex min-w-0 items-center gap-2">
+        <SpinnerIcon />
+        <span className="min-w-0 truncate text-xs font-medium text-text-primary">{status}</span>
+        {tools.length > 0 && (
+          <span className="shrink-0 text-[10px] text-text-muted">
+            {tools.length} step{tools.length === 1 ? "" : "s"}
+          </span>
+        )}
+        <button
+          type="button"
+          onClick={onStop}
+          className="ml-auto flex shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] text-text-muted hover:bg-surface-active hover:text-text-primary"
+        >
+          <StopIcon />
+          Stop
+        </button>
+      </div>
+      {thoughtText && (
+        <p className="line-clamp-2 border-l-2 border-accent/40 pl-2 text-[11px] text-text-muted">{thoughtText}</p>
+      )}
+      {tools.length > 0 && (
+        <ul className="max-h-36 space-y-1 overflow-y-auto border-t border-border-default/60 pt-1.5 text-[11px]">
+          {tools.map((tool, i) => (
+            <ToolStep key={`${tool.id}-${i}`} name={tool.name} args={tool.arguments} status={tool.status} />
+          ))}
+        </ul>
+      )}
+      {preview && (
+        <div className="markdown border-t border-border-default pt-2">
+          <Markdown remarkPlugins={[remarkGfm]}>{preview}</Markdown>
+        </div>
+      )}
+    </div>
   );
 }
 

@@ -24,6 +24,9 @@ Context injected into the system prompt (see `space_context`):
   (and the tasks linked to the note);
 - the local RAG folders configured for the space (Space Preferences), with what's at their top level.
 
+`stream_chat` runs the same turn as `run_chat` but yields live events (thoughts, tool calls starting and ending,
+reply text) as they happen, for `POST /api/chat/stream`; a `StreamCancel` stops it and kills the CLI it runs.
+
 Writes go through `file_layer.write_note`, which enforces the access mode and records
 every change in `history`. In `ask_first` mode the file layer refuses the write with
 `ApprovalRequiredError`; the agent turns that into a `ProposedEdit` for the user to
@@ -37,9 +40,10 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import urllib.parse
 import urllib.request
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Generator, Iterator, Sequence
 from datetime import date
 from html.parser import HTMLParser
 from pathlib import Path
@@ -730,9 +734,25 @@ def chat_model_id(model: str | None, settings: Settings) -> str:
 # --- Chat loop ----------------------------------------------------------------
 
 
-def _summary(name: str, arguments: dict[str, Any], ok: bool) -> ToolCallSummary:
+def _shown_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
     # Note bodies are shown as proposed edits, not repeated in the tool call list.
-    return ToolCallSummary(name=name, arguments={k: v for k, v in arguments.items() if k != "content"}, ok=ok)
+    return {k: v for k, v in arguments.items() if k != "content"}
+
+
+def _summary(name: str, arguments: dict[str, Any], ok: bool) -> ToolCallSummary:
+    return ToolCallSummary(name=name, arguments=_shown_arguments(arguments), ok=ok)
+
+
+# A live event of a streamed turn (see `stream_chat`).
+Event = dict[str, Any]
+
+
+def _tool_start(call_id: str, name: str, arguments: dict[str, Any]) -> Event:
+    return {"type": "tool_start", "id": call_id, "name": name, "arguments": _shown_arguments(arguments)}
+
+
+def _tool_end(call_id: str, name: str, ok: bool) -> Event:
+    return {"type": "tool_end", "id": call_id, "name": name, "ok": ok}
 
 
 def _run_tool(turn: _Turn, name: str, raw_arguments: str | None) -> tuple[str, ToolCallSummary]:
@@ -876,34 +896,77 @@ def _cli_command(claude_bin: str, model: str, turn: "_Turn", reasoning_effort: s
     return cmd
 
 
+class _StreamState:
+    """What a CLI's stream-json output has said so far: its tool calls, reply, result and errors."""
+
+    def __init__(self) -> None:
+        self.calls: dict[str, tuple[str, dict[str, Any], bool]] = {}  # by tool call id: (name, arguments, ok)
+        self.parts: list[str] = []  # the Gemini reply, in delta chunks
+        self.result: str | None = None  # the Claude reply
+        self.is_error = False
+        self.error: str | None = None
+        self.needs_sign_in = False
+
+    def summaries(self) -> list[ToolCallSummary]:
+        return [_summary(name, arguments, ok) for name, arguments, ok in self.calls.values()]
+
+    def start_call(self, call_id: str, name: str, arguments: dict[str, Any]) -> Event:
+        self.calls[call_id] = (name, arguments, True)
+        return _tool_start(call_id, name, arguments)
+
+    def end_call(self, call_id: str, ok: bool) -> Event:
+        name, arguments, _ok = self.calls[call_id]
+        self.calls[call_id] = (name, arguments, ok)
+        return _tool_end(call_id, name, ok)
+
+
+def _json_line(line: str) -> dict[str, Any] | None:
+    try:
+        event = json.loads(line)
+    except ValueError:
+        return None
+    return event if isinstance(event, dict) else None
+
+
+def _claude_events(line: str, state: _StreamState) -> list[Event]:
+    """The live events for one line of the Claude CLI's stream-json output, which is recorded in `state`."""
+    event = _json_line(line)
+    if event is None:
+        return []
+    message = event.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    items = [item for item in content if isinstance(item, dict)] if isinstance(content, list) else []
+    events: list[Event] = []
+    if event.get("type") == "assistant":
+        for item in items:
+            if item.get("type") == "thinking" and isinstance(item.get("thinking"), str) and item["thinking"].strip():
+                events.append({"type": "thought", "subject": None, "text": item["thinking"].strip()})
+            elif item.get("type") == "text" and isinstance(item.get("text"), str) and item["text"]:
+                events.append({"type": "text_delta", "delta": item["text"]})
+            elif item.get("type") == "tool_use":
+                arguments = item.get("input") if isinstance(item.get("input"), dict) else {}
+                events.append(state.start_call(str(item.get("id")), str(item.get("name")), arguments))
+    elif event.get("type") == "user":
+        for item in items:
+            if item.get("type") == "tool_result" and str(item.get("tool_use_id")) in state.calls:
+                events.append(state.end_call(str(item.get("tool_use_id")), not item.get("is_error", False)))
+    elif event.get("type") == "result":
+        state.result = event.get("result") if isinstance(event.get("result"), str) else None
+        state.is_error = bool(event.get("is_error"))
+    return events
+
+
 def _parse_stream(stdout: str) -> tuple[str | None, bool, list[ToolCallSummary]]:
     """(final result text, whether it is an error, the tool calls made) from the CLI's stream-json output."""
-    calls: dict[str, tuple[str, dict[str, Any], bool]] = {}
-    result, is_error = None, False
+    state = _StreamState()
     for line in stdout.splitlines():
-        try:
-            event = json.loads(line)
-        except ValueError:
-            continue
-        if not isinstance(event, dict):
-            continue
-        message = event.get("message")
-        content = message.get("content") if isinstance(message, dict) else None
-        items = [item for item in content if isinstance(item, dict)] if isinstance(content, list) else []
-        if event.get("type") == "assistant":
-            for item in items:
-                if item.get("type") == "tool_use":
-                    arguments = item.get("input") if isinstance(item.get("input"), dict) else {}
-                    calls[str(item.get("id"))] = (str(item.get("name")), arguments, True)
-        elif event.get("type") == "user":
-            for item in items:
-                if item.get("type") == "tool_result" and str(item.get("tool_use_id")) in calls:
-                    name, arguments, _ok = calls[str(item.get("tool_use_id"))]
-                    calls[str(item.get("tool_use_id"))] = (name, arguments, not item.get("is_error", False))
-        elif event.get("type") == "result":
-            result = event.get("result") if isinstance(event.get("result"), str) else None
-            is_error = bool(event.get("is_error"))
-    return result, is_error, [_summary(name, arguments, ok) for name, arguments, ok in calls.values()]
+        _claude_events(line, state)
+    return state.result, state.is_error, state.summaries()
+
+
+def _claude_env() -> dict[str, str]:
+    """The Claude CLI's environment: without an API key in it, the CLI uses the subscription it is signed in with."""
+    return {k: v for k, v in os.environ.items() if k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")}
 
 
 def _apply_write_blocks(reply: str, turn: "_Turn") -> tuple[str, list[ToolCallSummary]]:
@@ -946,6 +1009,130 @@ def _apply_write_blocks(reply: str, turn: "_Turn") -> tuple[str, list[ToolCallSu
     return cleaned, summaries
 
 
+def _cli_response(reply: str, summaries: Sequence[ToolCallSummary], turn: "_Turn") -> ChatResponse:
+    """A CLI turn's response: its reply with the `<write_note>` blocks carried out, after the tool calls it made."""
+    reply, writes = _apply_write_blocks(reply, turn)  # refused in read only mode, with a note in the reply
+    tool_calls = [*summaries, *writes]
+    return ChatResponse(
+        reply=reply.strip() or _fallback_reply(tool_calls),
+        proposed_edits=list(turn.proposed.values()),
+        written_paths=turn.written,
+        tool_calls=tool_calls,
+    )
+
+
+def _claude_reply(result: str | None, is_error: bool, stderr: str, returncode: int | None) -> str:
+    if result is None or is_error:
+        detail = (result or stderr.strip() or f"exit code {returncode}")[-2000:]
+        raise AgentError(f"The Claude CLI failed: {detail}")
+    return result
+
+
+def _terminate_process(process: "subprocess.Popen[str]") -> None:
+    """Kill `process` if it still runs, with its children: on Windows a CLI is a `.cmd` whose `node.exe` outlives a
+    plain kill of cmd.exe."""
+    if process.poll() is not None:
+        return
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(process.pid)], capture_output=True)
+    else:
+        process.terminate()
+    try:
+        process.kill()
+    except OSError:
+        pass  # already gone
+
+
+class StreamCancel:
+    """Stops a `stream_chat` turn from another thread: `cancel()` kills the CLI it runs at once, and the turn then
+    ends without a `done` event."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._process: subprocess.Popen[str] | None = None
+        self.cancelled = False
+
+    def attach(self, process: "subprocess.Popen[str]") -> None:
+        with self._lock:
+            self._process, cancelled = process, self.cancelled
+        if cancelled:
+            _terminate_process(process)
+
+    def cancel(self) -> None:
+        with self._lock:
+            self.cancelled, process = True, self._process
+        if process is not None:
+            _terminate_process(process)
+
+
+def _feed(stdin: Any, prompt: str) -> None:
+    try:
+        stdin.write(prompt)
+        stdin.close()
+    except OSError:
+        pass  # the CLI exited (or was killed) before reading it all
+
+
+def _cli_lines(
+    cmd: list[str], prompt: str, *, cwd: Path, env: dict[str, str], timeout: int, name: str, cancel: StreamCancel
+) -> Generator[str, None, tuple[str, int | None]]:
+    """Run `cmd` with `prompt` on stdin and yield its stdout lines as they come; return (its stderr, its exit code).
+    The process is killed when it overruns `timeout` seconds, on `cancel`, and when the caller stops iterating."""
+    try:
+        process = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+            cwd=cwd,
+            env=env,
+        )
+    except OSError as exc:
+        raise AgentError(f"The {name} could not be started: {exc}") from exc
+    assert process.stdin is not None and process.stdout is not None and process.stderr is not None
+    stderr: list[str] = []
+    readers = [
+        # Separate threads, so neither a long prompt nor a full stderr pipe can stall the CLI.
+        threading.Thread(target=_feed, args=(process.stdin, prompt), daemon=True),
+        threading.Thread(target=lambda: stderr.append(process.stderr.read()), daemon=True),  # type: ignore[union-attr]
+    ]
+    timed_out = threading.Event()
+
+    def expire() -> None:
+        timed_out.set()
+        _terminate_process(process)
+
+    timer = threading.Timer(timeout, expire)
+    timer.daemon = True
+    try:
+        for thread in readers:
+            thread.start()
+        timer.start()
+        cancel.attach(process)
+        yield from iter(process.stdout.readline, "")
+        process.wait()
+        readers[1].join()
+    finally:
+        timer.cancel()
+        _terminate_process(process)
+    if timed_out.is_set():
+        raise AgentError(f"The {name} did not answer within {timeout} seconds")
+    return "".join(stderr), process.returncode
+
+
+def _finish_cli_turn(response: ChatResponse, cli_calls: int) -> Iterator[Event]:
+    """The events closing a streamed CLI turn: the `<write_note>` blocks carried out after its `cli_calls` own
+    tool calls, then `done`."""
+    for i, write in enumerate(response.tool_calls[cli_calls:]):
+        yield _tool_start(f"write_note-{i}", write.name, write.arguments)
+        yield _tool_end(f"write_note-{i}", write.name, write.ok)
+    yield {"type": "done", "response": response.model_dump(mode="json")}
+
+
 def _run_claude_cli(
     messages: Sequence[ChatMessage],
     mode: AccessMode,
@@ -963,8 +1150,6 @@ def _run_claude_cli(
         raise AgentNotConfiguredError("Claude CLI (`claude`) is not installed or not on PATH")
     turn = _Turn(mode, space_id)
     prompt = _cli_prompt(messages, mode, turn, space_id, note_path)
-    # Without an API key in its environment the CLI uses the subscription it is signed in with.
-    env = {k: v for k, v in os.environ.items() if k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")}
     try:
         process = subprocess.run(
             _cli_command(claude_bin, model, turn, reasoning_effort),
@@ -974,7 +1159,7 @@ def _run_claude_cli(
             encoding="utf-8",
             errors="replace",
             cwd=turn.root,
-            env=env,
+            env=_claude_env(),
             timeout=CLAUDE_CLI_TIMEOUT_SECONDS,
         )
     except subprocess.TimeoutExpired as exc:
@@ -983,17 +1168,57 @@ def _run_claude_cli(
         raise AgentError(f"The Claude CLI could not be started: {exc}") from exc
 
     result, is_error, summaries = _parse_stream(process.stdout or "")
-    if result is None or is_error:
-        detail = (result or (process.stderr or "").strip() or f"exit code {process.returncode}")[-2000:]
-        raise AgentError(f"The Claude CLI failed: {detail}")
-    reply, writes = _apply_write_blocks(result, turn)  # refused in read only mode, with a note in the reply
-    summaries += writes
-    return ChatResponse(
-        reply=reply.strip() or _fallback_reply(summaries),
-        proposed_edits=list(turn.proposed.values()),
-        written_paths=turn.written,
-        tool_calls=summaries,
+    return _cli_response(_claude_reply(result, is_error, process.stderr or "", process.returncode), summaries, turn)
+
+
+def _stream_claude_cli(
+    messages: Sequence[ChatMessage],
+    mode: AccessMode,
+    *,
+    space_id: int,
+    note_path: str | None,
+    model: str,
+    reasoning_effort: str | None,
+    cancel: StreamCancel,
+) -> Iterator[Event]:
+    """`_run_claude_cli`, yielding the CLI's thoughts, tool calls and text as it outputs them."""
+    claude_bin = shutil.which("claude")
+    if claude_bin is None:
+        raise AgentNotConfiguredError("Claude CLI (`claude`) is not installed or not on PATH")
+    turn = _Turn(mode, space_id)
+    prompt = _cli_prompt(messages, mode, turn, space_id, note_path)
+    state = _StreamState()
+    lines = _cli_lines(
+        _cli_command(claude_bin, model, turn, reasoning_effort),
+        prompt,
+        cwd=turn.root,
+        env=_claude_env(),
+        timeout=CLAUDE_CLI_TIMEOUT_SECONDS,
+        name="Claude CLI",
+        cancel=cancel,
     )
+    stderr, returncode = yield from _line_events(lines, _claude_events, state)
+    if cancel.cancelled:
+        return
+    response = _cli_response(_claude_reply(state.result, state.is_error, stderr, returncode), state.summaries(), turn)
+    yield from _finish_cli_turn(response, len(state.calls))
+
+
+def _line_events(
+    lines: Generator[str, None, tuple[str, int | None]],
+    parse: Callable[[str, _StreamState], list[Event]],
+    state: _StreamState,
+) -> Generator[Event, None, tuple[str, int | None]]:
+    """The live events `parse` finds in a CLI's output `lines`; return what `lines` returns."""
+    try:
+        while True:
+            try:
+                line = next(lines)
+            except StopIteration as stop:
+                return stop.value
+            yield from parse(line, state)
+    finally:
+        lines.close()  # kills the CLI if the caller stopped early
 
 
 def _gemini_command(gemini_bin: str, model: str, turn: "_Turn") -> list[str]:
@@ -1022,35 +1247,42 @@ def _gemini_env() -> dict[str, str]:
     return env
 
 
+def _gemini_events(line: str, state: _StreamState) -> list[Event]:
+    """The live events for one line of the Gemini CLI's stream-json output, which is recorded in `state`."""
+    if any(marker in line for marker in _GEMINI_AUTH_MARKERS):
+        state.needs_sign_in = True
+    event = _json_line(line)
+    if event is None:
+        return []
+    kind = event.get("type")
+    if kind == "thought":
+        subject = event.get("subject")
+        text = str(event.get("description") or "")
+        return [{"type": "thought", "subject": subject if isinstance(subject, str) else None, "text": text}]
+    if kind == "message" and event.get("role") == "assistant":
+        # Delta messages are chunks of one reply, in order.
+        if isinstance(event.get("content"), str) and event["content"]:
+            state.parts.append(event["content"])
+            return [{"type": "text_delta", "delta": event["content"]}]
+    elif kind == "tool_use":
+        arguments = event.get("parameters") if isinstance(event.get("parameters"), dict) else {}
+        return [state.start_call(str(event.get("tool_id")), str(event.get("tool_name")), arguments)]
+    elif kind == "tool_result" and str(event.get("tool_id")) in state.calls:
+        return [state.end_call(str(event.get("tool_id")), event.get("status") != "error")]
+    elif kind == "error":
+        state.error = str(event.get("message") or "unknown error")
+    elif kind == "result" and event.get("status") == "error":
+        detail = event.get("error")
+        state.error = str((detail.get("message") if isinstance(detail, dict) else detail) or state.error or "unknown error")
+    return []
+
+
 def _parse_gemini_stream(stdout: str) -> tuple[str, str | None, list[ToolCallSummary]]:
     """(reply text, error message if any, the tool calls made) from the Gemini CLI's stream-json output."""
-    calls: dict[str, tuple[str, dict[str, Any], bool]] = {}
-    parts: list[str] = []
-    error = None
+    state = _StreamState()
     for line in stdout.splitlines():
-        try:
-            event = json.loads(line)
-        except ValueError:
-            continue
-        if not isinstance(event, dict):
-            continue
-        kind = event.get("type")
-        if kind == "message" and event.get("role") == "assistant":
-            # Delta messages are chunks of one reply, in order.
-            if isinstance(event.get("content"), str):
-                parts.append(event["content"])
-        elif kind == "tool_use":
-            arguments = event.get("parameters") if isinstance(event.get("parameters"), dict) else {}
-            calls[str(event.get("tool_id"))] = (str(event.get("tool_name")), arguments, True)
-        elif kind == "tool_result" and str(event.get("tool_id")) in calls:
-            name, arguments, _ok = calls[str(event.get("tool_id"))]
-            calls[str(event.get("tool_id"))] = (name, arguments, event.get("status") != "error")
-        elif kind == "error":
-            error = str(event.get("message") or "unknown error")
-        elif kind == "result" and event.get("status") == "error":
-            detail = event.get("error")
-            error = str((detail.get("message") if isinstance(detail, dict) else detail) or error or "unknown error")
-    return "".join(parts), error, [_summary(name, arguments, ok) for name, arguments, ok in calls.values()]
+        _gemini_events(line, state)
+    return "".join(state.parts), state.error, state.summaries()
 
 
 def _run_gemini_cli(
@@ -1086,22 +1318,52 @@ def _run_gemini_cli(
         raise AgentError(f"The Gemini CLI could not be started: {exc}") from exc
 
     stdout, stderr = process.stdout or "", process.stderr or ""
-    if any(marker in stdout or marker in stderr for marker in _GEMINI_AUTH_MARKERS):
+    reply, error, summaries = _parse_gemini_stream(stdout)
+    needs_sign_in = any(marker in stdout for marker in _GEMINI_AUTH_MARKERS)
+    _check_gemini(needs_sign_in, error, stderr, process.returncode)
+    return _cli_response(reply, summaries, turn)
+
+
+def _check_gemini(needs_sign_in: bool, error: str | None, stderr: str, returncode: int | None) -> None:
+    if needs_sign_in or any(marker in stderr for marker in _GEMINI_AUTH_MARKERS):
         raise AgentNotConfiguredError(
             "Gemini CLI needs a one-time Google sign-in: run `gemini` in a terminal and choose Login with Google."
         )
-    reply, error, summaries = _parse_gemini_stream(stdout)
-    if error or process.returncode != 0:
-        detail = (error or stderr.strip() or f"exit code {process.returncode}")[-2000:]
+    if error or returncode != 0:
+        detail = (error or stderr.strip() or f"exit code {returncode}")[-2000:]
         raise AgentError(f"The Gemini CLI failed: {detail}")
-    reply, writes = _apply_write_blocks(reply, turn)  # refused in read only mode, with a note in the reply
-    summaries += writes
-    return ChatResponse(
-        reply=reply.strip() or _fallback_reply(summaries),
-        proposed_edits=list(turn.proposed.values()),
-        written_paths=turn.written,
-        tool_calls=summaries,
+
+
+def _stream_gemini_cli(
+    messages: Sequence[ChatMessage],
+    mode: AccessMode,
+    *,
+    space_id: int,
+    note_path: str | None,
+    model: str,
+    cancel: StreamCancel,
+) -> Iterator[Event]:
+    """`_run_gemini_cli`, yielding the CLI's thoughts, tool calls and reply chunks as it outputs them."""
+    gemini_bin = shutil.which("gemini")
+    if gemini_bin is None:
+        raise AgentNotConfiguredError("Gemini CLI (`gemini`) is not installed or not on PATH")
+    turn = _Turn(mode, space_id)
+    prompt = _cli_prompt(messages, mode, turn, space_id, note_path, _GEMINI_TOOLS_GUIDE)
+    state = _StreamState()
+    lines = _cli_lines(
+        _gemini_command(gemini_bin, model, turn),
+        prompt,
+        cwd=turn.root,
+        env=_gemini_env(),
+        timeout=GEMINI_CLI_TIMEOUT_SECONDS,
+        name="Gemini CLI",
+        cancel=cancel,
     )
+    stderr, returncode = yield from _line_events(lines, _gemini_events, state)
+    if cancel.cancelled:
+        return
+    _check_gemini(state.needs_sign_in, state.error, stderr, returncode)
+    yield from _finish_cli_turn(_cli_response("".join(state.parts), state.summaries(), turn), len(state.calls))
 
 
 def run_chat(
@@ -1135,10 +1397,55 @@ def run_chat(
         return _run_gemini_cli(
             messages, AccessMode(access_mode), space_id=space_id, note_path=note_path, model=bare_model_name(chosen)
         )
+    return _drain(
+        _litellm_turn(
+            messages,
+            AccessMode(access_mode),
+            space_id=space_id,
+            note_path=note_path,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            settings=settings,
+            cancel=StreamCancel(),
+        )
+    )
+
+
+def _drain(events: Generator[Event, None, ChatResponse | None]) -> ChatResponse:
+    """What a turn's event generator returns, once run to the end."""
+    while True:
+        try:
+            next(events)
+        except StopIteration as stop:
+            assert stop.value is not None  # only a cancelled turn returns nothing
+            return stop.value
+
+
+def _loose_arguments(raw_arguments: str | None) -> dict[str, Any]:
+    """A tool call's arguments for display: {} if they are not a JSON object (`_run_tool` reports why)."""
+    try:
+        arguments = json.loads(raw_arguments or "{}")
+    except ValueError:
+        return {}
+    return arguments if isinstance(arguments, dict) else {}
+
+
+def _litellm_turn(
+    messages: Sequence[ChatMessage],
+    mode: AccessMode,
+    *,
+    space_id: int,
+    note_path: str | None,
+    model: str | None,
+    reasoning_effort: str | None,
+    settings: Settings,
+    cancel: StreamCancel,
+) -> Generator[Event, None, ChatResponse | None]:
+    """A turn on LiteLLM's tool loop, yielding each tool call as it starts and ends; return its response (None if
+    cancelled)."""
     if settings.gemini_api_key is None:
         raise AgentNotConfiguredError("COPILOT_GEMINI_API_KEY is not set; add it to backend/.env")
 
-    mode = AccessMode(access_mode)
     write_rules = _WRITE_RULES[mode] + ("" if mode is AccessMode.READ_ONLY else _WRITE_GUIDE)
     space_name, context = space_context(space_id, note_path)
     system = SYSTEM_PROMPT.format(
@@ -1150,6 +1457,8 @@ def run_chat(
     chosen_model = chat_model_id(model, settings)
 
     for round_ in range(MAX_TOOL_ROUNDS + 1):
+        if cancel.cancelled:
+            return None
         last = round_ == MAX_TOOL_ROUNDS  # Out of rounds: make the model answer with what it has.
         if last:
             # Gemini ignores tool_choice="none" while tools are declared and keeps calling them, so the last
@@ -1188,7 +1497,60 @@ def run_chat(
         # Keep the provider's message object as is: Gemini needs its thought signatures echoed back.
         history.append(message)
         for call in tool_calls:
+            if cancel.cancelled:
+                return None
+            yield _tool_start(call.id, call.function.name, _loose_arguments(call.function.arguments))
             result, summary = _run_tool(turn, call.function.name, call.function.arguments)
             summaries.append(summary)
+            yield _tool_end(call.id, call.function.name, summary.ok)
             history.append({"role": "tool", "tool_call_id": call.id, "name": call.function.name, "content": result})
     raise AssertionError("unreachable")
+
+
+def stream_chat(
+    messages: Sequence[ChatMessage],
+    access_mode: AccessMode,
+    *,
+    space_id: int = spaces.DEFAULT_SPACE_ID,
+    note_path: str | None = None,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+    settings: Settings | None = None,
+    cancel: StreamCancel | None = None,
+) -> Iterator[Event]:
+    """`run_chat`, yielding what the agent does as it happens: `thought`, `tool_start`, `tool_end` and `text_delta`
+    events, then `done` with the `ChatResponse`. Raises `AgentNotConfiguredError` and `AgentError` as `run_chat`
+    does. `cancel` stops the turn from another thread; closing the iterator stops it too. Either way the CLI it
+    runs is killed."""
+    settings = settings or get_settings()
+    cancel = cancel or StreamCancel()
+    mode = AccessMode(access_mode)
+    chosen = model.strip() if model and model.strip() else settings.chat_model
+    if is_claude_cli_model(chosen):
+        yield from _stream_claude_cli(
+            messages,
+            mode,
+            space_id=space_id,
+            note_path=note_path,
+            model=bare_model_name(chosen),
+            reasoning_effort=reasoning_effort,
+            cancel=cancel,
+        )
+        return
+    if is_gemini_cli_model(chosen):
+        yield from _stream_gemini_cli(
+            messages, mode, space_id=space_id, note_path=note_path, model=bare_model_name(chosen), cancel=cancel
+        )
+        return
+    response = yield from _litellm_turn(
+        messages,
+        mode,
+        space_id=space_id,
+        note_path=note_path,
+        model=model,
+        reasoning_effort=reasoning_effort,
+        settings=settings,
+        cancel=cancel,
+    )
+    if response is not None:
+        yield {"type": "done", "response": response.model_dump(mode="json")}

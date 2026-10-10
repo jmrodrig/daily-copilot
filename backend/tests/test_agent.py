@@ -1,4 +1,6 @@
+import io
 import json
+import queue
 from datetime import date
 from email.message import Message
 from types import SimpleNamespace
@@ -1136,3 +1138,287 @@ def test_gemini_cli_nonzero_exit(client, gemini):
 
     assert response.status_code == 502
     assert "Unknown model" in response.json()["detail"]
+
+
+# --- Streaming (POST /api/chat/stream) ----------------------------------------
+
+
+def stream(client, text, mode="ask_first", **extra):
+    payload = {"messages": [{"role": "user", "content": text}], "access_mode": mode, **extra}
+    response = client.post("/api/chat/stream", json=payload)
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/x-ndjson")
+    return [json.loads(line) for line in response.text.splitlines() if line.strip()]
+
+
+def kinds(events):
+    return [e["type"] for e in events]
+
+
+def test_chat_stream_reports_tool_calls_as_they_run(client, notes_dir, model):
+    file_layer.write_note("C7801/Keel.md", "We chose a lead keel.", {}, "write_directly")
+    model.script += [
+        reply(tool_calls=[tool_call("search_notes", {"query": "keel"})]),
+        reply(tool_calls=[tool_call("write_note", {"path": "C7801/Bolts.md", "content": "316"}, "call-2")]),
+        reply("Done (C7801/Keel.md)."),
+    ]
+
+    events = stream(client, "Keel?", mode="write_directly")
+
+    assert events[:4] == [
+        {"type": "tool_start", "id": "call-1", "name": "search_notes", "arguments": {"query": "keel"}},
+        {"type": "tool_end", "id": "call-1", "name": "search_notes", "ok": True},
+        # Note bodies are left out, as in the tool call summaries.
+        {"type": "tool_start", "id": "call-2", "name": "write_note", "arguments": {"path": "C7801/Bolts.md"}},
+        {"type": "tool_end", "id": "call-2", "name": "write_note", "ok": True},
+    ]
+    assert kinds(events) == ["tool_start", "tool_end", "tool_start", "tool_end", "done"]
+    response = events[-1]["response"]
+    assert response["reply"] == "Done (C7801/Keel.md)."
+    assert response["written_paths"] == ["C7801/Bolts.md"]
+    assert [c["name"] for c in response["tool_calls"]] == ["search_notes", "write_note"]
+
+
+def test_chat_stream_reports_failed_tools(client, model):
+    model.script += [reply(tool_calls=[tool_call("read_note", "not json")]), reply("Sorry.")]
+
+    events = stream(client, "Hi")
+
+    assert events[0] == {"type": "tool_start", "id": "call-1", "name": "read_note", "arguments": {}}
+    assert events[1] == {"type": "tool_end", "id": "call-1", "name": "read_note", "ok": False}
+
+
+def test_chat_stream_errors_are_events(client, settings, model, monkeypatch):
+    key, settings.gemini_api_key = settings.gemini_api_key, None
+    assert stream(client, "Hi") == [
+        {"type": "error", "detail": "COPILOT_GEMINI_API_KEY is not set; add it to backend/.env", "status_code": 503}
+    ]
+
+    def completion(**_kwargs):
+        raise RuntimeError("quota exceeded")
+
+    settings.gemini_api_key = key
+    monkeypatch.setattr(agent.litellm, "completion", completion)
+    [event] = stream(client, "Hi")
+    assert event["type"] == "error" and event["status_code"] == 502 and "quota exceeded" in event["detail"]
+
+
+def test_chat_stream_unknown_space(client, model):
+    payload = {"messages": [{"role": "user", "content": "Hi"}], "space_id": 999}
+    assert client.post("/api/chat/stream", json=payload).status_code == 404
+
+
+class FakeStdin(io.StringIO):
+    def close(self):
+        self.text = self.getvalue()
+        super().close()
+
+
+class FakeProcess:
+    """A `subprocess.Popen` of a CLI printing `stdout`; with `block`, it then hangs until killed."""
+
+    def __init__(self, stdout, stderr="", returncode=0, block=False):
+        self.lines = queue.Queue()
+        for line in stdout.splitlines(keepends=True):
+            self.lines.put(line)
+        if not block:
+            self.lines.put("")
+        self.stdin = FakeStdin()
+        self.stdout = SimpleNamespace(readline=self.lines.get)
+        self.stderr = io.StringIO(stderr)
+        self.pid, self.returncode, self.exit_code, self.killed = 4321, None, returncode, False
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self):
+        self.returncode = self.exit_code
+        return self.returncode
+
+    def terminate(self):
+        self.kill()
+
+    def kill(self):
+        if not self.killed:
+            self.killed, self.returncode = True, -9
+            self.lines.put("")  # its stdout closes
+
+
+@pytest.fixture
+def popen(monkeypatch):
+    """Replace `subprocess.Popen` with a script of `FakeProcess`es, so streaming tests never run a real CLI."""
+    script, runs, taskkills = [], [], []
+    monkeypatch.setattr(agent.shutil, "which", lambda name: f"C:/npm/{name}.cmd" if name in ("claude", "gemini") else None)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-should-not-leak")
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-should-not-leak")
+
+    def start(cmd, **kwargs):
+        process = script.pop(0)
+        runs.append({"cmd": cmd, "process": process, **kwargs})
+        return process
+
+    monkeypatch.setattr(agent.subprocess, "Popen", start)
+    monkeypatch.setattr(agent.subprocess, "run", lambda cmd, **kwargs: taskkills.append(cmd))
+    return SimpleNamespace(script=script, runs=runs, taskkills=taskkills)
+
+
+def claude_line(kind, *content):
+    return json.dumps({"type": kind, "message": {"content": list(content)}}) + "\n"
+
+
+def test_chat_stream_claude_cli_events(client, notes_dir, popen):
+    result = 'A lead keel.\n<write_note path="C7801/Keel.md">\n# Keel\n</write_note>'
+    stdout = (
+        json.dumps({"type": "system", "subtype": "init"})
+        + "\n"
+        + claude_line("assistant", {"type": "thinking", "thinking": "  Look for the keel note.  "})
+        + claude_line("assistant", {"type": "text", "text": "Searching."})
+        + claude_line("assistant", {"type": "tool_use", "id": "t1", "name": "Grep", "input": {"pattern": "keel"}})
+        + claude_line("user", {"type": "tool_result", "tool_use_id": "t1", "is_error": False})
+        + claude_line("assistant", {"type": "tool_use", "id": "t2", "name": "Read", "input": {"file_path": "x.md"}})
+        + claude_line("user", {"type": "tool_result", "tool_use_id": "t2", "is_error": True})
+        + json.dumps({"type": "result", "is_error": False, "result": result})
+        + "\n"
+    )
+    popen.script.append(FakeProcess(stdout))
+
+    events = stream(client, "Keel?", model="claude-opus-4-6")
+
+    assert events[:7] == [
+        {"type": "thought", "subject": None, "text": "Look for the keel note."},
+        {"type": "text_delta", "delta": "Searching."},
+        {"type": "tool_start", "id": "t1", "name": "Grep", "arguments": {"pattern": "keel"}},
+        {"type": "tool_end", "id": "t1", "name": "Grep", "ok": True},
+        {"type": "tool_start", "id": "t2", "name": "Read", "arguments": {"file_path": "x.md"}},
+        {"type": "tool_end", "id": "t2", "name": "Read", "ok": False},
+        # The reply's note block, carried out (here proposed) once the CLI is done.
+        {"type": "tool_start", "id": "write_note-0", "name": "write_note", "arguments": {"path": "C7801/Keel.md"}},
+    ]
+    assert kinds(events)[7:] == ["tool_end", "done"]
+    response = events[-1]["response"]
+    assert response["reply"] == "A lead keel."
+    assert [e["path"] for e in response["proposed_edits"]] == ["C7801/Keel.md"]
+    assert [(c["name"], c["ok"]) for c in response["tool_calls"]] == [("Grep", True), ("Read", False), ("write_note", True)]
+    [run] = popen.runs
+    assert run["cmd"][0] == "C:/npm/claude.cmd" and "stream-json" in run["cmd"]
+    assert "ANTHROPIC_API_KEY" not in run["env"]
+    assert "Keel?" in run["process"].stdin.text
+    assert not run["process"].killed and popen.taskkills == []
+
+
+def test_chat_stream_claude_cli_failure(client, popen):
+    popen.script.append(FakeProcess(json.dumps({"type": "result", "is_error": True, "result": "Overloaded"}) + "\n"))
+
+    [event] = stream(client, "Hi", model="claude-opus-4-6")
+
+    assert event == {"type": "error", "detail": "The Claude CLI failed: Overloaded", "status_code": 502}
+
+
+def test_chat_stream_claude_cli_not_installed(client, popen, monkeypatch):
+    monkeypatch.setattr(agent.shutil, "which", lambda name: None)
+
+    [event] = stream(client, "Hi", model="claude-opus-4-6")
+
+    assert event["type"] == "error" and event["status_code"] == 503
+
+
+def test_chat_stream_gemini_cli_events(client, popen):
+    thought = {"type": "thought", "subject": "Finding the standard", "description": "Search ISO 12215."}
+    stdout = (
+        "Loaded cached credentials.\n"
+        + json.dumps(thought)
+        + "\n"
+        + gemini_events(
+            ["ISO 12215-5 ", "covers scantlings."],
+            [("g1", "google_web_search", {"query": "ISO 12215"}, "success"), ("g2", "read_file", {"path": "x"}, "error")],
+        )
+    )
+    popen.script.append(FakeProcess(stdout))
+
+    events = stream(client, "Which standard?", model="gemini-2.5-pro")
+
+    assert events[:-1] == [
+        {"type": "thought", "subject": "Finding the standard", "text": "Search ISO 12215."},
+        {"type": "tool_start", "id": "g1", "name": "google_web_search", "arguments": {"query": "ISO 12215"}},
+        {"type": "tool_end", "id": "g1", "name": "google_web_search", "ok": True},
+        {"type": "tool_start", "id": "g2", "name": "read_file", "arguments": {"path": "x"}},
+        {"type": "tool_end", "id": "g2", "name": "read_file", "ok": False},
+        {"type": "text_delta", "delta": "ISO 12215-5 "},
+        {"type": "text_delta", "delta": "covers scantlings."},
+    ]
+    assert events[-1]["type"] == "done"
+    assert events[-1]["response"]["reply"] == "ISO 12215-5 covers scantlings."
+    [run] = popen.runs
+    assert "GEMINI_API_KEY" not in run["env"] and run["env"]["GOOGLE_GENAI_USE_GCA"] == "true"
+    assert "Which standard?" in run["process"].stdin.text
+
+
+@pytest.mark.parametrize(
+    ("stdout", "stderr", "returncode", "status_code", "detail"),
+    [
+        ("", "Please set an Auth method in your settings.json", 41, 503, "Login with Google"),
+        ('{"type": "error", "message": "Authentication cancelled"}\n', "", 41, 503, "Login with Google"),
+        (gemini_events([]) + json.dumps({"type": "error", "message": "boom"}) + "\n", "", 0, 502, "boom"),
+        ("", "Unknown model", 1, 502, "Unknown model"),
+    ],
+)
+def test_chat_stream_gemini_cli_failures(client, popen, stdout, stderr, returncode, status_code, detail):
+    popen.script.append(FakeProcess(stdout, stderr, returncode))
+
+    [event] = stream(client, "Hi", model="gemini-2.5-pro")
+
+    assert event["type"] == "error" and event["status_code"] == status_code
+    assert detail in event["detail"]
+
+
+def hanging_claude(popen):
+    """A Claude CLI that starts a tool call, then hangs."""
+    tool_use = {"type": "tool_use", "id": "t1", "name": "Glob", "input": {"pattern": "**/*.pdf"}}
+    process = FakeProcess(claude_line("assistant", tool_use), block=True)
+    popen.script.append(process)
+    return process
+
+
+def test_stream_cancel_kills_the_cli_and_ends_the_turn(client, popen):
+    process = hanging_claude(popen)
+    cancel = agent.StreamCancel()
+    messages = [ChatMessage(role="user", content="Find the PDFs")]
+    events = agent.stream_chat(messages, AccessMode.READ_ONLY, model="claude-opus-4-6", cancel=cancel)
+
+    assert next(events)["type"] == "tool_start"
+    cancel.cancel()  # Stop, while the turn waits on the CLI
+
+    assert list(events) == []  # neither done nor an error
+    assert process.killed
+
+
+def test_closing_the_stream_kills_the_cli(client, popen):
+    process = hanging_claude(popen)
+    messages = [ChatMessage(role="user", content="Find the PDFs")]
+    events = agent.stream_chat(messages, AccessMode.READ_ONLY, model="claude-opus-4-6")
+
+    assert next(events)["type"] == "tool_start"
+    events.close()
+
+    assert process.killed
+
+
+def test_terminate_process_kills_the_tree_on_windows(popen, monkeypatch):
+    monkeypatch.setattr(agent.os, "name", "nt")
+    process = FakeProcess("", block=True)
+
+    agent._terminate_process(process)
+
+    assert popen.taskkills == [["taskkill", "/F", "/T", "/PID", "4321"]]
+    assert process.killed
+
+
+def test_chat_stream_cli_timeout(client, popen, monkeypatch):
+    process = hanging_claude(popen)
+    monkeypatch.setattr(agent, "CLAUDE_CLI_TIMEOUT_SECONDS", 0.05)
+
+    events = stream(client, "Find the PDFs", model="claude-opus-4-6")
+
+    assert kinds(events) == ["tool_start", "error"]
+    assert events[-1]["status_code"] == 502 and "did not answer within" in events[-1]["detail"]
+    assert process.killed
