@@ -434,16 +434,105 @@ export default function CopilotChat({
 
   return (
     <section aria-label="Ask the knowledge base" className="flex h-full min-h-0 flex-col">
-      <div className="flex items-center justify-between pb-2.5 pl-5 pr-3 pt-3.5">
-        <h2 className="text-base font-semibold">Ask the knowledge base</h2>
-        <div className="flex items-center gap-1.5">
+      <div className="flex items-center justify-between border-b border-border-default px-3.5 py-2">
+        <h2 className="text-xs font-semibold tracking-wide text-text-secondary">Ask the knowledge base</h2>
+        <div className="flex items-center gap-1">
           <PinButton pinned={pinned} onClick={() => onPinnedChange(!pinned)} />
           <IconButton label="Collapse chat" onClick={onCollapse} direction="right" />
         </div>
       </div>
 
-      <div className="flex flex-col gap-2.5 px-5 pb-2.5">
-        <div className="flex items-center gap-2">
+      <div className="flex min-h-0 flex-1 flex-col gap-2.5 overflow-y-auto px-3.5 py-2.5 text-xs">
+        {entries.length === 0 && (
+          <p className="text-xs text-text-muted">
+            Ask about your projects and notes, e.g. “What is overdue on C7801?”. Type <span className="font-mono">/</span>{" "}
+            for your saved commands.
+          </p>
+        )}
+        {entries.map((entry, i) =>
+          entry.role === "user" ? (
+            <div key={i} className="group flex max-w-[85%] flex-col items-end gap-1 self-end">
+              <div className="whitespace-pre-wrap rounded-lg bg-surface-active px-2.5 py-1.5 text-xs leading-relaxed">
+                {entry.prompt ? (
+                  <>
+                    <span className="font-mono text-accent" title={entry.prompt.instruction}>
+                      {entry.prompt.command}
+                    </span>
+                    {entry.prompt.rest && ` ${entry.prompt.rest}`}
+                  </>
+                ) : (
+                  entry.content
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={() => editPrompt(entry)}
+                title="Edit prompt"
+                className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] text-text-muted opacity-60 hover:bg-surface-raised hover:text-text-primary focus-visible:opacity-100 group-hover:opacity-100"
+              >
+                <PencilIcon />
+                Edit
+              </button>
+            </div>
+          ) : (
+            <div key={i} className="flex flex-col gap-2">
+              <div className="rounded-lg border border-border-default bg-surface-raised px-3 py-2 text-xs leading-relaxed text-text-secondary">
+                {entry.toolCalls.length > 0 && <ToolCalls calls={entry.toolCalls} />}
+                <div className="markdown">
+                  <Markdown remarkPlugins={[remarkGfm]}>{entry.content}</Markdown>
+                </div>
+                {entry.written.length > 0 && (
+                  <div className="mt-2.5 flex flex-wrap gap-1.5">
+                    {entry.written.map((path) => (
+                      <Link key={path} to={notePath(spaceId, path)} className="chip" title={path}>
+                        <span className="h-1.5 w-1.5 rounded-full bg-project-p5002" />
+                        Wrote {path.split("/").pop()}
+                      </Link>
+                    ))}
+                  </div>
+                )}
+                <div className="mt-2 flex justify-end">
+                  <button
+                    type="button"
+                    onClick={() => copyReply(i, entry.content)}
+                    title="Copy response"
+                    className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] text-text-muted hover:bg-surface-active hover:text-text-primary"
+                  >
+                    {copiedIndex === i ? <CheckIcon /> : <CopyIcon />}
+                    {copiedIndex === i ? "Copied" : "Copy"}
+                  </button>
+                </div>
+              </div>
+              {entry.edits.map((edit) => (
+                <EditCard
+                  key={edit.path}
+                  edit={edit}
+                  onApprove={() => approve(i, edit)}
+                  onReject={() => setEditStatus(i, edit.path, { state: "rejected" })}
+                />
+              ))}
+            </div>
+          ),
+        )}
+        {sending && (
+          <div className="flex items-center gap-2.5">
+            <p className="text-xs text-text-muted">Thinking…</p>
+            <button
+              type="button"
+              onClick={stop}
+              className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs text-text-muted hover:bg-surface-raised hover:text-text-primary"
+            >
+              <StopIcon />
+              Stop
+            </button>
+          </div>
+        )}
+        {error && <p className="text-xs text-accent">Could not get an answer ({error}).</p>}
+        <div ref={bottomRef} />
+      </div>
+
+      <div className="flex flex-col gap-1.5 border-t border-border-default px-3.5 pb-3 pt-2">
+        <div className="flex flex-wrap items-center gap-1.5">
           <button
             ref={modelButtonRef}
             type="button"
@@ -451,7 +540,7 @@ export default function CopilotChat({
             aria-expanded={modelMenu}
             onClick={() => setModelMenu((open) => !open)}
             disabled={sending || (!model && !models.length)}
-            className="btn min-h-[34px] gap-2 px-3 text-xs font-medium text-text-primary hover:bg-surface-hover"
+            className="btn !min-h-[24px] h-6 gap-1.5 !px-2 !text-[11px] font-medium text-text-primary hover:bg-surface-hover"
             title="Select model"
           >
             <span className={`h-2 w-2 shrink-0 rounded-full ${model ? "bg-project-p5002" : "bg-project-neutral"}`} />
@@ -519,11 +608,11 @@ export default function CopilotChat({
             aria-expanded={effortMenu}
             onClick={() => setEffortMenu((open) => !open)}
             disabled={sending}
-            className="btn min-h-[34px] gap-1.5 px-2.5 text-xs font-medium text-text-primary hover:bg-surface-hover"
+            className="btn !min-h-[24px] h-6 gap-1 !px-2 !text-[11px] font-medium text-text-primary hover:bg-surface-hover"
             title="Reasoning effort"
           >
             <BrainIcon />
-            <span>{effort === "auto" ? "Effort: Auto" : EFFORTS.find((e) => e.value === effort)?.label}</span>
+            <span>{effort === "auto" ? "Auto" : EFFORTS.find((e) => e.value === effort)?.label}</span>
             <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-text-muted">
               <path d="M4 6l4 4 4-4" />
             </svg>
@@ -570,6 +659,19 @@ export default function CopilotChat({
               })}
             </div>
           </Popover>
+          <div className="flex flex-wrap gap-1" role="group" aria-label="Access to notes">
+            {MODES.map(({ value, label }) => (
+              <button
+                key={value}
+                type="button"
+                onClick={() => setMode(value)}
+                aria-pressed={mode === value}
+                className={`${mode === value ? "seg-on" : "seg"} !min-h-[22px] h-[22px] !px-2 !text-[10px]`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
           <button
             type="button"
             onClick={() => {
@@ -577,152 +679,56 @@ export default function CopilotChat({
               setError(null);
             }}
             disabled={sending || entries.length === 0}
-            className="ml-auto rounded-md px-2 py-1 text-xs text-text-muted hover:bg-surface-raised hover:text-text-primary disabled:opacity-40"
+            className="ml-auto rounded px-1.5 py-0.5 text-[11px] text-text-muted hover:bg-surface-raised hover:text-text-primary disabled:opacity-40"
           >
             Clear
           </button>
         </div>
-        <div className="flex flex-wrap gap-1.5" role="group" aria-label="Access to notes">
-          {MODES.map(({ value, label }) => (
-            <button
-              key={value}
-              type="button"
-              onClick={() => setMode(value)}
-              aria-pressed={mode === value}
-              className={`${mode === value ? "seg-on" : "seg"} !min-h-8 !px-3 !text-xs`}
-            >
-              {label}
-            </button>
-          ))}
+        <div className="flex flex-wrap gap-1">
+          <span className="chip !px-2 !py-0.5 !text-[10px]">Space: {space?.name ?? "…"}</span>
+          <span className="chip !px-2 !py-0.5 !text-[10px]">Context: {context.label}</span>
+          <span className="chip !px-2 !py-0.5 !text-[10px]">{MODE_CHIP[mode]}</span>
         </div>
-      </div>
-
-      <div className="flex min-h-0 flex-1 flex-col gap-3.5 overflow-y-auto px-5 pb-3 pt-1">
-        <div className="flex flex-wrap gap-1.5">
-          <span className="chip">Space: {space?.name ?? "…"}</span>
-          <span className="chip">Context: {context.label}</span>
-          <span className="chip">{MODE_CHIP[mode]}</span>
-        </div>
-        {entries.length === 0 && (
-          <p className="text-[15px] text-text-muted">
-            Ask about your projects and notes, e.g. “What is overdue on C7801?”. Type <span className="font-mono">/</span>{" "}
-            for your saved commands.
-          </p>
-        )}
-        {entries.map((entry, i) =>
-          entry.role === "user" ? (
-            <div key={i} className="group flex max-w-[85%] flex-col items-end gap-1 self-end">
-              <div className="whitespace-pre-wrap rounded-xl bg-surface-active px-3.5 py-2.5 text-sm">
-                {entry.prompt ? (
-                  <>
-                    <span className="font-mono text-accent" title={entry.prompt.instruction}>
-                      {entry.prompt.command}
-                    </span>
-                    {entry.prompt.rest && ` ${entry.prompt.rest}`}
-                  </>
-                ) : (
-                  entry.content
-                )}
-              </div>
-              <button
-                type="button"
-                onClick={() => editPrompt(entry)}
-                title="Edit prompt"
-                className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs text-text-muted opacity-60 hover:bg-surface-raised hover:text-text-primary focus-visible:opacity-100 group-hover:opacity-100"
-              >
-                <PencilIcon />
-                Edit
-              </button>
-            </div>
-          ) : (
-            <div key={i} className="flex flex-col gap-2">
-              <div className="rounded-xl border border-border-default bg-surface-raised px-3.5 py-3 text-sm text-text-secondary">
-                {entry.toolCalls.length > 0 && <ToolCalls calls={entry.toolCalls} />}
-                <div className="markdown">
-                  <Markdown remarkPlugins={[remarkGfm]}>{entry.content}</Markdown>
-                </div>
-                {entry.written.length > 0 && (
-                  <div className="mt-2.5 flex flex-wrap gap-1.5">
-                    {entry.written.map((path) => (
-                      <Link key={path} to={notePath(spaceId, path)} className="chip" title={path}>
-                        <span className="h-1.5 w-1.5 rounded-full bg-project-p5002" />
-                        Wrote {path.split("/").pop()}
-                      </Link>
-                    ))}
-                  </div>
-                )}
-                <div className="mt-2 flex justify-end">
-                  <button
-                    type="button"
-                    onClick={() => copyReply(i, entry.content)}
-                    title="Copy response"
-                    className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs text-text-muted hover:bg-surface-active hover:text-text-primary"
-                  >
-                    {copiedIndex === i ? <CheckIcon /> : <CopyIcon />}
-                    {copiedIndex === i ? "Copied" : "Copy"}
-                  </button>
-                </div>
-              </div>
-              {entry.edits.map((edit) => (
-                <EditCard
-                  key={edit.path}
-                  edit={edit}
-                  onApprove={() => approve(i, edit)}
-                  onReject={() => setEditStatus(i, edit.path, { state: "rejected" })}
-                />
-              ))}
-            </div>
-          ),
-        )}
-        {sending && (
-          <div className="flex items-center gap-2.5">
-            <p className="text-[15px] text-text-muted">Thinking…</p>
+        <div className="relative flex items-end gap-1.5">
+          {menuItems.length > 0 && (
+            <CommandMenu items={menuItems} highlighted={highlighted} onPick={pickCommand} onHover={setMenuIndex} />
+          )}
+          <label className="flex-1">
+            <span className="sr-only">Ask a question</span>
+            <textarea
+              ref={inputRef}
+              value={input}
+              onChange={(e) => changeInput(e.target.value)}
+              onKeyDown={handleKeyDown}
+              rows={multiline ? 3 : 1}
+              placeholder="Ask, or type / for commands"
+              className={`block min-h-9 w-full resize-none rounded-lg ${multiline ? "" : "overflow-hidden"} border border-border-light bg-surface-raised px-2.5 py-1.5 text-xs leading-5 placeholder:text-text-muted focus:border-accent/70 focus:outline-none`}
+              aria-autocomplete="list"
+              aria-expanded={menuItems.length > 0}
+            />
+          </label>
+          {sending ? (
             <button
               type="button"
               onClick={stop}
-              className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs text-text-muted hover:bg-surface-raised hover:text-text-primary"
+              className="btn !min-h-9 h-9 gap-1 border-accent/40 bg-accent/10 !px-2.5 !text-xs text-accent hover:bg-accent/20"
             >
               <StopIcon />
               Stop
             </button>
-          </div>
-        )}
-        {error && <p className="text-[15px] text-accent">Could not get an answer ({error}).</p>}
-        <div ref={bottomRef} />
-      </div>
-
-      <div className="relative flex items-end gap-2 border-t border-border-default px-5 pb-[18px] pt-3">
-        {menuItems.length > 0 && (
-          <CommandMenu items={menuItems} highlighted={highlighted} onPick={pickCommand} onHover={setMenuIndex} />
-        )}
-        <label className="flex-1">
-          <span className="sr-only">Ask a question</span>
-          <textarea
-            ref={inputRef}
-            value={input}
-            onChange={(e) => changeInput(e.target.value)}
-            onKeyDown={handleKeyDown}
-            rows={multiline ? 3 : 1}
-            placeholder="Ask, or type / for commands"
-            className={`block min-h-11 w-full resize-none rounded-[10px] ${multiline ? "" : "overflow-hidden"} border border-border-light bg-surface-raised px-3 py-[11px] text-sm leading-5 placeholder:text-text-muted focus:border-accent/70 focus:outline-none`}
-            aria-autocomplete="list"
-            aria-expanded={menuItems.length > 0}
-          />
-        </label>
-        {sending ? (
-          <button
-            type="button"
-            onClick={stop}
-            className="btn min-h-11 gap-1.5 border-accent/40 bg-accent/10 text-accent hover:bg-accent/20"
-          >
-            <StopIcon />
-            Stop
-          </button>
-        ) : (
-          <button type="button" onClick={send} disabled={!input.trim()} className="btn-primary min-h-11">
-            Send
-          </button>
-        )}
+          ) : (
+            <button
+              type="button"
+              onClick={send}
+              disabled={!input.trim()}
+              aria-label="Send"
+              title="Send"
+              className="btn-primary !min-h-9 h-9 w-9 shrink-0 !rounded-full !p-0"
+            >
+              <SendChevronIcon />
+            </button>
+          )}
+        </div>
       </div>
     </section>
   );
@@ -739,6 +745,14 @@ function BrainIcon() {
     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 text-text-muted" aria-hidden>
       <path d="M9.5 3A2.5 2.5 0 0 0 7 5.5v.1A3 3 0 0 0 4.5 10a3 3 0 0 0 .4 5.4A3 3 0 0 0 9.5 19a2.5 2.5 0 0 0 2.5-2.5v-11A2.5 2.5 0 0 0 9.5 3z" />
       <path d="M14.5 3A2.5 2.5 0 0 1 17 5.5v.1a3 3 0 0 1 2.5 4.4 3 3 0 0 1-.4 5.4 3 3 0 0 1-4.6 3.6 2.5 2.5 0 0 1-2.5-2.5" />
+    </svg>
+  );
+}
+
+function SendChevronIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0" aria-hidden>
+      <path d="M6 3.5l4.5 4.5L6 12.5" />
     </svg>
   );
 }
@@ -792,7 +806,7 @@ function CommandMenu({
     <div
       role="listbox"
       aria-label="Saved commands"
-      className="absolute inset-x-5 bottom-full z-20 mb-2 overflow-hidden rounded-xl border border-border-strong bg-surface-active p-1.5 shadow-xl shadow-black/40"
+      className="absolute inset-x-0 bottom-full z-20 mb-1.5 overflow-hidden rounded-xl border border-border-strong bg-surface-active p-1.5 shadow-xl shadow-black/40"
     >
       {items.map((prompt, i) => (
         <button
@@ -809,10 +823,10 @@ function CommandMenu({
           }`}
         >
           <span className="flex w-full items-baseline gap-2">
-            <span className="font-mono text-[15px] text-accent">{prompt.command}</span>
-            <span className="truncate text-[15px] text-text-primary">{prompt.description}</span>
+            <span className="font-mono text-xs text-accent">{prompt.command}</span>
+            <span className="truncate text-xs text-text-primary">{prompt.description}</span>
           </span>
-          <span className="line-clamp-1 text-xs text-text-muted">{prompt.instruction}</span>
+          <span className="line-clamp-1 text-[11px] text-text-muted">{prompt.instruction}</span>
         </button>
       ))}
       <div className="mx-1.5 my-1 h-px bg-border-strong" />
@@ -829,7 +843,7 @@ function CommandMenu({
 
 function ToolCalls({ calls }: { calls: ToolCall[] }) {
   return (
-    <details className="mb-2 text-xs text-text-muted">
+    <details className="mb-2 text-[11px] text-text-muted">
       <summary className="cursor-pointer select-none">
         Used {calls.length} tool{calls.length === 1 ? "" : "s"}
       </summary>
@@ -860,9 +874,9 @@ function EditCard({ edit, onApprove, onReject }: { edit: Edit; onApprove: () => 
   const after = noteText(edit.content, edit.frontmatter);
 
   return (
-    <div className="flex flex-col gap-2 rounded-xl border border-border-light bg-surface-panel px-3.5 py-3 text-[15px] text-text-secondary">
+    <div className="flex flex-col gap-2 rounded-xl border border-border-light bg-surface-panel px-3.5 py-3 text-xs text-text-secondary">
       <div className="flex items-center justify-between gap-2">
-        <span className="font-mono text-[13px] text-text-muted">{isNew ? "NEW NOTE" : "NOTE EDIT"}</span>
+        <span className="font-mono text-[11px] text-text-muted">{isNew ? "NEW NOTE" : "NOTE EDIT"}</span>
         <span className="chip">
           <span className={`h-2 w-2 rounded-full ${EDIT_STATUS[state].dot}`} />
           {EDIT_STATUS[state].label}
@@ -979,7 +993,7 @@ function PinButton({ pinned, onClick }: { pinned: boolean; onClick: () => void }
       aria-pressed={pinned}
       aria-label={label}
       title={label}
-      className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border ${
+      className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-md border ${
         pinned
           ? "border-accent/60 bg-surface-active text-accent"
           : "border-border-light bg-surface-raised text-text-secondary hover:text-text-primary"
