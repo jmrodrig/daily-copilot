@@ -28,8 +28,8 @@ Settings are read from system environment variables and from `backend/.env`
 | `COPILOT_PORT`              | `8000`                   | Used by `python main.py`                          |
 | `COPILOT_OLLAMA_BASE_URL`   | `http://localhost:11434` | Local model endpoint                              |
 | `COPILOT_GANTT_MODEL`       | `gemini/gemini-3.1-pro-preview` | litellm model for the Gantt PDF parser     |
-| `COPILOT_CHAT_MODEL`        | `gemini/gemini-3.1-pro-preview` | litellm model for the Co-pilot chat agent  |
-| `COPILOT_GEMINI_API_KEY`    | unset                    | Needed by the Gantt parser and chat; never hardcode or commit |
+| `COPILOT_CHAT_MODEL`        | `claude-opus-5-5`        | Default Co-pilot chat model (a local CLI one, or a litellm model string) |
+| `COPILOT_GEMINI_API_KEY`    | unset                    | Needed by the Gantt parser and litellm chat models (not the CLI ones); never hardcode or commit |
 | `COPILOT_ANTHROPIC_API_KEY` | unset                    | Optional; never hardcode or commit                |
 
 To get started, copy `.env.example` to `.env` and fill in what you need. `.env` is git-ignored.
@@ -226,20 +226,28 @@ a new note) and `base_hash`, the SHA-256 of the note file when it was proposed.
 `POST /api/notes/apply-edit` commits an edit the user approved: send `space_id`, `path`, `content`,
 `frontmatter` and `base_hash` from the proposal. If the note changed since then (or a
 "new" note now exists) it returns 409 and writes nothing. The write is recorded in
-`history` with source `copilot_agent_approved`. Without `COPILOT_GEMINI_API_KEY`,
-`/api/chat` returns 503; a failing model call returns 502.
+`history` with source `copilot_agent_approved`. For a litellm model (one on neither
+local CLI), `/api/chat` returns 503 without `COPILOT_GEMINI_API_KEY`; a failing model
+call returns 502.
 
 Optional `model` picks the model and `reasoning_effort` (`"low"`, `"medium"` or
 `"high"`) how hard it thinks; left out, the model uses its own default. A model that
-does not support an effort level answers without one. `GET /api/models` lists the
-configured model, the Claude CLI models and the Gemini models.
+does not support an effort level answers without one (the Gemini CLI takes none).
+`GET /api/models` lists the configured model, the Claude CLI models and the Gemini CLI
+models; nothing is fetched from the Gemini API.
 
 The agent can also research online: `search_web` (DuckDuckGo results: title, URL,
 snippet) and `fetch_web_page` (the readable text of an http(s) page, up to 20,000
 characters).
 
-### Claude CLI models (no API key)
+### Local CLI models (no API key)
 
+Every model in the chat's picker runs on a local CLI signed in with the user's own
+account, never on an API key.
+
+#### Claude CLI
+
+`claude-opus-5-5`, `claude-sonnet-5-5` (the CLI's `opus` and `sonnet` aliases),
 `claude-opus-4-6`, `claude-sonnet-4-6` and `claude-haiku-4-5` run the turn on the local
 `claude` CLI (Claude Code), signed in with the user's Claude subscription; no API key is
 used (`ANTHROPIC_API_KEY` is removed from its environment) and `COPILOT_GEMINI_API_KEY`
@@ -251,6 +259,21 @@ and its existing local folders. It writes notes by replying with
 content); the server applies each block in the access mode like `write_note`, removes it
 from the reply and lists it in `tool_calls`. Without `claude` on the `PATH`,
 `/api/chat` returns 503; a CLI failure returns 502.
+
+#### Gemini CLI
+
+`gemini-3.1-pro-preview`, `gemini-3-pro-preview`, `gemini-3.8-flash`, `gemini-3.5-flash`,
+`gemini-3.5-flash-lite`, `gemini-2.5-pro`, `gemini-2.5-flash` and `gemini-2.5-flash-lite`
+(also with a `gemini/` prefix) run the turn on the local `gemini` CLI
+(`@google/gemini-cli`), signed in with the user's Google account: `GEMINI_API_KEY` and
+`GOOGLE_API_KEY` are removed from its environment and `GOOGLE_GENAI_USE_GCA=true` forces
+the Google login. It gets the same prompt on stdin and runs as
+`gemini -p … -m <model> -o stream-json --skip-trust --yolo --include-directories <content/>`
+(plus each existing local folder), using its own `read_file`, `glob`, `grep_search`,
+`list_directory`, `google_web_search` and `web_fetch` tools. Notes are written with the
+same `<write_note>` blocks. Without `gemini` on the `PATH`, or before the one-time
+Google sign-in (run `gemini` in a terminal and choose Login with Google), `/api/chat`
+returns 503; a CLI failure returns 502.
 
 A space's configured local folders (`rag_folders`) are only named in the system prompt;
 the agent crawls them with `list_local_directory` and `read_local_file` when a command

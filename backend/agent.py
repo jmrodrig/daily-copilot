@@ -12,9 +12,10 @@ The tools the model may call:
   (design data such as PDFs, CAD and Maxsurf files outside the notes; see `local_files`).
 - `search_web` / `fetch_web_page`: search the live web (DuckDuckGo) and read web pages, for online research.
 
-Models named in `CLAUDE_CLI_MODELS` don't go through litellm: the turn runs on the local `claude` CLI
-(Claude Code, signed in with the user's subscription, no API key) with its own Read/Glob/Grep/WebSearch/WebFetch
-tools, and writes notes by putting `<write_note path="...">` blocks in its reply (see `_run_claude_cli`).
+Models named in `CLAUDE_CLI_MODELS` and `GEMINI_CLI_MODELS` don't go through litellm: the turn runs on the
+local `claude` CLI (Claude Code, signed in with the user's subscription) or the local `gemini` CLI (signed in with
+the user's Google account), never with an API key, using the CLI's own file and web tools. Both write notes by
+putting `<write_note path="...">` blocks in their reply (see `_run_claude_cli` and `_run_gemini_cli`).
 
 Context injected into the system prompt (see `space_context`):
 
@@ -36,7 +37,6 @@ import os
 import re
 import shutil
 import subprocess
-import time
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Sequence
@@ -68,31 +68,33 @@ _SNIPPET_RADIUS = 80
 REFERENCE_LIMIT = 40_000  # characters of Reference Data notes put into the system prompt
 CONTEXT_TASK_LIMIT = 50  # project tasks put into the system prompt
 
-# The Gemini models the chat can use: listed from the API (cached for a while), or these if it can't be reached.
-GEMINI_MODELS_URL = "https://generativelanguage.googleapis.com/v1beta/models"
-FALLBACK_MODELS = (
-    "gemini-3.1-pro-preview",
-    "gemini-2.5-pro",
-    "gemini-2.5-flash",
-    "gemini-2.5-flash-lite",
-    "gemini-2.0-flash",
-    "gemini-2.0-flash-lite",
-    "gemini-1.5-pro",
-    "gemini-1.5-flash",
-)
-_MODELS_TIMEOUT_SECONDS = 5
-_MODELS_CACHE_SECONDS = 600
-_models_cache: tuple[float, list[str]] | None = None
-
-# Claude models run on the local `claude` CLI (the user's Claude subscription, no API key): chat name -> CLI alias.
+# Claude models run on the local `claude` CLI (the user's Claude subscription, no API key): chat name -> CLI model.
 CLAUDE_CLI_MODELS: dict[str, str] = {
-    "claude-opus-4-6": "opus",
-    "claude-sonnet-4-6": "sonnet",
+    "claude-opus-5-5": "opus",
+    "claude-sonnet-5-5": "sonnet",
+    "claude-opus-4-6": "claude-opus-4-6",
+    "claude-sonnet-4-6": "claude-sonnet-4-6",
     "claude-haiku-4-5": "haiku",
 }
 CLAUDE_CLI_TOOLS = "Read,Glob,Grep,WebSearch,WebFetch"
 CLAUDE_CLI_TIMEOUT_SECONDS = 900
-CLI_TASK_LIMIT = 200  # open tasks put into the Claude CLI prompt
+CLI_TASK_LIMIT = 200  # open tasks put into the CLI prompt
+
+# Gemini models run on the local `gemini` CLI (the user's Google sign-in, no API key): chat name -> CLI model.
+GEMINI_CLI_MODELS: dict[str, str] = {
+    "gemini-3.1-pro-preview": "gemini-3.1-pro-preview",
+    "gemini-3-pro-preview": "gemini-3-pro-preview",
+    "gemini-3.8-flash": "gemini-3.8-flash",
+    "gemini-3.5-flash": "gemini-3.5-flash",
+    "gemini-3.5-flash-lite": "gemini-3.5-flash-lite",
+    "gemini-2.5-pro": "gemini-2.5-pro",
+    "gemini-2.5-flash": "gemini-2.5-flash",
+    "gemini-2.5-flash-lite": "gemini-2.5-flash-lite",
+}
+GEMINI_CLI_TIMEOUT_SECONDS = 900
+GEMINI_CLI_PROMPT = "Follow the system instructions and answer the latest user message in the conversation above."
+# What the Gemini CLI prints when it has no usable Google sign-in.
+_GEMINI_AUTH_MARKERS = ("Authentication cancelled", "Opening authentication page", "Please set an Auth method")
 
 # Online research: DuckDuckGo's HTML results page, and plain page fetches.
 WEB_SEARCH_URL = "https://html.duckduckgo.com/html/"
@@ -690,74 +692,35 @@ class _Turn:
 # --- Models -------------------------------------------------------------------
 
 
-# Gemini models that generate content but aren't for chat (speech, images, robotics, test models...).
-_NON_CHAT_SUBSTRINGS = (
-    "-tts",
-    "-transcribe",
-    "-image",
-    "-robotics",
-    "-computer-use",
-    "banana",
-    "embedding",
-    "aqa",
-)
-
-
-def _fetch_gemini_models(api_key: str) -> list[str]:
-    """The names (without `models/`) of the Gemini chat models that can generate content, from the Gemini API."""
-    names, page_token = [], ""
-    while True:
-        query = {"key": api_key, "pageSize": 1000, **({"pageToken": page_token} if page_token else {})}
-        with urllib.request.urlopen(
-            f"{GEMINI_MODELS_URL}?{urllib.parse.urlencode(query)}", timeout=_MODELS_TIMEOUT_SECONDS
-        ) as response:
-            body = json.load(response)
-        for model in body.get("models", []):
-            name = str(model.get("name", "")).removeprefix("models/")
-            if (
-                name.startswith("gemini")
-                and "generateContent" in model.get("supportedGenerationMethods", [])
-                and not any(sub in name.lower() for sub in _NON_CHAT_SUBSTRINGS)
-            ):
-                names.append(name)
-        page_token = body.get("nextPageToken") or ""
-        if not page_token:
-            return names
-
-
-def list_models(settings: Settings | None = None) -> list[str]:
-    """The models the chat can use (bare names, e.g. `gemini-2.5-pro`): the configured one first, then the
-    Claude CLI models, then the Gemini ones.
-
-    Falls back to `FALLBACK_MODELS` when there is no API key or the API can't be reached.
-    """
-    global _models_cache
-    settings = settings or get_settings()
-    names: list[str] = []
-    if _models_cache is not None and time.monotonic() - _models_cache[0] < _MODELS_CACHE_SECONDS:
-        names = _models_cache[1]
-    elif settings.gemini_api_key is not None:
-        try:
-            names = _fetch_gemini_models(settings.gemini_api_key.get_secret_value())
-        except Exception:  # noqa: BLE001 - any failure (network, HTTP error, bad JSON) means the fallback list
-            names = []
-        if names:
-            _models_cache = (time.monotonic(), names)
-    configured = settings.chat_model.removeprefix("gemini/")
-    return list(dict.fromkeys([configured, *CLAUDE_CLI_MODELS, *(names or FALLBACK_MODELS)]))
-
-
-def _cli_model_name(model: str | None) -> str:
-    return (model or "").strip().removeprefix("claude/").removeprefix("models/")
+def bare_model_name(model: str | None) -> str:
+    """A model name without its provider prefixes (`gemini/`, `claude/`, `models/`), e.g. `gemini-2.5-pro`."""
+    name = (model or "").strip()
+    while name.startswith(("gemini/", "claude/", "models/")):
+        name = name.split("/", 1)[1]
+    return name
 
 
 def is_claude_cli_model(model: str | None) -> bool:
-    """Whether `model` (e.g. `claude-opus-4-6` or `claude/claude-opus-4-6`) runs on the local Claude CLI."""
-    return _cli_model_name(model) in CLAUDE_CLI_MODELS
+    """Whether `model` (e.g. `claude-opus-5-5` or `claude/claude-opus-4-6`) runs on the local Claude CLI."""
+    return bare_model_name(model) in CLAUDE_CLI_MODELS
+
+
+def is_gemini_cli_model(model: str | None) -> bool:
+    """Whether `model` (e.g. `gemini-2.5-pro` or `gemini/gemini-2.5-pro`) runs on the local Gemini CLI."""
+    return bare_model_name(model) in GEMINI_CLI_MODELS
+
+
+def list_models(settings: Settings | None = None) -> list[str]:
+    """The models the chat can use (bare names): the configured one first, then the Claude CLI models, then the
+    Gemini CLI ones. They all run on a local CLI, so no API key is needed to list or use them."""
+    settings = settings or get_settings()
+    configured = bare_model_name(settings.chat_model)
+    return list(dict.fromkeys([configured, *CLAUDE_CLI_MODELS, *GEMINI_CLI_MODELS]))
 
 
 def chat_model_id(model: str | None, settings: Settings) -> str:
-    """The litellm model string for a model picked in the chat (always a Gemini one), or the configured default."""
+    """The litellm model string for a model picked in the chat that runs on neither CLI (a Gemini API one), or
+    the configured default."""
     if not model or not model.strip():
         return settings.chat_model
     model = model.strip().removeprefix("models/")
@@ -802,7 +765,7 @@ def _fallback_reply(summaries: Sequence[ToolCallSummary]) -> str:
     return "The model stopped without writing an answer. It had looked at:\n" + "\n".join(lines)
 
 
-# --- Claude CLI ---------------------------------------------------------------
+# --- Local CLIs (Claude, Gemini) ----------------------------------------------
 
 
 _CLI_TOOLS_GUIDE = """
@@ -814,6 +777,18 @@ with Glob and Grep and read them with Read, instead of `search_notes` and `read_
 Read with absolute paths.
 - Online research (instead of `search_web`, `fetch_web_page`): WebSearch and WebFetch. Cite the URLs you relied on.
 - The space's open tasks are listed below (instead of `list_tasks`)."""
+
+_GEMINI_TOOLS_GUIDE = """
+Tools in this session: you run inside the Gemini CLI with its own tools, not the tools named above. Use only its \
+read and research tools, mapped as follows:
+- The space's notes are the markdown files under `{notes_dir}` (paths in this prompt are relative to it): find them \
+with glob and grep_search and read them with read_file, instead of `search_notes` and `read_note`.
+- Local design files (instead of `search_local_files`, `list_local_directory`, `read_local_file`): glob, \
+grep_search, list_directory and read_file with absolute paths.
+- Online research (instead of `search_web`, `fetch_web_page`): google_web_search and web_fetch. Cite the URLs you \
+relied on.
+- The space's open tasks are listed below (instead of `list_tasks`).
+- Never use write_file, replace or run_shell_command."""
 
 _CLI_WRITE_PROTOCOL = """
 - Do NOT use Write or Edit tools on files directly. To create or update a note in this space, include a \
@@ -843,9 +818,15 @@ _FRONTMATTER = re.compile(r"\A---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|\Z)", re
 
 
 def _cli_prompt(
-    messages: Sequence[ChatMessage], mode: AccessMode, turn: "_Turn", space_id: int, note_path: str | None
+    messages: Sequence[ChatMessage],
+    mode: AccessMode,
+    turn: "_Turn",
+    space_id: int,
+    note_path: str | None,
+    tools_guide: str = _CLI_TOOLS_GUIDE,
 ) -> str:
-    """Everything the CLI gets on stdin: the system prompt, the space's notes folder and tasks, and the chat."""
+    """Everything a CLI gets on stdin: the system prompt (with `tools_guide`, how the CLI's own tools stand in for
+    ours), the space's notes folder and tasks, and the chat."""
     space_name, context = space_context(space_id, note_path)
     system = SYSTEM_PROMPT.format(
         today=date.today().isoformat(), write_rules=_CLI_WRITE_RULES[mode], space_name=space_name, context=context
@@ -856,12 +837,20 @@ def _cli_prompt(
         task_lines = [*task_lines[:CLI_TASK_LIMIT], f"… and {len(tasks) - CLI_TASK_LIMIT} more."]
     conversation = "\n\n".join(f"<{m.role.value}>\n{m.content}\n</{m.role.value}>" for m in messages)
     return (
-        f"<system>\n{system}\n{_CLI_TOOLS_GUIDE.format(notes_dir=turn.root.resolve())}\n</system>\n\n"
+        f"<system>\n{system}\n{tools_guide.format(notes_dir=turn.root.resolve())}\n</system>\n\n"
         f"<open_tasks today=\"{date.today().isoformat()}\" count=\"{len(tasks)}\">\n"
         + ("\n".join(task_lines) or "(no open tasks)")
         + f"\n</open_tasks>\n\n<conversation>\n{conversation}\n</conversation>\n\n"
         "Answer the last user message of the conversation."
     )
+
+
+def _cli_folders(turn: "_Turn") -> list[str]:
+    """The space's local RAG folders that exist, opened to a CLI next to the notes folder."""
+    with database.SessionLocal() as session:
+        space = session.get(Space, turn.space_id)
+        rag_folders = clean_rag_folders(space.rag_folders) if space else []
+    return [folder for folder in rag_folders if Path(folder).is_dir()]
 
 
 def _cli_command(claude_bin: str, model: str, turn: "_Turn", reasoning_effort: str | None) -> list[str]:
@@ -880,12 +869,8 @@ def _cli_command(claude_bin: str, model: str, turn: "_Turn", reasoning_effort: s
         "--add-dir",
         str(turn.root.resolve()),
     ]
-    with database.SessionLocal() as session:
-        space = session.get(Space, turn.space_id)
-        rag_folders = clean_rag_folders(space.rag_folders) if space else []
-    for folder in rag_folders:
-        if Path(folder).is_dir():
-            cmd += ["--add-dir", folder]
+    for folder in _cli_folders(turn):
+        cmd += ["--add-dir", folder]
     if reasoning_effort in ("low", "medium", "high"):
         cmd += ["--effort", reasoning_effort]
     return cmd
@@ -1011,6 +996,114 @@ def _run_claude_cli(
     )
 
 
+def _gemini_command(gemini_bin: str, model: str, turn: "_Turn") -> list[str]:
+    cmd = [
+        gemini_bin,
+        "-p",
+        GEMINI_CLI_PROMPT,
+        "-m",
+        GEMINI_CLI_MODELS[model],
+        "-o",
+        "stream-json",
+        "--skip-trust",
+        "--yolo",
+        "--include-directories",
+        str(turn.root.resolve()),
+    ]
+    for folder in _cli_folders(turn):
+        cmd += ["--include-directories", folder]
+    return cmd
+
+
+def _gemini_env() -> dict[str, str]:
+    """The Gemini CLI's environment: no API keys, and Google sign-in forced, so it never bills an API key."""
+    env = {k: v for k, v in os.environ.items() if k not in ("GEMINI_API_KEY", "GOOGLE_API_KEY")}
+    env["GOOGLE_GENAI_USE_GCA"] = "true"
+    return env
+
+
+def _parse_gemini_stream(stdout: str) -> tuple[str, str | None, list[ToolCallSummary]]:
+    """(reply text, error message if any, the tool calls made) from the Gemini CLI's stream-json output."""
+    calls: dict[str, tuple[str, dict[str, Any], bool]] = {}
+    parts: list[str] = []
+    error = None
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        kind = event.get("type")
+        if kind == "message" and event.get("role") == "assistant":
+            # Delta messages are chunks of one reply, in order.
+            if isinstance(event.get("content"), str):
+                parts.append(event["content"])
+        elif kind == "tool_use":
+            arguments = event.get("parameters") if isinstance(event.get("parameters"), dict) else {}
+            calls[str(event.get("tool_id"))] = (str(event.get("tool_name")), arguments, True)
+        elif kind == "tool_result" and str(event.get("tool_id")) in calls:
+            name, arguments, _ok = calls[str(event.get("tool_id"))]
+            calls[str(event.get("tool_id"))] = (name, arguments, event.get("status") != "error")
+        elif kind == "error":
+            error = str(event.get("message") or "unknown error")
+        elif kind == "result" and event.get("status") == "error":
+            detail = event.get("error")
+            error = str((detail.get("message") if isinstance(detail, dict) else detail) or error or "unknown error")
+    return "".join(parts), error, [_summary(name, arguments, ok) for name, arguments, ok in calls.values()]
+
+
+def _run_gemini_cli(
+    messages: Sequence[ChatMessage],
+    mode: AccessMode,
+    *,
+    space_id: int,
+    note_path: str | None,
+    model: str,
+) -> ChatResponse:
+    """Answer on the local `gemini` CLI (`model` is a `GEMINI_CLI_MODELS` key), signed in with the user's Google
+    account: API keys are kept out of its environment. As with the Claude CLI, the prompt goes on stdin."""
+    gemini_bin = shutil.which("gemini")
+    if gemini_bin is None:
+        raise AgentNotConfiguredError("Gemini CLI (`gemini`) is not installed or not on PATH")
+    turn = _Turn(mode, space_id)
+    prompt = _cli_prompt(messages, mode, turn, space_id, note_path, _GEMINI_TOOLS_GUIDE)
+    try:
+        process = subprocess.run(
+            _gemini_command(gemini_bin, model, turn),
+            input=prompt,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            cwd=turn.root,
+            env=_gemini_env(),
+            timeout=GEMINI_CLI_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise AgentError(f"The Gemini CLI did not answer within {GEMINI_CLI_TIMEOUT_SECONDS} seconds") from exc
+    except OSError as exc:
+        raise AgentError(f"The Gemini CLI could not be started: {exc}") from exc
+
+    stdout, stderr = process.stdout or "", process.stderr or ""
+    if any(marker in stdout or marker in stderr for marker in _GEMINI_AUTH_MARKERS):
+        raise AgentNotConfiguredError(
+            "Gemini CLI needs a one-time Google sign-in: run `gemini` in a terminal and choose Login with Google."
+        )
+    reply, error, summaries = _parse_gemini_stream(stdout)
+    if error or process.returncode != 0:
+        detail = (error or stderr.strip() or f"exit code {process.returncode}")[-2000:]
+        raise AgentError(f"The Gemini CLI failed: {detail}")
+    reply, writes = _apply_write_blocks(reply, turn)  # refused in read only mode, with a note in the reply
+    summaries += writes
+    return ChatResponse(
+        reply=reply.strip() or _fallback_reply(summaries),
+        proposed_edits=list(turn.proposed.values()),
+        written_paths=turn.written,
+        tool_calls=summaries,
+    )
+
+
 def run_chat(
     messages: Sequence[ChatMessage],
     access_mode: AccessMode,
@@ -1023,19 +1116,24 @@ def run_chat(
 ) -> ChatResponse:
     """Answer the last user message in `space_id`, calling tools as the model asks, for up to
     `MAX_TOOL_ROUNDS` rounds. `note_path` is the note the user has open, if any; `model` the model picked
-    in the chat (else `settings.chat_model`; a Claude CLI model runs on the local `claude` CLI instead);
+    in the chat (else `settings.chat_model`; a Claude or Gemini CLI model runs on the local `claude` or `gemini`
+    CLI instead);
     `reasoning_effort` ("low", "medium" or "high") how hard it thinks, left to the model if not given or not
     supported."""
     settings = settings or get_settings()
-    picked = model if model and model.strip() else settings.chat_model
-    if is_claude_cli_model(picked):
+    chosen = model.strip() if model and model.strip() else settings.chat_model
+    if is_claude_cli_model(chosen):
         return _run_claude_cli(
             messages,
             AccessMode(access_mode),
             space_id=space_id,
             note_path=note_path,
-            model=_cli_model_name(picked),
+            model=bare_model_name(chosen),
             reasoning_effort=reasoning_effort,
+        )
+    if is_gemini_cli_model(chosen):
+        return _run_gemini_cli(
+            messages, AccessMode(access_mode), space_id=space_id, note_path=note_path, model=bare_model_name(chosen)
         )
     if settings.gemini_api_key is None:
         raise AgentNotConfiguredError("COPILOT_GEMINI_API_KEY is not set; add it to backend/.env")

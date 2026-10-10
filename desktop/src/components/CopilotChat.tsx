@@ -55,11 +55,12 @@ const EFFORT_KEY = "copilot_reasoning_effort";
 const CONTEXT_LINES = 3;
 const COMMAND_RE = /^(\/[a-z0-9][a-z0-9_-]*)(?:\s+([\s\S]*))?$/i;
 
-// The model picker's sections: Claude models run on the local `claude` CLI (no API key), the rest on the Gemini API.
+// The model picker's sections: Claude models run on the local `claude` CLI and Gemini ones on the local `gemini`
+// CLI, both signed in with the user's account (no API key).
 const isClaudeModel = (name: string) => name.startsWith("claude-");
-const MODEL_GROUPS: { label: string; badge?: string; matches: (name: string) => boolean }[] = [
+const MODEL_GROUPS: { label: string; badge: string; matches: (name: string) => boolean }[] = [
   { label: "Claude Agent", badge: "Local CLI · No API", matches: isClaudeModel },
-  { label: "Gemini API Models", matches: (name) => !isClaudeModel(name) },
+  { label: "Gemini Agent", badge: "Local CLI · No API", matches: (name) => !isClaudeModel(name) },
 ];
 
 /** A litellm model string without its provider (`gemini/gemini-2.5-pro` -> `gemini-2.5-pro`). */
@@ -478,7 +479,7 @@ export default function CopilotChat({
                     }`}
                   >
                     <span>{group.label}</span>
-                    {group.badge && <span className="text-[10px] font-normal normal-case tracking-normal">{group.badge}</span>}
+                    <span className="text-[10px] font-normal normal-case tracking-normal text-project-p5002">{group.badge}</span>
                   </div>
                   <div className="py-1">
                     {names.map((name) => {

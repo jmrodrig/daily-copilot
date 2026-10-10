@@ -513,83 +513,43 @@ def test_run_chat_system_prompt_reflects_mode(settings, model, notes_dir):
 # --- Models -------------------------------------------------------------------
 
 
-@pytest.fixture
-def no_models_cache(monkeypatch):
-    monkeypatch.setattr(agent, "_models_cache", None)
-
-
-def test_list_models_from_the_api(client, monkeypatch, no_models_cache):
-    keys = []
-
-    def fetch(api_key):
-        keys.append(api_key)
-        return ["gemini-2.5-pro", "gemini-2.5-flash", "test-model"]
-
-    monkeypatch.setattr(agent, "_fetch_gemini_models", fetch)
+def test_list_models_lists_the_cli_models(client, monkeypatch):
+    # Nothing is fetched from the Gemini API.
+    monkeypatch.setattr(agent.urllib.request, "urlopen", lambda *args, **kwargs: pytest.fail("no API call"))
 
     response = client.get("/api/models")
 
     assert response.status_code == 200
-    # The configured one first, then the Claude CLI models.
-    assert response.json() == ["test-model", *agent.CLAUDE_CLI_MODELS, "gemini-2.5-pro", "gemini-2.5-flash"]
-    assert keys == ["test-key"]
-    client.get("/api/models")
-    assert keys == ["test-key"]  # cached
+    # The configured one first, then the Claude CLI models, then the Gemini CLI ones.
+    assert response.json() == ["test-model", *agent.CLAUDE_CLI_MODELS, *agent.GEMINI_CLI_MODELS]
+    assert response.json()[1:3] == ["claude-opus-5-5", "claude-sonnet-5-5"]
 
 
-def test_fetch_gemini_models_keeps_only_chat_models(monkeypatch):
-    names = [
-        "gemini-2.5-pro",
-        "gemini-2.5-flash",
-        "gemini-2.5-flash-preview-tts",
-        "gemini-2.5-flash-image",
-        "gemini-robotics-er-1.5-preview",
-        "gemini-2.5-computer-use-preview",
-        "gemini-embedding-001",
-        "gemini-live-transcribe",
-        "nano-banana",
-        "imagen-4.0-generate-001",
-    ]
-    body = {"models": [{"name": f"models/{n}", "supportedGenerationMethods": ["generateContent"]} for n in names]}
-    body["models"].append({"name": "models/gemini-1.5-flash", "supportedGenerationMethods": ["countTokens"]})
-
-    class Response:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            return False
-
-        def read(self):
-            return json.dumps(body).encode()
-
-    monkeypatch.setattr(agent.urllib.request, "urlopen", lambda url, timeout: Response())
-
-    assert agent._fetch_gemini_models("key") == ["gemini-2.5-pro", "gemini-2.5-flash"]
-
-
-def test_list_models_falls_back_when_the_api_fails(client, monkeypatch, no_models_cache):
-    def fetch(api_key):
-        raise OSError("offline")
-
-    monkeypatch.setattr(agent, "_fetch_gemini_models", fetch)
-
-    models = client.get("/api/models").json()
-
-    assert models[0] == "test-model"
-    assert "gemini-2.5-pro" in models and "gemini-2.5-flash" in models
-
-
-def test_list_models_without_api_key(settings, monkeypatch, no_models_cache):
+def test_list_models_without_api_key_and_a_cli_default(settings):
     settings.gemini_api_key = None
-    monkeypatch.setattr(agent, "_fetch_gemini_models", lambda api_key: pytest.fail("no key, no call"))
+    settings.chat_model = "gemini/gemini-2.5-pro"
 
-    assert agent.list_models(settings)[1:] == [*agent.CLAUDE_CLI_MODELS, *agent.FALLBACK_MODELS]
+    models = agent.list_models(settings)
+
+    assert models == ["gemini-2.5-pro", *agent.CLAUDE_CLI_MODELS, *[m for m in agent.GEMINI_CLI_MODELS if m != "gemini-2.5-pro"]]
+
+
+def test_default_chat_model_is_claude_opus_5_5():
+    assert Settings(_env_file=None).chat_model == "claude-opus-5-5"
+
+
+def test_bare_model_name():
+    assert agent.bare_model_name(" gemini/gemini-2.5-pro ") == "gemini-2.5-pro"
+    assert agent.bare_model_name("claude/claude-opus-5-5") == "claude-opus-5-5"
+    assert agent.bare_model_name("models/gemini-3-pro-preview") == "gemini-3-pro-preview"
+    assert agent.bare_model_name("gemini/models/gemini-2.5-flash") == "gemini-2.5-flash"
+    assert agent.bare_model_name(None) == ""
 
 
 @pytest.mark.parametrize(
     ("picked", "used"),
-    [(None, "gemini/test-model"), ("gemini-2.5-flash", "gemini/gemini-2.5-flash"), ("gemini/gemini-2.0-flash", "gemini/gemini-2.0-flash")],
+    # Models that run on neither CLI go to litellm.
+    [(None, "gemini/test-model"), ("gemini-2.0-flash", "gemini/gemini-2.0-flash"), ("gemini/gemini-1.5-pro", "gemini/gemini-1.5-pro")],
 )
 def test_chat_uses_the_picked_model(client, model, picked, used):
     model.script.append(reply("ok"))
@@ -794,6 +754,7 @@ def cli_chat(client, text, mode="ask_first", model_name="claude-opus-4-6", **ext
 
 
 def test_is_claude_cli_model():
+    assert agent.is_claude_cli_model("claude-opus-5-5")
     assert agent.is_claude_cli_model("claude-opus-4-6")
     assert agent.is_claude_cli_model("claude/claude-haiku-4-5")
     assert agent.is_claude_cli_model("models/claude-sonnet-4-6")
@@ -811,7 +772,7 @@ def test_claude_cli_needs_no_api_key(client, settings, model, cli, notes_dir):
         )
     )
 
-    response = cli_chat(client, "Research ISO 12215", model_name="claude-sonnet-4-6", reasoning_effort="high")
+    response = cli_chat(client, "Research ISO 12215", model_name="claude-sonnet-5-5", reasoning_effort="high")
 
     assert response.status_code == 200
     body = response.json()
@@ -952,8 +913,226 @@ def test_claude_cli_without_result(client, monkeypatch):
     assert "boom" in response.json()["detail"]
 
 
-@pytest.mark.parametrize("picked", ["claude-opus-4-6", "claude/claude-sonnet-4-6"])
+@pytest.mark.parametrize("picked", ["claude-opus-5-5", "claude-opus-4-6", "claude/claude-sonnet-4-6"])
 def test_chat_accepts_claude_models(client, cli, picked):
     cli.script.append(cli_result("ok"))
 
     assert cli_chat(client, "Hi", model_name=picked).status_code == 200
+
+
+def test_claude_cli_passes_full_ids_for_older_models(client, cli):
+    cli.script.append(cli_result("ok"))
+
+    assert cli_chat(client, "Hi", model_name="claude-opus-4-6").status_code == 200
+    cmd = cli.runs[0]["cmd"]
+    assert cmd[cmd.index("--model") + 1] == "claude-opus-4-6"
+
+
+# --- Gemini CLI ---------------------------------------------------------------
+
+
+def gemini_events(text_chunks, tools=(), result_status="success"):
+    """The `gemini -o stream-json` output for a turn: tool calls, then the reply streamed in delta chunks."""
+    events = [{"type": "init", "session_id": "s1", "model": "gemini-2.5-pro"}]
+    for tool_id, name, parameters, status in tools:
+        events.append({"type": "tool_use", "tool_name": name, "tool_id": tool_id, "parameters": parameters})
+        events.append({"type": "tool_result", "tool_id": tool_id, "status": status, "output": "..."})
+    for chunk in text_chunks:
+        events.append({"type": "message", "role": "assistant", "content": chunk, "delta": True})
+    events.append({"type": "result", "status": result_status, "stats": {}})
+    return "\n".join(json.dumps(e) for e in events) + "\n"
+
+
+@pytest.fixture
+def gemini(monkeypatch):
+    """Replace the `gemini` CLI with a script of (stdout, stderr, returncode), so tests never run the real one."""
+    script, runs = [], []
+    monkeypatch.setattr(agent.shutil, "which", lambda name: "C:/npm/gemini.cmd" if name == "gemini" else None)
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-should-not-leak")
+    monkeypatch.setenv("GOOGLE_API_KEY", "google-should-not-leak")
+
+    def run(cmd, **kwargs):
+        runs.append({"cmd": cmd, **kwargs})
+        stdout, stderr, returncode = script.pop(0)
+        return SimpleNamespace(stdout=stdout, stderr=stderr, returncode=returncode)
+
+    monkeypatch.setattr(agent.subprocess, "run", run)
+    return SimpleNamespace(script=script, runs=runs)
+
+
+def test_is_gemini_cli_model():
+    assert agent.is_gemini_cli_model("gemini-2.5-pro")
+    assert agent.is_gemini_cli_model("gemini/gemini-3.1-pro-preview")
+    assert agent.is_gemini_cli_model("models/gemini-3.5-flash-lite")
+    assert not agent.is_gemini_cli_model("gemini-2.0-flash")
+    assert not agent.is_gemini_cli_model("claude-opus-5-5")
+    assert not agent.is_gemini_cli_model(None)
+
+
+def test_gemini_env_strips_api_keys_and_forces_google_sign_in(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "x")
+    monkeypatch.setenv("GOOGLE_API_KEY", "y")
+    monkeypatch.setenv("GOOGLE_GENAI_USE_GCA", "false")
+
+    env = agent._gemini_env()
+
+    assert "GEMINI_API_KEY" not in env and "GOOGLE_API_KEY" not in env
+    assert env["GOOGLE_GENAI_USE_GCA"] == "true"
+
+
+def test_parse_gemini_stream():
+    stdout = (
+        "not json\n"
+        + gemini_events(
+            ["ISO 12215-5 ", "covers scantlings."],
+            [("t1", "google_web_search", {"query": "ISO 12215"}, "success"), ("t2", "read_file", {"path": "x"}, "error")],
+        )
+        + json.dumps({"type": "message", "role": "user", "content": "ignored"})
+    )
+
+    reply, error, calls = agent._parse_gemini_stream(stdout)
+
+    assert reply == "ISO 12215-5 covers scantlings."
+    assert error is None
+    assert [(c.name, c.arguments, c.ok) for c in calls] == [
+        ("google_web_search", {"query": "ISO 12215"}, True),
+        ("read_file", {"path": "x"}, False),
+    ]
+
+
+def test_parse_gemini_stream_errors():
+    _reply, error, _calls = agent._parse_gemini_stream(
+        json.dumps({"type": "result", "status": "error", "error": {"type": "Error", "message": "Quota exceeded"}})
+    )
+    assert error == "Quota exceeded"
+    _reply, error, _calls = agent._parse_gemini_stream(json.dumps({"type": "error", "message": "Model not found"}))
+    assert error == "Model not found"
+
+
+def test_gemini_cli_needs_no_api_key(client, settings, model, gemini, notes_dir, tmp_path):
+    settings.gemini_api_key = None
+    rag = tmp_path / "Design data"
+    rag.mkdir()
+    client.put("/api/spaces/1", json={"rag_folders": [str(rag), str(tmp_path / "missing")]})
+    gemini.script.append(
+        (gemini_events(["Hull ", "is GRP."], [("t1", "read_file", {"absolute_path": "C:/x.md"}, "success")]), "", 0)
+    )
+    payload = {
+        "messages": [{"role": "user", "content": "What is the hull made of?"}],
+        "model": "gemini-2.5-pro",
+        "reasoning_effort": "high",
+    }
+
+    response = client.post("/api/chat", json=payload)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["reply"] == "Hull is GRP."
+    assert body["tool_calls"] == [{"name": "read_file", "arguments": {"absolute_path": "C:/x.md"}, "ok": True}]
+    assert model.calls == []  # litellm is not used
+
+    run = gemini.runs[0]
+    cmd = run["cmd"]
+    assert cmd[:3] == ["C:/npm/gemini.cmd", "-p", agent.GEMINI_CLI_PROMPT]
+    assert cmd[cmd.index("-m") + 1] == "gemini-2.5-pro"
+    assert cmd[cmd.index("-o") + 1] == "stream-json"
+    assert {"--skip-trust", "--yolo"} <= set(cmd)
+    dirs = [cmd[i + 1] for i, arg in enumerate(cmd) if arg == "--include-directories"]
+    assert dirs == [str(notes_dir.resolve()), str(rag)]
+    # The prompt goes on stdin, never on the command line.
+    assert "What is the hull made of?" in run["input"] and not any("hull made" in arg for arg in cmd)
+    assert "google_web_search" in run["input"] and str(notes_dir.resolve()) in run["input"]
+    assert "GEMINI_API_KEY" not in run["env"] and "GOOGLE_API_KEY" not in run["env"]
+    assert run["env"]["GOOGLE_GENAI_USE_GCA"] == "true"
+
+
+def test_gemini_cli_is_used_as_the_configured_default(client, settings, model, gemini):
+    settings.chat_model = "gemini/gemini-3.1-pro-preview"
+    gemini.script.append((gemini_events(["Hi"]), "", 0))
+
+    assert client.post("/api/chat", json={"messages": [{"role": "user", "content": "Hi"}]}).json()["reply"] == "Hi"
+    cmd = gemini.runs[0]["cmd"]
+    assert cmd[cmd.index("-m") + 1] == "gemini-3.1-pro-preview"
+    assert model.calls == []
+
+
+def test_gemini_cli_write_note_block_is_proposed_in_ask_first(client, notes_dir, gemini):
+    # The block arrives split across delta chunks.
+    chunks = ["Here is the report.\n\n<write_note path=\"C7801/Report.md\">\n---\ntype: re", "port\n---\n# Keel\n", "</write_note>"]
+    gemini.script.append((gemini_events(chunks), "", 0))
+
+    body = cli_chat(client, "Write a report", model_name="gemini-2.5-flash").json()
+
+    assert body["reply"] == "Here is the report."
+    assert [(e["path"], e["content"], e["frontmatter"]) for e in body["proposed_edits"]] == [
+        ("C7801/Report.md", "# Keel", {"type": "report"})
+    ]
+    assert body["tool_calls"] == [{"name": "write_note", "arguments": {"path": "C7801/Report.md"}, "ok": True}]
+    assert not (notes_dir / "C7801" / "Report.md").exists()
+    assert "ASK FIRST" in gemini.runs[0]["input"]
+
+
+def test_gemini_cli_write_note_block_writes_directly(client, notes_dir, gemini):
+    gemini.script.append((gemini_events(['<write_note path="Inbox/Idea.md">\nJust a body\n</write_note>']), "", 0))
+
+    body = cli_chat(client, "Save an idea", mode="write_directly", model_name="gemini-2.5-pro").json()
+
+    assert body["written_paths"] == ["Inbox/Idea.md"]
+    assert body["reply"] == "- Wrote `Inbox/Idea.md`."
+    assert file_layer.read_note("Inbox/Idea.md")["content"] == "Just a body"
+
+
+def test_gemini_cli_write_note_block_refused_in_read_only(client, gemini):
+    gemini.script.append((gemini_events(['Done.\n<write_note path="Inbox/x.md">\nx\n</write_note>']), "", 0))
+
+    body = cli_chat(client, "Write", mode="read_only", model_name="gemini-2.5-pro").json()
+
+    assert body["written_paths"] == [] and body["proposed_edits"] == []
+    assert body["tool_calls"] == [{"name": "write_note", "arguments": {"path": "Inbox/x.md"}, "ok": False}]
+    assert body["reply"].startswith("Done.\n\n- Could not write")
+    assert "READ ONLY" in gemini.runs[0]["input"]
+
+
+def test_gemini_cli_not_installed(client, model, monkeypatch):
+    monkeypatch.setattr(agent.shutil, "which", lambda name: None)
+
+    response = cli_chat(client, "Hi", model_name="gemini-2.5-pro")
+
+    assert response.status_code == 503
+    assert "Gemini CLI" in response.json()["detail"]
+    assert model.calls == []
+
+
+@pytest.mark.parametrize(
+    ("stdout", "stderr"),
+    [
+        ("", "Opening authentication page in your browser."),
+        ("", "Please set an Auth method in your settings.json"),
+        ('{"type": "error", "message": "Authentication cancelled"}\n', ""),
+    ],
+)
+def test_gemini_cli_not_signed_in(client, gemini, stdout, stderr):
+    gemini.script.append((stdout, stderr, 41))
+
+    response = cli_chat(client, "Hi", model_name="gemini-2.5-pro")
+
+    assert response.status_code == 503
+    assert "Login with Google" in response.json()["detail"]
+
+
+def test_gemini_cli_failure(client, gemini):
+    gemini.script.append((gemini_events([]) + json.dumps({"type": "error", "message": "boom"}), "", 0))
+
+    response = cli_chat(client, "Hi", model_name="gemini-2.5-pro")
+
+    assert response.status_code == 502
+    assert "boom" in response.json()["detail"]
+
+
+def test_gemini_cli_nonzero_exit(client, gemini):
+    gemini.script.append(("", "Unknown model", 1))
+
+    response = cli_chat(client, "Hi", model_name="gemini-2.5-pro")
+
+    assert response.status_code == 502
+    assert "Unknown model" in response.json()["detail"]

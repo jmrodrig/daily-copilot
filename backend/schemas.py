@@ -441,8 +441,8 @@ class ChatRequest(BaseModel):
     model: str | None = Field(
         default=None,
         pattern=r"^(gemini/|models/|claude/)?[A-Za-z0-9._-]+$",
-        description="The model to answer with, e.g. `gemini-2.5-pro` or `claude-opus-4-6` (local Claude CLI); "
-        "the server's default if not given",
+        description="The model to answer with, e.g. `claude-opus-5-5` (local Claude CLI) or `gemini-2.5-pro` "
+        "(local Gemini CLI); the server's default if not given",
     )
     reasoning_effort: Literal["low", "medium", "high"] | None = Field(
         default=None, description="How hard the model thinks; the model's own default if not given"
