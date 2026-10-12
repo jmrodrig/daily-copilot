@@ -2,6 +2,70 @@
 @tailwind components;
 @tailwind utilities;
 
+/* IBM Plex (Google Fonts' files), with its ascent and descent evened out: as shipped, a line's selection highlight
+   has ~1.5px above the capitals and ~5.5px below the baseline at 14px, so selected text looks pushed up in it.
+   Plex Sans is a variable font, one file for all weights. */
+@font-face {
+  font-family: "IBM Plex Sans";
+  font-style: normal;
+  font-weight: 400 600;
+  font-display: swap;
+  src: url(https://fonts.gstatic.com/s/ibmplexsans/v23/zYXzKVElMYYaJe8bpLHnCwDKr932-G7dytD-Dmu1syxQKYbABA.woff2) format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+  ascent-override: 108%;
+  descent-override: 22%;
+}
+@font-face {
+  font-family: "IBM Plex Sans";
+  font-style: normal;
+  font-weight: 400 600;
+  font-display: swap;
+  src: url(https://fonts.gstatic.com/s/ibmplexsans/v23/zYXzKVElMYYaJe8bpLHnCwDKr932-G7dytD-Dmu1syxeKYY.woff2) format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+  ascent-override: 108%;
+  descent-override: 22%;
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url(https://fonts.gstatic.com/s/ibmplexmono/v20/-F63fjptAgt5VM-kVkqdyU8n1iEq129k.woff2) format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+  ascent-override: 108%;
+  descent-override: 22%;
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url(https://fonts.gstatic.com/s/ibmplexmono/v20/-F63fjptAgt5VM-kVkqdyU8n1i8q1w.woff2) format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+  ascent-override: 108%;
+  descent-override: 22%;
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url(https://fonts.gstatic.com/s/ibmplexmono/v20/-F6qfjptAgt5VM-kVkqdyU8n3twJwl5FgtIU.woff2) format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+  ascent-override: 108%;
+  descent-override: 22%;
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url(https://fonts.gstatic.com/s/ibmplexmono/v20/-F6qfjptAgt5VM-kVkqdyU8n3twJwlBFgg.woff2) format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+  ascent-override: 108%;
+  descent-override: 22%;
+}
+
 /* The colour scheme (light/dark, following the OS) comes from public/styles/brand.css. */
 
 html,
@@ -39,10 +103,27 @@ body {
   }
 }
 
-/* Thin scrollbars, as in the mockups. */
-* {
-  scrollbar-width: thin;
-  scrollbar-color: #2f3e48 transparent;
+/* Scrollbars: an 8px track, its thumb in the theme's muted text colour, brighter on hover. (The standard
+   `scrollbar-width`/`scrollbar-color` would override these in Chromium, and draw a thin, low-contrast bar.) */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background-color: color-mix(in srgb, var(--dc-muted) 45%, transparent);
+  border-radius: 9999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background-color: color-mix(in srgb, var(--dc-muted) 75%, transparent);
+  border: 1px solid transparent;
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
 }
 
 /* Co-pilot chat replies (rendered markdown). */
@@ -56,7 +137,7 @@ body {
   @apply mt-3 text-sm font-semibold text-text-primary;
 }
 .markdown h3 {
-  @apply mt-2.5 text-[13px] font-semibold text-text-primary;
+  @apply mt-2.5 text-xs font-semibold text-text-primary;
 }
 .markdown h4,
 .markdown h5,
@@ -84,13 +165,13 @@ body {
   @apply text-accent underline;
 }
 .markdown code {
-  @apply rounded border border-border-default bg-background/70 px-1 py-0.5 font-mono text-[11px] text-text-primary;
+  @apply rounded border border-border-default bg-background/70 px-1 py-0 align-baseline font-mono text-[0.85em] text-text-primary;
 }
 .markdown pre {
-  @apply overflow-x-auto rounded-md border border-border-default bg-background/80 p-2.5 font-mono text-[11px] text-text-primary;
+  @apply overflow-x-auto rounded-md border border-border-default bg-background/80 p-2.5 font-mono text-[0.85em] text-text-primary;
 }
 .markdown pre code {
-  @apply border-0 bg-transparent p-0;
+  @apply border-0 bg-transparent p-0 text-[1em];
 }
 .markdown table {
   @apply border-collapse text-xs;
@@ -104,6 +185,15 @@ body {
 }
 .markdown blockquote {
   @apply border-l-2 border-border-light pl-3 text-text-secondary;
+}
+/* Inline math at about the text's size and line height, so a selection over it doesn't jump below the baseline. Its
+   hidden MathML stays out of the selection highlight; copying still takes it (see selectionToClipboard). */
+.markdown .katex {
+  font-size: 1.05em;
+  line-height: 1;
+}
+.katex .katex-mathml {
+  user-select: none;
 }
 
 /* Note bodies, read-only and in the rich-text editor: sized like a document rather than a chat reply. The body fills
