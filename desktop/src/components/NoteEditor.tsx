@@ -25,7 +25,7 @@ import { useEffect, useLayoutEffect, useRef, useState, useMemo, useCallback, typ
 import "katex/dist/katex.min.css";
 
 import { message, uploadFile } from "../lib/api";
-import { isLocalHref, openLocalFile } from "../lib/localFiles";
+import { checkLocalFile, isLocalHref, openLocalFile } from "../lib/localFiles";
 import type { TaskItem as TaskRow } from "../lib/tasks";
 import MediaLightbox, { ExpandButton, isPdfUrl, MarkupOverlay } from "./MediaLightbox";
 import { LinkPanel, panelPosition, TaskPanel, type PanelDraft } from "./refPanels";
@@ -53,7 +53,7 @@ import {
   widthLabel,
   EMPTY_WHITEBOARD_JSON,
   InlineMath,
-  LocalCodeLinks,
+  localPathRanges,
   transformNotePastedHTML,
   type Alignment,
 } from "./noteFormatting";
@@ -141,8 +141,6 @@ export default function NoteEditor({
       // `$…$` and `$$…$$`, shown rendered with KaTeX (see noteFormatting).
       InlineMath,
       BlockMath,
-      // Inline code holding a local path, shown as a link (opened by BubbleMenuWrapper's click handler).
-      LocalCodeLinks,
       Markdown,
       UploadPlaceholders,
       ReferencePill,
@@ -171,9 +169,11 @@ export default function NoteEditor({
       // Math copied rendered (from the chat or a note) comes back as math, not its text twice over.
       transformPastedHTML: (html) => transformNotePastedHTML(html),
       // A pasted screenshot or a dropped file is uploaded to the space rather than inlined as base64, and markdown
-      // pasted as plain text (with no HTML beside it) is read as markdown rather than taken literally.
+      // pasted as plain text (with no HTML beside it) is read as markdown rather than taken literally. Local paths
+      // pasted as inline code or links become pills once the paste has landed (see pillLocalPathsRef).
       handlePaste: (view, event) => {
         if (!view.editable) return false;
+        setTimeout(() => void pillLocalPathsRef.current());
         const files = extractFiles(event.clipboardData);
         if (files.length) {
           event.preventDefault();
@@ -208,6 +208,29 @@ export default function NoteEditor({
   const pasteMarkdownRef = useRef<(markdown: string) => void>(() => {});
   pasteMarkdownRef.current = (markdown: string) => {
     if (editor && !editor.isDestroyed) editor.commands.insertContent(markdown, { contentType: "markdown" });
+  };
+
+  /**
+   * Turn inline code holding a local path, and links to one, into link pills (see referencePill), as the chat cites
+   * files: each the backend finds on disk, under the file's name (or the link's own text). Not an edit of its own to
+   * undo: undoing the paste takes the pills too. A path not found is left as it was.
+   */
+  const pillLocalPathsRef = useRef<() => Promise<void>>(async () => {});
+  pillLocalPathsRef.current = async () => {
+    if (!editor || editor.isDestroyed) return;
+    const paths = [...new Set(localPathRanges(editor.state.doc).map((range) => range.path))];
+    if (!paths.length) return;
+    const checks = await Promise.all(paths.map((path) => checkLocalFile(path)));
+    if (editor.isDestroyed) return;
+    const found = new Map(paths.flatMap((path, i) => (checks[i].exists ? [[path, checks[i].name || basename(path)] as const] : [])));
+    const { state } = editor;
+    const tr = state.tr;
+    // From the end, so the ranges before each stay where they were. Found afresh: the doc may have changed meanwhile.
+    for (const { from, to, path, label } of localPathRanges(state.doc).reverse()) {
+      const name = found.get(path);
+      if (name) tr.replaceWith(from, to, state.schema.nodes.referencePill.create({ kind: "url", href: path, label: label ?? name }));
+    }
+    if (tr.docChanged) editor.view.dispatch(tr.setMeta("addToHistory", false));
   };
 
   // Reassigned every render, so an upload reads the current editor and space rather than the first render's.
@@ -435,7 +458,9 @@ function CheckboxIcon() {
   );
 }
 
-/** The menu under a selected web-page pill in an editable note: open the page, or edit the pill's text and URL. */
+/**
+ * The menu under a selected web-page or local-file pill in an editable note: open it, or edit the pill's text and URL.
+ */
 function PillMenuWrapper({ editor }: { editor: Editor }) {
   const options = useMemo(() => ({ placement: "bottom" as const, offset: 8 }), []);
   const shouldShow = useCallback(
@@ -520,7 +545,18 @@ function PillMenuWrapper({ editor }: { editor: Editor }) {
         </form>
       ) : (
         <div className="flex items-center">
-          <a href={pill.href} target="_blank" rel="noopener noreferrer" className={`${button} text-accent`}>
+          <a
+            href={pill.href}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={(event) => {
+              // The browser won't open a local path from a web page: the backend does (see openLocalFile).
+              if (!isLocalHref(pill.href)) return;
+              event.preventDefault();
+              void openLocalFile(pill.href);
+            }}
+            className={`${button} text-accent`}
+          >
             Open
           </a>
           <button
@@ -555,7 +591,8 @@ function isAttachmentHref(href: string | undefined): boolean {
 /**
  * The menu under a link: open it, and for an uploaded file in an editable note, remove it. A linked PDF opens in the
  * lightbox, to be marked up while the note is editable, as does a click on its pill. A link to a local file or folder
- * opens on this machine, or from the network share through a shortcut on a remote one (see openLocalFile), from its pill or the Open button. Extracted so its props memoize
+ * opens on this machine, or from the network share through a shortcut on a remote one (see openLocalFile), from the
+ * Open button. Extracted so its props memoize
  * without cluttering NoteEditor's top-level hooks.
  */
 function BubbleMenuWrapper({ editor }: { editor: Editor }) {
@@ -570,33 +607,13 @@ function BubbleMenuWrapper({ editor }: { editor: Editor }) {
 
   useEffect(() => {
     const dom = editor.view.dom;
+    // A click on a link (or a local file's pill) only selects it, to open or edit from its menu; an uploaded PDF's pill
+    // opens it in the lightbox.
     const click = (event: MouseEvent) => {
-      // A local file or folder opens on a single click, from a link or its pill.
-      const pill = event.target instanceof Element ? event.target.closest('[data-reference-pill][data-kind="url"]') : null;
-      const pillHref = pill?.getAttribute("data-href");
-      if (isLocalHref(pillHref)) {
-        event.preventDefault();
-        void openLocalFile(pillHref);
-        return;
-      }
       if (event.ctrlKey || event.metaKey || event.shiftKey) return;
-      // So does inline code holding a local path, as the chat cites files (see LocalCodeLinks).
-      const code = event.target instanceof Element ? event.target.closest("code:not(pre code)") : null;
-      const path = code?.textContent?.trim();
-      if (isLocalHref(path)) {
-        event.preventDefault();
-        void openLocalFile(path);
-        return;
-      }
       const anchor = event.target instanceof Element ? event.target.closest("a[href]") : null;
       const href = anchor?.getAttribute("href") ?? undefined;
-      if (!anchor) return;
-      if (isLocalHref(href)) {
-        event.preventDefault();
-        void openLocalFile(href);
-        return;
-      }
-      if (!isAttachmentHref(href) || !isPdfUrl(href!)) return;
+      if (!anchor || !isAttachmentHref(href) || !isPdfUrl(href!)) return;
       event.preventDefault();
       setPdf({ href: href!, name: anchor.textContent ?? "" });
     };
@@ -972,7 +989,11 @@ function TitleInput({
   );
 }
 
-/** The files of a paste or drop, if any. */
+/** A local path's last part: the file or folder's name. */
+function basename(path: string): string {
+  return path.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || path;
+}
+
 /**
  * A transaction repairing a doc the schema doesn't allow, or `null` if it's valid: runs of inline nodes (an image
  * or text) sitting loose in the doc are gathered into paragraphs.
@@ -1005,6 +1026,7 @@ function normalizeDoc(state: EditorState): Transaction | null {
   }
 }
 
+/** The files of a paste or drop, if any. */
 function extractFiles(data: DataTransfer | null): File[] {
   return Array.from(data?.files ?? []);
 }

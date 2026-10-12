@@ -661,38 +661,37 @@ export const InlineMath = Mark.create({
   },
 });
 
-const localCodeLinksKey = new PluginKey<DecorationSet>("localCodeLinks");
+export type LocalPathRange = { from: number; to: number; path: string; label: string | null };
 
 /**
- * Inline code holding a local file or folder's path (`\\server\share\…`, `C:\…`), as the chat cites files, styled as a
- * link with its path as a tooltip, as in the read-only note and the chat. NoteEditor opens it on click.
+ * Inline code holding a local file or folder's path (`\\server\share\…`, `C:\…`), as the chat cites files, and links
+ * to one: each run with its path and, for a link whose text isn't the path itself, that text (`label`), in document
+ * order. NoteEditor turns those found on disk into pills (see referencePill).
  */
-export const LocalCodeLinks = Extension.create({
-  name: "localCodeLinks",
-  addProseMirrorPlugins() {
-    const find = (doc: ProseMirrorNode) =>
-      DecorationSet.create(
-        doc,
-        markRanges(doc, "code").flatMap(({ from, to, text }) =>
-          isLocalHref(text.trim())
-            ? [Decoration.inline(from, to, { class: "cursor-pointer hover:border-accent hover:text-accent", title: `Open ${text.trim()}`, role: "link" })]
-            : [],
-        ),
-      );
-    return [
-      new Plugin<DecorationSet>({
-        key: localCodeLinksKey,
-        state: {
-          init: (_config, state) => find(state.doc),
-          apply: (tr, set) => (tr.docChanged ? find(tr.doc) : set),
-        },
-        props: {
-          decorations: (state) => localCodeLinksKey.getState(state),
-        },
-      }),
-    ];
-  },
-});
+export function localPathRanges(doc: ProseMirrorNode): LocalPathRange[] {
+  const ranges: LocalPathRange[] = markRanges(doc, "code").flatMap(({ from, to, text }) =>
+    isLocalHref(text.trim()) ? [{ from, to, path: text.trim(), label: null }] : [],
+  );
+  const links: (LocalPathRange & { text: string })[] = [];
+  doc.descendants((node, pos) => {
+    const href = node.isText ? (node.marks.find((mark) => mark.type.name === "link")?.attrs.href as string | undefined) : undefined;
+    if (!isLocalHref(href)) return;
+    const last = links[links.length - 1];
+    if (last && last.to === pos && last.path === href) {
+      last.to += node.nodeSize;
+      last.text += node.text ?? "";
+    } else {
+      links.push({ from: pos, to: pos + node.nodeSize, path: href, label: null, text: node.text ?? "" });
+    }
+  });
+  for (const { text, ...link } of links) {
+    // Code inside a link is taken as the code's path.
+    if (ranges.some((r) => r.from < link.to && link.from < r.to)) continue;
+    const label = text.trim();
+    ranges.push({ ...link, label: label && label !== link.path ? label : null });
+  }
+  return ranges.sort((a, b) => a.from - b.from);
+}
 
 /** Display math (see above): a block atom holding its LaTeX, saved as `$$…$$` on lines of its own. */
 export const BlockMath = Node.create({

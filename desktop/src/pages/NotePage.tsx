@@ -605,7 +605,9 @@ function NoteImage({ node: _node, className, style, src, alt, title, ...props }:
 /**
  * react-markdown's URL filter, letting links to local files and folders through (a drive letter reads as an unknown
  * protocol). The parser percent-encodes a link's destination, so a drive or UNC path is decoded back to the path itself
- * (`O:%5CMy%20Files` to `O:\My Files`) for openLocalFile; a `file:` URL stays a URL.
+ * (`O:%5CMy%20Files` to `O:\My Files`) for openLocalFile; a `file:` URL stays a URL. A UNC path saved as is (a pill's,
+ * see referencePill) has its leading `\\` read as an escaped backslash, so it comes as `\server\share\…`: its second
+ * backslash is put back.
  */
 function noteUrlTransform(url: string): string {
   if (/^file:/i.test(url)) return url;
@@ -615,6 +617,7 @@ function noteUrlTransform(url: string): string {
   } catch {
     // A stray `%`: leave it be.
   }
+  if (/^\\(?=[^\\/\s]+[\\/])/.test(decoded)) decoded = `\\${decoded}`;
   return isLocalHref(decoded) ? decoded : defaultUrlTransform(url);
 }
 
