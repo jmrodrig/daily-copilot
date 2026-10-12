@@ -21,7 +21,7 @@ import {
   type Column,
   type NewTaskDraft,
 } from "../components/TaskTable";
-import { formatDay, ME, NEUTRAL_TAG, NoteLink, ProjectTag, Tag, TagPills } from "../components/TriageBoard";
+import { formatDay, ME, NEUTRAL_TAG, NoteLink, PRIORITY_TAG, ProjectTag, Tag, TagPills } from "../components/TriageBoard";
 import { getJson, message, sendJson } from "../lib/api";
 import { AssigneeSelect, personLabel, PersonBadge, usePeople, type Person } from "../lib/people";
 import { colouredOptions } from "../lib/colors";
@@ -34,6 +34,7 @@ import {
   fromGanttDates,
   isOverdue,
   PRIORITY_LABELS,
+  PRIORITY_RANK,
   STATUS_LABELS,
   taskQuery,
   updateTaskDates,
@@ -547,7 +548,10 @@ function Kanban({
   return (
     <div className="grid min-h-[420px] grid-cols-4 gap-3">
       {BOARD_COLUMNS.map(({ status, label }) => {
-        const column = tasks.filter((t) => boardColumn(t.status) === status);
+        // Most pressing first; the sort is stable, so equal priorities keep the server's order.
+        const column = tasks
+          .filter((t) => boardColumn(t.status) === status)
+          .sort((a, b) => PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority]);
         return (
           <section
             key={status}
@@ -760,6 +764,7 @@ function KanbanCard({ task, flow, people, me, customFields, onStatus }: { task: 
   const overdue = isOverdue(task);
   const { taskId, openTask } = useTaskPanel();
   const active = taskId === task.id;
+  const isUrgent = task.priority === "urgent";
   const open = () => !active && openTask(task.id);
   return (
     <li
@@ -778,13 +783,20 @@ function KanbanCard({ task, flow, people, me, customFields, onStatus }: { task: 
           open();
         }
       }}
-      className={`cursor-grab rounded-md border bg-surface-raised p-2.5 hover:border-border-light focus:outline-none focus-visible:border-accent/70 active:cursor-grabbing ${
-        active ? "border-accent/70" : "border-border-default"
+      className={`cursor-grab rounded-md border p-2.5 focus:outline-none focus-visible:border-accent/70 active:cursor-grabbing ${
+        isUrgent
+          ? active
+            ? "border-l-4 border-accent bg-accent/[0.10]"
+            : "border-l-4 border-accent/60 border-l-accent bg-accent/[0.06] hover:border-accent"
+          : active
+            ? "border-accent/70 bg-surface-raised"
+            : "border-border-default bg-surface-raised hover:border-border-light"
       }`}
     >
       <div className="text-[15px] text-text-primary">{task.title}</div>
       <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
         {task.project_code && <ProjectTag code={task.project_code} color={task.project_color} />}
+        <Tag className={PRIORITY_TAG[task.priority]}>{PRIORITY_LABELS[task.priority]}</Tag>
         {task.status === "blocked" && <Tag className="border-accent bg-accent/15 text-accent">blocked</Tag>}
         {task.is_milestone && <Tag className="border-accent/60 text-accent">milestone</Tag>}
         {colouredOptions(customFields, task.custom_fields).map(({ field }) => (

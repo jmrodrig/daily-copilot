@@ -85,6 +85,9 @@ export const STATUS_LABELS: Record<TaskStatus, string> = {
 
 export const PRIORITY_LABELS: Record<TaskPriority, string> = { low: "Low", normal: "Normal", high: "High", urgent: "Urgent" };
 
+/** Sort order of priorities, most pressing first (e.g. the cards in a Kanban column). */
+export const PRIORITY_RANK: Record<TaskPriority, number> = { urgent: 0, high: 1, normal: 2, low: 3 };
+
 /** Each status's colour (e.g. the dot on task pills) unless the space picks its own (`Space.status_colors`). */
 export const DEFAULT_STATUS_COLORS: Record<TaskStatus, string> = {
   backlog: "#94a3b8",
