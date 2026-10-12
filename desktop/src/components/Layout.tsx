@@ -20,6 +20,7 @@ const PANES: Record<Pane, { initial: number; min: number; max: number }> = {
   task: { initial: 400, min: 360, max: 1200 },
   chat: { initial: 400, min: 400, max: 1200 },
 };
+const MAIN_MIN = 400;
 const RAIL = 64; // a collapsed pane
 const KEY_STEP = 16;
 
@@ -63,6 +64,7 @@ export default function Layout() {
   const [widths, setWidths] = useState(storedWidths);
   const [resizing, setResizing] = useState(false);
 
+  const rootRef = useRef<HTMLDivElement>(null);
   const mainRef = useRef<HTMLElement>(null);
   const leftRef = useRef<HTMLElement>(null);
   const taskRef = useRef<HTMLElement>(null);
@@ -94,6 +96,35 @@ export default function Layout() {
     localStorage.setItem(WIDTHS_KEY, JSON.stringify(widths));
   }, [widths]);
 
+  // Shrink the open panes (the chat first, then the task, then the page tree) when the window is too narrow for them
+  // and the main view, so the chat (and its scrollbar) never runs off the right edge.
+  useEffect(() => {
+    function fit() {
+      const available = rootRef.current?.clientWidth || window.innerWidth;
+      setWidths((prev) => {
+        const dividers = Number(leftOpen) + Number(showTask || chatOpen) + Number(showTask && chatOpen);
+        const total =
+          (leftOpen ? prev.left : RAIL) + (showTask ? prev.task : 0) + (chatOpen ? prev.chat : RAIL) + dividers + MAIN_MIN;
+        let excess = total - available;
+        if (excess <= 0) return prev;
+        const next = { ...prev };
+        const isOpen: Record<Pane, boolean> = { chat: chatOpen, task: showTask, left: leftOpen };
+        const open = (["chat", "task", "left"] as const).filter((pane) => isOpen[pane]);
+        for (const pane of open) {
+          const cut = Math.min(excess, next[pane] - PANES[pane].min);
+          if (cut <= 0) continue;
+          next[pane] -= cut;
+          excess -= cut;
+          if (excess <= 0) break;
+        }
+        return open.some((pane) => next[pane] !== prev[pane]) ? next : prev;
+      });
+    }
+    fit();
+    window.addEventListener("resize", fit);
+    return () => window.removeEventListener("resize", fit);
+  }, [leftOpen, showTask, chatOpen]);
+
   function beginResize() {
     start.current = {
       left: measure(leftRef) || widths.left,
@@ -106,7 +137,8 @@ export default function Layout() {
   /** Grows `pane` by `grow` pixels from its width at the start of the drag, taking the room from the main view. */
   function resizeAgainstMain(pane: Pane, grow: number) {
     const s = start.current;
-    setWidths((prev) => ({ ...prev, [pane]: clamp(pane, s[pane] + grow) }));
+    const room = Math.max(0, s.main - MAIN_MIN);
+    setWidths((prev) => ({ ...prev, [pane]: clamp(pane, s[pane] + Math.min(grow, room)) }));
   }
 
   /** Moves the task/chat border by `dx` pixels, trading width between the two. */
@@ -124,14 +156,14 @@ export default function Layout() {
   const dividerProps = { onStart: beginResize, onResizingChange: setResizing };
   // The pane next to the main view on the right: the task when one is open, else the chat if expanded.
   const rightOfMain: Pane | null = showTask ? "task" : chatOpen ? "chat" : null;
-  // Panes hold their dragged width when the window narrows: the row clips (overflow-hidden) rather than crushing them.
+  // Panes hold their width in the row (the effect above makes room for the main view when the window narrows).
   const paneStyle = (pane: Pane) => ({ width: widths[pane], minWidth: widths[pane] });
   const railStyle = { width: RAIL, minWidth: RAIL };
   // Animate collapse/expand, but not while a divider is dragged, so resizing tracks the pointer.
   const paneTransition = resizing ? "" : "transition-[width,min-width] duration-200 ease-out motion-reduce:transition-none";
 
   return (
-    <div className="flex h-full min-h-[720px] overflow-hidden text-sm leading-[1.45] print:block print:h-auto print:min-h-0 print:overflow-visible">
+    <div ref={rootRef} className="flex h-full min-h-[720px] overflow-hidden text-sm leading-[1.45] print:block print:h-auto print:min-h-0 print:overflow-visible">
       <nav
         ref={leftRef}
         aria-label="Page tree"
@@ -263,7 +295,7 @@ function Divider({
       title="Drag to resize · double-click to reset"
       className="group relative z-10 w-px shrink-0 cursor-col-resize touch-none bg-border-default print:hidden focus:outline-none"
     >
-      <div className="absolute inset-y-0 -left-1 -right-1" />
+      <div className="absolute inset-y-0 left-0 -right-1.5" />
       <div className="absolute inset-y-0 left-1/2 w-0.5 -translate-x-1/2 opacity-0 group-hover:bg-accent/60 group-hover:opacity-100 group-focus-visible:bg-accent group-focus-visible:opacity-100" />
     </div>
   );
