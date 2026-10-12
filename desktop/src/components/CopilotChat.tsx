@@ -1,10 +1,15 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
-import Markdown from "react-markdown";
+import Markdown, { defaultUrlTransform, type Components } from "react-markdown";
 import { Link, useLocation, type Location } from "react-router-dom";
+import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import "katex/dist/katex.min.css";
 
 import { errorDetail, getJson, message, PROMPTS_CHANGED, type SavedPrompt } from "../lib/api";
+import { isLocalHref, openLocalFile } from "../lib/localFiles";
 import { notePath, useSpace } from "../lib/space";
+import { cleanMathForClipboard, copyCleanSelection } from "./noteFormatting";
 import Popover from "./Popover";
 import { IconButton } from "./Sidebar";
 
@@ -204,12 +209,79 @@ function progressWith(progress: LiveProgress, event: ProgressEvent): LiveProgres
     }
     case "text_delta": {
       const text = progress.streamingText;
-      // Text after a thought or tool call is a new block of the reply, not more of the same sentence.
-      const gap = progress.textBroken && text && !/\s$/.test(text) ? "\n\n" : "";
-      return { ...progress, streamingText: text + gap + event.delta, textBroken: false };
+      // Text after a thought or tool call is a new block of the reply, not more of the same sentence: a blank line
+      // between them, so a heading, list or table that starts it parses as one.
+      if (progress.textBroken && text && !event.delta.startsWith("\n\n"))
+        return { ...progress, streamingText: `${text.trimEnd()}\n\n${event.delta.replace(/^\n/, "")}`, textBroken: false };
+      return { ...progress, streamingText: text + event.delta, textBroken: false };
     }
   }
 }
+
+/**
+ * A reply's markdown, with GFM tables, math (KaTeX) and links to local files that open through the backend. Its
+ * wrapper copies with `copyCleanSelection`, so math pastes as math rather than its text twice over.
+ */
+function ChatMarkdown({ content }: { content: string }) {
+  return (
+    <Markdown
+      remarkPlugins={[remarkGfm, remarkMath]}
+      rehypePlugins={[rehypeKatex]}
+      urlTransform={chatUrlTransform}
+      components={CHAT_MARKDOWN_COMPONENTS}
+    >
+      {content}
+    </Markdown>
+  );
+}
+
+/** Keeps links to local files and folders, which react-markdown would strip (as noteUrlTransform in NotePage). */
+function chatUrlTransform(url: string): string {
+  if (/^file:/i.test(url)) return url;
+  let decoded = url;
+  try {
+    decoded = decodeURIComponent(url);
+  } catch {
+    // A stray `%`: leave it be.
+  }
+  return isLocalHref(decoded) ? decoded : defaultUrlTransform(url);
+}
+
+const CHAT_MARKDOWN_COMPONENTS: Components = {
+  // The browser won't open a local path from a web page, so a link to one opens through the backend.
+  a: ({ node: _node, ref: _ref, ...props }) => {
+    const href = props.href;
+    if (!isLocalHref(href)) return <a {...props} target="_blank" rel="noopener noreferrer" />;
+    return (
+      <a
+        {...props}
+        title={href}
+        onClick={(e) => {
+          e.preventDefault();
+          void openLocalFile(href);
+        }}
+      />
+    );
+  },
+  // Agents cite files as inline code (`\server\share\…`, `Y:\…`): such a span opens the file too.
+  code: ({ node: _node, ref: _ref, ...props }) => {
+    const text = typeof props.children === "string" ? props.children.trim() : "";
+    if (/language-/.test(props.className ?? "") || text.includes("\n") || !isLocalHref(text)) return <code {...props} />;
+    return (
+      <code
+        {...props}
+        role="link"
+        tabIndex={0}
+        title={`Open ${text}`}
+        className="cursor-pointer hover:border-accent hover:text-accent"
+        onClick={() => void openLocalFile(text)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") void openLocalFile(text);
+        }}
+      />
+    );
+  },
+};
 
 const basename = (path: string) => path.split(/[\\/]/).filter(Boolean).pop() ?? path;
 
@@ -486,11 +558,27 @@ export default function CopilotChat({
     }
   }
 
-  async function copyReply(index: number, text: string) {
+  /**
+   * Copies a reply as formatted HTML (rendered in `container`, its math cleaned as `cleanMathForClipboard` does), for
+   * pasting into a note, and as its markdown.
+   */
+  async function copyReply(index: number, text: string, container?: HTMLElement | null) {
     try {
-      await navigator.clipboard.writeText(text);
+      if (!container || typeof ClipboardItem === "undefined" || !navigator.clipboard?.write) throw new Error("no rich copy");
+      const clone = container.cloneNode(true) as HTMLElement;
+      cleanMathForClipboard(clone);
+      await navigator.clipboard.write([
+        new ClipboardItem({
+          "text/html": new Blob([clone.innerHTML], { type: "text/html" }),
+          "text/plain": new Blob([text], { type: "text/plain" }),
+        }),
+      ]);
     } catch {
-      return;
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch {
+        return;
+      }
     }
     setCopiedIndex(index);
     if (copiedTimerRef.current !== null) window.clearTimeout(copiedTimerRef.current);
@@ -615,8 +703,8 @@ export default function CopilotChat({
             <div key={i} className="flex flex-col gap-2">
               <div className="rounded-lg border border-border-default bg-surface-raised px-3 py-2 text-xs leading-relaxed text-text-secondary">
                 {entry.toolCalls.length > 0 && <ToolCalls calls={entry.toolCalls} />}
-                <div className="markdown">
-                  <Markdown remarkPlugins={[remarkGfm]}>{entry.content}</Markdown>
+                <div className="markdown" onCopy={copyCleanSelection}>
+                  <ChatMarkdown content={entry.content} />
                 </div>
                 {entry.written.length > 0 && (
                   <div className="mt-2.5 flex flex-wrap gap-1.5">
@@ -631,7 +719,9 @@ export default function CopilotChat({
                 <div className="mt-2 flex justify-end">
                   <button
                     type="button"
-                    onClick={() => copyReply(i, entry.content)}
+                    onClick={(e) =>
+                      copyReply(i, entry.content, e.currentTarget.closest(".rounded-lg")?.querySelector<HTMLElement>(".markdown"))
+                    }
                     title="Copy response"
                     className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] text-text-muted hover:bg-surface-active hover:text-text-primary"
                   >
@@ -1049,7 +1139,9 @@ function LiveActivityCard({ progress, onStop }: { progress: LiveProgress; onStop
         </button>
       </div>
       {thoughtText && (
-        <p className="line-clamp-2 border-l-2 border-accent/40 pl-2 text-[11px] text-text-muted">{thoughtText}</p>
+        <div className="markdown line-clamp-2 border-l-2 border-accent/40 pl-2 text-[11px] text-text-muted" onCopy={copyCleanSelection}>
+          <ChatMarkdown content={thoughtText} />
+        </div>
       )}
       {tools.length > 0 && (
         <ul className="max-h-36 space-y-1 overflow-y-auto border-t border-border-default/60 pt-1.5 text-[11px]">
@@ -1059,8 +1151,8 @@ function LiveActivityCard({ progress, onStop }: { progress: LiveProgress; onStop
         </ul>
       )}
       {preview && (
-        <div className="markdown border-t border-border-default pt-2">
-          <Markdown remarkPlugins={[remarkGfm]}>{preview}</Markdown>
+        <div className="markdown border-t border-border-default pt-2" onCopy={copyCleanSelection}>
+          <ChatMarkdown content={preview} />
         </div>
       )}
     </div>

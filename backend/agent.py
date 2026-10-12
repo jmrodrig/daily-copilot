@@ -902,6 +902,7 @@ class _StreamState:
     def __init__(self) -> None:
         self.calls: dict[str, tuple[str, dict[str, Any], bool]] = {}  # by tool call id: (name, arguments, ok)
         self.parts: list[str] = []  # the Gemini reply, in delta chunks
+        self.text_broken = False  # a thought or tool call came between reply chunks
         self.result: str | None = None  # the Claude reply
         self.is_error = False
         self.error: str | None = None
@@ -1255,6 +1256,8 @@ def _gemini_events(line: str, state: _StreamState) -> list[Event]:
     if event is None:
         return []
     kind = event.get("type")
+    if kind in ("thought", "tool_use") and state.parts:
+        state.text_broken = True
     if kind == "thought":
         subject = event.get("subject")
         text = str(event.get("description") or "")
@@ -1262,8 +1265,15 @@ def _gemini_events(line: str, state: _StreamState) -> list[Event]:
     if kind == "message" and event.get("role") == "assistant":
         # Delta messages are chunks of one reply, in order.
         if isinstance(event.get("content"), str) and event["content"]:
-            state.parts.append(event["content"])
-            return [{"type": "text_delta", "delta": event["content"]}]
+            content = event["content"]
+            if state.text_broken:
+                # Text after a tool call starts a new paragraph, so its headings, lists and tables still parse.
+                text = "".join(state.parts)
+                newlines = len(text) - len(text.rstrip("\n")) + len(content) - len(content.lstrip("\n"))
+                content = "\n" * max(0, 2 - newlines) + content
+                state.text_broken = False
+            state.parts.append(content)
+            return [{"type": "text_delta", "delta": content}]
     elif kind == "tool_use":
         arguments = event.get("parameters") if isinstance(event.get("parameters"), dict) else {}
         return [state.start_call(str(event.get("tool_id")), str(event.get("tool_name")), arguments)]

@@ -22,6 +22,7 @@ import {
 import { BubbleMenu } from "@tiptap/react/menus";
 import StarterKit from "@tiptap/starter-kit";
 import { useEffect, useLayoutEffect, useRef, useState, useMemo, useCallback, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import "katex/dist/katex.min.css";
 
 import { message, uploadFile } from "../lib/api";
 import { isLocalHref, openLocalFile } from "../lib/localFiles";
@@ -37,6 +38,7 @@ import {
   AlignedBlocks,
   AlignedHeading,
   AlignedParagraph,
+  BlockMath,
   ColoredTable,
   ColoredTableCell,
   ColoredTableHeader,
@@ -50,6 +52,9 @@ import {
   snapWidths,
   widthLabel,
   EMPTY_WHITEBOARD_JSON,
+  InlineMath,
+  LocalCodeLinks,
+  transformNotePastedHTML,
   type Alignment,
 } from "./noteFormatting";
 
@@ -133,6 +138,11 @@ export default function NoteEditor({
       ResizableImage.configure({ inline: true, allowBase64: false }),
       // A ```whiteboard block, shown as a live board (see WhiteboardWidget).
       WhiteboardNode.configure({ spaceId, onSave: () => onSaveRef.current() }),
+      // `$…$` and `$$…$$`, shown rendered with KaTeX (see noteFormatting).
+      InlineMath,
+      BlockMath,
+      // Inline code holding a local path, shown as a link (opened by BubbleMenuWrapper's click handler).
+      LocalCodeLinks,
       Markdown,
       UploadPlaceholders,
       ReferencePill,
@@ -158,12 +168,24 @@ export default function NoteEditor({
         }
         return false;
       },
-      // A pasted screenshot or a dropped file is uploaded to the space rather than inlined as base64.
+      // Math copied rendered (from the chat or a note) comes back as math, not its text twice over.
+      transformPastedHTML: (html) => transformNotePastedHTML(html),
+      // A pasted screenshot or a dropped file is uploaded to the space rather than inlined as base64, and markdown
+      // pasted as plain text (with no HTML beside it) is read as markdown rather than taken literally.
       handlePaste: (view, event) => {
+        if (!view.editable) return false;
         const files = extractFiles(event.clipboardData);
-        if (!files.length || !view.editable) return false;
+        if (files.length) {
+          event.preventDefault();
+          void insertFilesRef.current(files);
+          return true;
+        }
+        const text = event.clipboardData?.getData("text/plain") ?? "";
+        if (event.clipboardData?.getData("text/html") || !MARKDOWN_SYNTAX.test(text)) return false;
+        const { $from } = view.state.selection;
+        if ($from.parent.type.spec.code || $from.marks().some((mark) => mark.type.spec.code)) return false;
         event.preventDefault();
-        void insertFilesRef.current(files);
+        pasteMarkdownRef.current(text.replace(/​/g, ""));
         return true;
       },
       handleDrop: (view, event, _slice, moved) => {
@@ -182,6 +204,11 @@ export default function NoteEditor({
       if (tr) editor.view.dispatch(tr.setMeta("addToHistory", false).setMeta("preventUpdate", true));
     },
   });
+
+  const pasteMarkdownRef = useRef<(markdown: string) => void>(() => {});
+  pasteMarkdownRef.current = (markdown: string) => {
+    if (editor && !editor.isDestroyed) editor.commands.insertContent(markdown, { contentType: "markdown" });
+  };
 
   // Reassigned every render, so an upload reads the current editor and space rather than the first render's.
   const insertFilesRef = useRef<(files: File[], pos?: number) => Promise<void>>(async () => {});
@@ -552,9 +579,18 @@ function BubbleMenuWrapper({ editor }: { editor: Editor }) {
         void openLocalFile(pillHref);
         return;
       }
+      if (event.ctrlKey || event.metaKey || event.shiftKey) return;
+      // So does inline code holding a local path, as the chat cites files (see LocalCodeLinks).
+      const code = event.target instanceof Element ? event.target.closest("code:not(pre code)") : null;
+      const path = code?.textContent?.trim();
+      if (isLocalHref(path)) {
+        event.preventDefault();
+        void openLocalFile(path);
+        return;
+      }
       const anchor = event.target instanceof Element ? event.target.closest("a[href]") : null;
       const href = anchor?.getAttribute("href") ?? undefined;
-      if (!anchor || event.ctrlKey || event.metaKey || event.shiftKey) return;
+      if (!anchor) return;
       if (isLocalHref(href)) {
         event.preventDefault();
         void openLocalFile(href);
@@ -634,11 +670,12 @@ function BubbleMenuWrapper({ editor }: { editor: Editor }) {
 /**
  * Links, allowed to point at local files and folders (`file:///…`, `C:\…`, `\\server\…`; see NoteEditor's config) rather
  * than stripped as unsafe. An href with spaces or brackets, as local paths often have, is saved as `[name](<href>)` so
- * it parses back.
+ * it parses back, and a backslash before punctuation is doubled, as markdown reads `\\` and `\(` as escapes: a UNC
+ * path (`\\server\…`) keeps both its leading backslashes.
  */
 const NoteLink = Link.extend({
   renderMarkdown: (node, h) => {
-    const href: string = node.attrs?.href ?? "";
+    const href: string = (node.attrs?.href ?? "").replace(/\\(?=[!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~])/g, "\\\\");
     const title: string = node.attrs?.title ?? "";
     const target = /[\s()<>]/.test(href) ? `<${href}>` : href;
     return `[${h.renderChildren(node)}](${target}${title ? ` "${title}"` : ""})`;
@@ -971,6 +1008,12 @@ function normalizeDoc(state: EditorState): Transaction | null {
 function extractFiles(data: DataTransfer | null): File[] {
   return Array.from(data?.files ?? []);
 }
+
+/**
+ * Plain text that reads as markdown: a heading, list item, quote, fence or table row starting a line, or inline
+ * math, bold or a link anywhere.
+ */
+const MARKDOWN_SYNTAX = /^ {0,3}(#{1,6}\s|[-*+]\s|\d+[.)]\s|>\s|```|\$\$|\|.*\|)|\$[^\s$][^$\n]*\$|\*\*[^*\n]+\*\*|\[[^\]\n]+\]\([^)\n]+\)/m;
 
 type PlaceholderMeta = { add: { id: string; pos: number; dom: HTMLElement; order: number } } | { remove: string };
 

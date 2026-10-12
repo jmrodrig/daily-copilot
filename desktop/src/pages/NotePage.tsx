@@ -1,9 +1,12 @@
 import { useEffect, useRef, useState, type ComponentProps, type ReactNode } from "react";
 import Markdown, { defaultUrlTransform, type Components } from "react-markdown";
 import { Link, useSearchParams } from "react-router-dom";
+import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import "katex/dist/katex.min.css";
 
 import { formatDay, LABEL_TAG, NEUTRAL_TAG, ProjectTag, Tag, TagPills } from "../components/TriageBoard";
 import { getJson, message, sendJson } from "../lib/api";
@@ -15,7 +18,7 @@ import MediaLightbox, { ExpandButton, isPdfUrl, MarkupOverlay } from "../compone
 import { isTyping } from "../components/markupCore";
 import NoteEditor from "../components/NoteEditor";
 import { PillIcon, refKind, StatusTag, useTaskStatus } from "../components/referencePill";
-import { NOTE_COLUMN, NOTE_HTML_SCHEMA, layoutMedia, liftCellColors } from "../components/noteFormatting";
+import { NOTE_COLUMN, NOTE_HTML_SCHEMA, copyCleanSelection, layoutMedia, liftCellColors } from "../components/noteFormatting";
 import WhiteboardView from "../components/WhiteboardView";
 import { COLLAPSE_ICON, EXPAND_ICON, WhiteboardFrame } from "../components/WhiteboardWidget";
 import { Segment, ToolIcon } from "../components/markupUi";
@@ -394,11 +397,11 @@ export default function NotePage() {
           {note.state === "ok" && (
             <>
               {details && <div className={`${NOTE_COLUMN} flex flex-col gap-5`}>{details}</div>}
-              <article className="note-body markdown text-[16px] leading-relaxed text-text-secondary">
+              <article className="note-body markdown text-[16px] leading-relaxed text-text-secondary" onCopy={copyCleanSelection}>
                 {/* Inline HTML carries text and cell colors, alignment and image and table sizes; anything else in it is stripped. */}
                 <Markdown
-                  remarkPlugins={[remarkGfm]}
-                  rehypePlugins={[rehypeRaw, [rehypeSanitize, NOTE_HTML_SCHEMA], liftCellColors, layoutMedia]}
+                  remarkPlugins={[remarkGfm, remarkMath]}
+                  rehypePlugins={[rehypeRaw, [rehypeSanitize, NOTE_HTML_SCHEMA], liftCellColors, layoutMedia, rehypeKatex]}
                   components={NOTE_COMPONENTS}
                   urlTransform={noteUrlTransform}
                 >
@@ -626,6 +629,24 @@ const NOTE_COMPONENTS: Components = {
       return <WhiteboardFrame value={json.trim()} editable={false} />;
     }
     return <pre {...props} />;
+  },
+  // Inline code holding a local path, as the chat cites files (`\\server\share\…`, `Y:\…`), opens the file too.
+  code: ({ node: _node, ref: _ref, ...props }) => {
+    const text = typeof props.children === "string" ? props.children.trim() : "";
+    if (/language-/.test(props.className ?? "") || text.includes("\n") || !isLocalHref(text)) return <code {...props} />;
+    return (
+      <code
+        {...props}
+        role="link"
+        tabIndex={0}
+        title={`Open ${text}`}
+        className="cursor-pointer hover:border-accent hover:text-accent"
+        onClick={() => void openLocalFile(text)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") void openLocalFile(text);
+        }}
+      />
+    );
   },
   a: ({ node: _node, ref, ...props }) => {
     // A task or note pill opens in the app, a URL pill in a new tab (see referencePill), and a link to a local file or

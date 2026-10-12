@@ -1002,6 +1002,24 @@ def test_parse_gemini_stream():
     ]
 
 
+def test_parse_gemini_stream_breaks_paragraphs_between_turns():
+    events = [
+        {"type": "message", "role": "assistant", "content": "I will check the files.", "delta": True},
+        {"type": "tool_use", "tool_name": "read_file", "tool_id": "t1", "parameters": {"path": "x"}},
+        {"type": "tool_result", "tool_id": "t1", "status": "success", "output": "..."},
+        {"type": "message", "role": "assistant", "content": "### Heading", "delta": True},
+        {"type": "message", "role": "assistant", "content": "\n", "delta": True},
+        {"type": "thought", "subject": "Listing", "description": "..."},
+        {"type": "message", "role": "assistant", "content": "* List", "delta": True},
+        {"type": "thought", "subject": "Done", "description": "..."},
+        {"type": "message", "role": "assistant", "content": "\n\nEnd", "delta": True},
+    ]
+
+    reply, _error, _calls = agent._parse_gemini_stream("\n".join(json.dumps(e) for e in events))
+
+    assert reply == "I will check the files.\n\n### Heading\n\n* List\n\nEnd"
+
+
 def test_parse_gemini_stream_errors():
     _reply, error, _calls = agent._parse_gemini_stream(
         json.dumps({"type": "result", "status": "error", "error": {"type": "Error", "message": "Quota exceeded"}})

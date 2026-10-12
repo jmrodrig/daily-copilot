@@ -1,5 +1,6 @@
 import {
   Extension,
+  Mark,
   Node,
   decodeHtmlEntities,
   encodeHtmlEntities,
@@ -12,8 +13,14 @@ import Image from "@tiptap/extension-image";
 import Paragraph from "@tiptap/extension-paragraph";
 import { Table, TableCell, TableHeader } from "@tiptap/extension-table";
 import { TextStyle } from "@tiptap/extension-text-style";
+import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
+import { Plugin, PluginKey, TextSelection } from "@tiptap/pm/state";
+import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import type { Element, Root } from "hast";
+import katex from "katex";
 import { defaultSchema, type Options as SanitizeSchema } from "rehype-sanitize";
+
+import { isLocalHref } from "../lib/localFiles";
 
 /**
  * Text color and alignment for notes. Markdown has no syntax for either, so they're saved as inline HTML the
@@ -526,3 +533,347 @@ export const WhiteboardBlock = Node.create({
     return "```whiteboard\n" + data + "\n```";
   },
 });
+
+/**
+ * Math, as the read-only view renders it (remark-math and KaTeX): `$…$` inline, and `$$…$$` on lines of its own.
+ *
+ *   - **Lightship Displacement ($M_L$):** 6,500 kg
+ *
+ *   $$
+ *   RM = \Delta \cdot GZ
+ *   $$
+ *
+ * Inline math is a mark rather than a node, so the marks around it stay open when it's saved: a node in a bold run
+ * closes the bold before it and reopens it after (`**Lightship (**$M_L$**):**`). As a `code` mark its LaTeX is saved
+ * unescaped, and with a lower priority than bold or italic it nests inside them. The editor shows it rendered, and
+ * its LaTeX while the caret is in it (`mathPreview`).
+ */
+
+// No space just inside the dollars, and no digit just after the closing one, so prices ("$5 and $10") stay text.
+const INLINE_MATH = /^(\${1,2})(?![\s$])([^$\n]*?[^\s$\\])\1(?!\d)/;
+const BLOCK_MATH = /^ {0,3}\$\$[ \t]*\n?([\s\S]+?)\n?[ \t]*\$\$[ \t]*(?:\n+|$)/;
+const TEX_ANNOTATION = 'annotation[encoding="application/x-tex"]';
+
+/** The LaTeX a KaTeX rendering was made from, kept in its MathML. */
+const texOf = (element: ParentNode) => element.querySelector(TEX_ANNOTATION)?.textContent?.trim() ?? "";
+
+const mathPreviewKey = new PluginKey<boolean>("mathPreview");
+
+/** The runs of text with a mark (the inline math mark: its LaTeX), and the text each holds. */
+function markRanges(doc: ProseMirrorNode, markName: string) {
+  const ranges: { from: number; to: number; text: string }[] = [];
+  doc.descendants((node, pos) => {
+    if (!node.isText || !node.marks.some((mark) => mark.type.name === markName)) return;
+    const last = ranges[ranges.length - 1];
+    if (last && last.to === pos) {
+      last.to += node.nodeSize;
+      last.text += node.text ?? "";
+    } else {
+      ranges.push({ from: pos, to: pos + node.nodeSize, text: node.text ?? "" });
+    }
+  });
+  return ranges;
+}
+
+/**
+ * Shows each run of inline math rendered, with its LaTeX hidden, unless the caret is in it (and the editor focused):
+ * then the LaTeX is shown to edit. Clicking the rendered math puts the caret in it.
+ */
+function mathPreview(markName: string) {
+  return new Plugin<boolean>({
+    key: mathPreviewKey,
+    state: {
+      init: () => false,
+      apply: (tr, focused) => (tr.getMeta(mathPreviewKey) as boolean | undefined) ?? focused,
+    },
+    props: {
+      decorations(state) {
+        const focused = mathPreviewKey.getState(state);
+        const { from: selFrom, to: selTo } = state.selection;
+        const decorations: Decoration[] = [];
+        for (const { from, to, text: latex } of markRanges(state.doc, markName)) {
+          if (focused && selFrom >= from && selTo <= to) continue;
+          const widget = Decoration.widget(
+            from,
+            (view, getPos) => {
+              const dom = document.createElement("span");
+              dom.className = "note-math-inline-widget";
+              dom.contentEditable = "false";
+              dom.innerHTML = katex.renderToString(latex, { throwOnError: false, output: "html" });
+              dom.addEventListener("mousedown", (event) => {
+                event.preventDefault();
+                const pos = getPos();
+                if (pos === undefined || !view.editable) return;
+                view.focus();
+                view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, pos + latex.length)));
+              });
+              return dom;
+            },
+            { key: `math:${latex}`, side: -1, ignoreSelection: true, stopEvent: () => true },
+          );
+          decorations.push(widget, Decoration.inline(from, to, { class: "note-math-source-hidden" }));
+        }
+        return DecorationSet.create(state.doc, decorations);
+      },
+      handleDOMEvents: {
+        focus: (view) => {
+          if (!mathPreviewKey.getState(view.state)) view.dispatch(view.state.tr.setMeta(mathPreviewKey, true));
+          return false;
+        },
+        blur: (view) => {
+          if (mathPreviewKey.getState(view.state)) view.dispatch(view.state.tr.setMeta(mathPreviewKey, false));
+          return false;
+        },
+      },
+    },
+  });
+}
+
+/** Inline math (see above): a mark over its LaTeX, saved as `$…$`. */
+export const InlineMath = Mark.create({
+  name: "inlineMath",
+  priority: 50,
+  code: true,
+  excludes: "code",
+  inclusive: false,
+  parseHTML() {
+    return [{ tag: "span[data-math-inline]" }];
+  },
+  renderHTML() {
+    return ["span", { class: "note-math-inline", "data-math-inline": "" }, 0];
+  },
+  markdownTokenName: "inlineMath",
+  markdownTokenizer: {
+    name: "inlineMath",
+    level: "inline",
+    // Not an escaped `\$`, which stays a dollar sign.
+    start: (src: string) => src.search(/(?<!\\)\$/),
+    tokenize(src) {
+      const match = INLINE_MATH.exec(src);
+      if (!match) return undefined;
+      return { type: "inlineMath", raw: match[0], text: match[2] };
+    },
+  },
+  parseMarkdown: (token, h) => h.applyMark("inlineMath", [h.createTextNode(String(token.text ?? ""))]),
+  renderMarkdown: (node, h) => `$${h.renderChildren(node)}$`,
+  addProseMirrorPlugins() {
+    return [mathPreview(this.name)];
+  },
+});
+
+const localCodeLinksKey = new PluginKey<DecorationSet>("localCodeLinks");
+
+/**
+ * Inline code holding a local file or folder's path (`\\server\share\…`, `C:\…`), as the chat cites files, styled as a
+ * link with its path as a tooltip, as in the read-only note and the chat. NoteEditor opens it on click.
+ */
+export const LocalCodeLinks = Extension.create({
+  name: "localCodeLinks",
+  addProseMirrorPlugins() {
+    const find = (doc: ProseMirrorNode) =>
+      DecorationSet.create(
+        doc,
+        markRanges(doc, "code").flatMap(({ from, to, text }) =>
+          isLocalHref(text.trim())
+            ? [Decoration.inline(from, to, { class: "cursor-pointer hover:border-accent hover:text-accent", title: `Open ${text.trim()}`, role: "link" })]
+            : [],
+        ),
+      );
+    return [
+      new Plugin<DecorationSet>({
+        key: localCodeLinksKey,
+        state: {
+          init: (_config, state) => find(state.doc),
+          apply: (tr, set) => (tr.docChanged ? find(tr.doc) : set),
+        },
+        props: {
+          decorations: (state) => localCodeLinksKey.getState(state),
+        },
+      }),
+    ];
+  },
+});
+
+/** Display math (see above): a block atom holding its LaTeX, saved as `$$…$$` on lines of its own. */
+export const BlockMath = Node.create({
+  name: "blockMath",
+  group: "block",
+  atom: true,
+  selectable: true,
+  draggable: false,
+  addAttributes() {
+    return {
+      latex: {
+        default: "",
+        parseHTML: (element: HTMLElement) => element.getAttribute("data-math-block") || texOf(element),
+        renderHTML: () => ({}),
+      },
+    };
+  },
+  parseHTML() {
+    return [{ tag: "div[data-math-block]" }, { tag: "span.katex-display" }];
+  },
+  renderHTML({ node }) {
+    const latex = String(node.attrs.latex ?? "");
+    return ["div", { class: "note-math-block", "data-math-block": latex }, `$$\n${latex}\n$$`];
+  },
+  addNodeView() {
+    return ({ node }) => {
+      const dom = document.createElement("div");
+      dom.className = "note-math-block";
+      dom.contentEditable = "false";
+      dom.innerHTML = katex.renderToString(String(node.attrs.latex ?? ""), { displayMode: true, throwOnError: false, output: "html" });
+      return { dom };
+    };
+  },
+  markdownTokenName: "blockMath",
+  markdownTokenizer: {
+    name: "blockMath",
+    level: "block",
+    start: (src: string) => src.search(/^ {0,3}\$\$/m),
+    tokenize(src) {
+      const match = BLOCK_MATH.exec(src);
+      if (!match) return undefined;
+      return { type: "blockMath", raw: match[0], text: match[1].trim() };
+    },
+  },
+  parseMarkdown: (token, h) => h.createNode("blockMath", { latex: String(token.text ?? "") }),
+  renderMarkdown: (node) => `$$\n${String(node.attrs?.latex ?? "")}\n$$`,
+});
+
+/** Drops the zero-width spaces KaTeX pads its layout with, which would end up in the text. */
+function stripZeroWidth(root: ParentNode) {
+  const node = root as unknown as globalThis.Node;
+  const walker = (node.ownerDocument ?? document).createTreeWalker(node, NodeFilter.SHOW_TEXT);
+  for (let text = walker.nextNode(); text; text = walker.nextNode()) {
+    if (text.nodeValue?.includes("​")) text.nodeValue = text.nodeValue.replace(/​/g, "");
+  }
+}
+
+/**
+ * Readies rendered math in copied HTML for pasting: each formula is marked with its LaTeX (`data-math-block`,
+ * `data-math-inline`), which the note editor reads back as math, and keeps only its MathML, which other apps show,
+ * not also its visual layout, which they'd paste as a second, garbled copy of it.
+ */
+export function cleanMathForClipboard(root: ParentNode): void {
+  root.querySelectorAll<HTMLElement>(".katex-display").forEach((display) => display.setAttribute("data-math-block", texOf(display)));
+  root.querySelectorAll<HTMLElement>(".katex").forEach((math) => {
+    if (!math.closest(".katex-display")) math.setAttribute("data-math-inline", texOf(math));
+  });
+  root.querySelectorAll(".katex-html").forEach((layout) => layout.remove());
+  stripZeroWidth(root);
+}
+
+/** Blocks and formatting a copied selection may sit inside, kept around it so it pastes as what it was. */
+const COPIED_ANCESTORS = new Set([
+  ...["H1", "H2", "H3", "H4", "H5", "H6", "UL", "OL", "LI", "PRE", "CODE", "BLOCKQUOTE", "TABLE", "THEAD", "TBODY", "TR"],
+  ...["STRONG", "B", "EM", "I", "DEL", "S", "A"],
+]);
+const TEXT_BLOCKS = /^(P|DIV|H[1-6]|LI|UL|OL|PRE|BLOCKQUOTE|TABLE|TR|HR)$/;
+
+/** Plain text of copied HTML, its blocks on lines of their own and list items bulleted. */
+function plainText(root: ParentNode): string {
+  let out = "";
+  const walk = (node: ParentNode, depth: number) => {
+    for (const child of Array.from(node.childNodes)) {
+      if (child.nodeType === 3) {
+        out += child.nodeValue ?? "";
+        continue;
+      }
+      if (child.nodeType !== 1) continue;
+      const element = child as HTMLElement;
+      if (element.tagName === "BR") {
+        out += "\n";
+        continue;
+      }
+      const block = TEXT_BLOCKS.test(element.tagName);
+      if (block && out && !out.endsWith("\n")) out += "\n";
+      if (element.tagName === "LI") out += `${"  ".repeat(depth)}- `;
+      if ((element.tagName === "TD" || element.tagName === "TH") && element.previousElementSibling) out += "\t";
+      walk(element, element.tagName === "LI" ? depth + 1 : depth);
+      if (block && !out.endsWith("\n")) out += "\n";
+    }
+  };
+  walk(root, 0);
+  return out.replace(/​/g, "").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+/**
+ * The selection within `root` (a rendered reply or note) as clean HTML and plain text to put on the clipboard, or
+ * `null` if nothing in it is selected. A selection starting or ending inside a formula takes all of it, as the
+ * browser's would miss its MathML (and LaTeX) when started on the visible layout. The blocks it sits in (a list, a
+ * heading) are kept around it. In the HTML, math is as `cleanMathForClipboard` leaves it; in the text, it's LaTeX.
+ */
+export function selectionToClipboard(root: HTMLElement): { html: string; text: string } | null {
+  const selection = root.ownerDocument.getSelection();
+  if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return null;
+  const range = selection.getRangeAt(0).cloneRange();
+  if (!root.contains(range.commonAncestorContainer)) return null;
+  const formula = (node: globalThis.Node) => {
+    const element = node.nodeType === 1 ? (node as HTMLElement) : node.parentElement;
+    const math = element?.closest(".katex-display") ?? element?.closest(".katex");
+    return math && root.contains(math) ? math : null;
+  };
+  const start = formula(range.startContainer);
+  if (start) range.setStartBefore(start);
+  const end = formula(range.endContainer);
+  if (end) range.setEndAfter(end);
+
+  let content: globalThis.Node = range.cloneContents();
+  const common = range.commonAncestorContainer;
+  for (let el = common.nodeType === 1 ? (common as HTMLElement) : common.parentElement; el && el !== root; el = el.parentElement) {
+    if (!COPIED_ANCESTORS.has(el.tagName)) continue;
+    const wrapper = el.cloneNode(false);
+    wrapper.appendChild(content);
+    content = wrapper;
+  }
+  const html = root.ownerDocument.createElement("div");
+  html.appendChild(content);
+  const text = html.cloneNode(true) as HTMLElement;
+  cleanMathForClipboard(html);
+  text.querySelectorAll<HTMLElement>(".katex-display").forEach((display) => display.replaceWith(`\n$$\n${texOf(display)}\n$$\n`));
+  text.querySelectorAll<HTMLElement>(".katex").forEach((math) => math.replaceWith(`$${texOf(math)}$`));
+  return { html: html.innerHTML, text: plainText(text) };
+}
+
+/** A copy handler for rendered markdown: puts the selection on the clipboard as `selectionToClipboard` gives it. */
+export function copyCleanSelection(event: { currentTarget: HTMLElement; clipboardData: DataTransfer; preventDefault(): void }) {
+  const data = selectionToClipboard(event.currentTarget);
+  if (!data) return;
+  event.preventDefault();
+  event.clipboardData.setData("text/html", data.html);
+  event.clipboardData.setData("text/plain", data.text);
+}
+
+/**
+ * Readies HTML pasted into a note: rendered math (KaTeX, or as copied above) becomes the math the editor reads, by its
+ * LaTeX, leaving no layout or zero-width spaces behind; and a heading wholly in bold loses the bold, which a heading
+ * already is.
+ */
+export function transformNotePastedHTML(html: string): string {
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  for (const element of Array.from(doc.querySelectorAll<HTMLElement>(".katex-display, [data-math-block]"))) {
+    if (!element.isConnected) continue;
+    const block = doc.createElement("div");
+    block.setAttribute("data-math-block", element.getAttribute("data-math-block") || texOf(element));
+    element.replaceWith(block);
+  }
+  for (const element of Array.from(doc.querySelectorAll<HTMLElement>(".katex, .katex-mathml, [data-math-inline]"))) {
+    if (!element.isConnected) continue;
+    const tex = element.getAttribute("data-math-inline") || element.getAttribute("data-latex") || texOf(element) || element.textContent || "";
+    const math = doc.createElement("span");
+    math.setAttribute("data-math-inline", "");
+    math.textContent = tex.trim();
+    element.replaceWith(math);
+  }
+  doc.querySelectorAll(".katex-html").forEach((layout) => layout.remove());
+  stripZeroWidth(doc.body);
+  const bold = ["h1", "h2", "h3", "h4", "h5", "h6"].flatMap((h) => [`${h} > strong`, `${h} > b`]).join(", ");
+  for (const strong of Array.from(doc.querySelectorAll(bold))) {
+    const others = Array.from(strong.parentElement?.childNodes ?? []).filter(
+      (n) => n !== strong && n.nodeType !== 8 && !(n.nodeType === 3 && !n.nodeValue?.trim()),
+    );
+    if (!others.length) strong.replaceWith(...Array.from(strong.childNodes));
+  }
+  return doc.body.innerHTML;
+}
