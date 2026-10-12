@@ -55,8 +55,8 @@ export const NEUTRAL_TAG = "border-project-neutral/60 text-text-muted";
 // Free-form tags keep their case ("Admin" and "admin" are different tags).
 export const LABEL_TAG = "border-border-default normal-case text-text-secondary";
 
-const PRIORITY_TAG: Record<TriageItem["priority"], string> = {
-  urgent: "border-accent bg-accent/15 text-accent",
+export const PRIORITY_TAG: Record<TriageItem["priority"], string> = {
+  urgent: "border-accent bg-accent/15 font-semibold text-accent",
   high: "border-accent/60 text-accent",
   normal: "border-border-light text-text-secondary",
   low: "border-border-default text-text-muted",
