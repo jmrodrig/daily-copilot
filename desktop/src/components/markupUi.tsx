@@ -144,7 +144,7 @@ export function MarkupTools({
         ) : (
           t.tool === eraser && (
             <span key="eraser" ref={eraserMenuRef} className="relative flex items-center">
-              <Segment on={tool === t.tool} label={`${t.label} (or right-click)`} onClick={() => onTool(t.tool)}>
+              <Segment on={tool === t.tool} label={`${t.label} (or hold right-click)`} onClick={() => onTool(t.tool)}>
                 <ToolIcon path={t.icon} />
               </Segment>
               <button

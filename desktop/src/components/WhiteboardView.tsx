@@ -220,9 +220,10 @@ export default function WhiteboardView({
   // White, which shows on the dark stage.
   const [ink, setInk] = useState(INKS.find((i) => i.name === "White")?.value ?? INKS[5].value);
   const [lineSize, setLineSize] = useState(SIZES[1]);
-  // Space held pans, whatever the tool; the tool a right click swapped for the eraser, for the next to swap back to.
+  // Space held pans, whatever the tool; the tool a held right click swapped for the eraser (and the pointer holding
+  // it), to swap back to once it's let go.
   const [spaceHeld, setSpaceHeld] = useState(false);
-  const previousToolRef = useRef<Tool | null>(null);
+  const previousToolRef = useRef<{ pointerId: number; tool: Tool } | null>(null);
   const activeTool: Tool = !editable || spaceHeld ? "pan" : tool;
 
   // The strokes and the floating elements (by id) picked, those of them still on the board, and the box their
@@ -536,6 +537,8 @@ export default function WhiteboardView({
 
   function pickTool(next: Tool) {
     commitText();
+    // A tool picked outright stays, even mid right click.
+    previousToolRef.current = null;
     setTool(next);
   }
 
@@ -767,22 +770,28 @@ export default function WhiteboardView({
     }
   }
 
-  /** A right click swaps the tool for the eraser, which its drag then erases with, or the eraser back for the tool. */
+  /** A held right click swaps the tool for the eraser, which its drag then erases with, until it's let go (see
+   * releaseRightEraser). */
   function rightDown(e: ReactPointerEvent) {
     e.preventDefault();
     if (!editable || spaceHeld || dragging()) return;
-    if (isEraser(tool)) {
-      pickTool(previousToolRef.current ?? "draw");
-      previousToolRef.current = null;
-      return;
-    }
-    previousToolRef.current = tool;
-    const eraser = eraserRef.current;
-    pickTool(eraser);
-    const point = worldPoint(e);
-    if (!point) return;
+    commitText();
     if (eraserMenu) setEraserMenu(false);
-    eraseDown(eraser, point, e.pointerId);
+    const eraser = isEraser(tool) ? tool : eraserRef.current;
+    if (!isEraser(tool)) {
+      previousToolRef.current = { pointerId: e.pointerId, tool };
+      setTool(eraser);
+    }
+    const point = worldPoint(e);
+    if (point) eraseDown(eraser, point, e.pointerId);
+  }
+
+  /** Letting go of the right click that swapped in the eraser swaps the tool it held back. */
+  function releaseRightEraser(pointerId: number) {
+    const previous = previousToolRef.current;
+    if (previous?.pointerId !== pointerId) return;
+    previousToolRef.current = null;
+    if (isEraser(toolRef.current)) setTool(previous.tool);
   }
 
   function pointerDown(e: ReactPointerEvent) {
@@ -919,6 +928,11 @@ export default function WhiteboardView({
   }
 
   function pointerUp(e: ReactPointerEvent) {
+    finishPointer(e);
+    releaseRightEraser(e.pointerId);
+  }
+
+  function finishPointer(e: ReactPointerEvent) {
     pointers.current.delete(e.pointerId);
     if (!pointers.current.size) setPanning(false);
     if (transforming.current?.pointerId === e.pointerId) {
@@ -1135,7 +1149,7 @@ export default function WhiteboardView({
         onPointerUp={pointerUp}
         onPointerCancel={pointerUp}
         onPointerLeave={() => setHover(null)}
-        // A right click swaps to the eraser and back (see rightDown), so it doesn't open the browser's menu.
+        // A held right click erases (see rightDown), so it doesn't open the browser's menu.
         onContextMenu={(e) => e.preventDefault()}
         draggable={false}
         onDragStart={preventDrag}

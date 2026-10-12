@@ -117,6 +117,36 @@ test("a whiteboard note draws, saves, undoes and toggles its grid", async ({ pag
   expect(errors).toEqual([]);
 });
 
+test("a held right click erases with the eraser, then hands back the tool it held", async ({ page }) => {
+  const { errors, saves } = await openNote(page, { state: "draft", type: "whiteboard" }, JSON.stringify(board()));
+  const pen = page.getByRole("button", { name: /^Pen/ });
+  const eraser = page.getByRole("button", { name: /^Lasso eraser/ });
+  const box = await stageBox(page);
+  await drag(page, { x: box.x + 150, y: box.y + 150 }, { x: box.x + 250, y: box.y + 170 });
+  await expect.poll(() => saves.length && lastBoard(saves).markup.strokes.length, { timeout: 8000 }).toBe(1);
+  await expect(pen).toHaveAttribute("aria-pressed", "true");
+
+  // Held, the right button swaps in the eraser, and a loop round the stroke deletes it.
+  const around = [
+    { x: box.x + 120, y: box.y + 120 },
+    { x: box.x + 280, y: box.y + 120 },
+    { x: box.x + 280, y: box.y + 200 },
+    { x: box.x + 120, y: box.y + 200 },
+  ];
+  await page.mouse.move(around[0].x, around[0].y);
+  await page.mouse.down({ button: "right" });
+  await expect(eraser).toHaveAttribute("aria-pressed", "true");
+  for (const p of [...around.slice(1), around[0]]) await page.mouse.move(p.x, p.y, { steps: 6 });
+  await page.mouse.up({ button: "right" });
+
+  // Let go, the pen is back, without another right click, and draws again.
+  await expect(pen).toHaveAttribute("aria-pressed", "true");
+  await expect.poll(() => lastBoard(saves).markup.strokes.length, { timeout: 8000 }).toBe(0);
+  await drag(page, { x: box.x + 150, y: box.y + 250 }, { x: box.x + 250, y: box.y + 270 });
+  await expect.poll(() => lastBoard(saves).markup.strokes.length, { timeout: 8000 }).toBe(1);
+  expect(errors).toEqual([]);
+});
+
 test("floating elements are picked, dragged, scaled, restacked and deleted", async ({ page }) => {
   const content = JSON.stringify(
     board({

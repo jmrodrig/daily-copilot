@@ -143,8 +143,8 @@ export default function MediaLightbox({
   const textEntryRef = useRef(textEntry);
   textEntryRef.current = textEntry;
   const textInputRef = useRef<HTMLInputElement>(null);
-  // The tool a right click swapped for the eraser, for the next to swap back to.
-  const previousToolRef = useRef<Tool | null>(null);
+  // The tool a held right click swapped for the eraser (and the pointer holding it), to swap back to once it's let go.
+  const previousToolRef = useRef<{ pointerId: number; tool: Tool } | null>(null);
   // The strokes the select tool picked (those of them still in `strokes`), the lasso picking them (or, for the lasso
   // eraser, deleting them) as it's drawn, the drag transforming them, and the handle the pointer is over.
   const [selected, setSelected] = useState<Set<Stroke>>(() => new Set());
@@ -503,22 +503,28 @@ export default function MediaLightbox({
     }
   }
 
-  /** A right click swaps the tool for the eraser, which its drag then erases with, or the eraser back for the tool. */
+  /** A held right click swaps the tool for the eraser, which its drag then erases with, until it's let go (see
+   * releaseRightEraser). */
   function rightDown(e: ReactPointerEvent) {
     e.preventDefault();
     if (!editing || drawing.current || erasing.current || selecting.current || transforming.current) return;
     commitText();
-    if (isEraser(tool)) {
-      setTool(previousToolRef.current ?? "draw");
-      previousToolRef.current = null;
-      return;
-    }
-    previousToolRef.current = tool;
-    const eraser = eraserRef.current;
-    setTool(eraser);
     setEraserMenu(false);
+    const eraser = isEraser(tool) ? tool : eraserRef.current;
+    if (!isEraser(tool)) {
+      previousToolRef.current = { pointerId: e.pointerId, tool };
+      setTool(eraser);
+    }
     const point = imagePoint(e);
     if (point) eraseDown(eraser, point, e.pointerId);
+  }
+
+  /** Letting go of the right click that swapped in the eraser swaps the tool it held back. */
+  function releaseRightEraser(pointerId: number) {
+    const previous = previousToolRef.current;
+    if (previous?.pointerId !== pointerId) return;
+    previousToolRef.current = null;
+    if (isEraser(toolRef.current)) setTool(previous.tool);
   }
 
   function pointerDown(e: ReactPointerEvent) {
@@ -654,6 +660,11 @@ export default function MediaLightbox({
   }
 
   function pointerUp(e: ReactPointerEvent) {
+    finishPointer(e);
+    releaseRightEraser(e.pointerId);
+  }
+
+  function finishPointer(e: ReactPointerEvent) {
     pointers.current.delete(e.pointerId);
     if (transforming.current?.pointerId === e.pointerId) {
       transforming.current = null;
@@ -787,7 +798,7 @@ export default function MediaLightbox({
         onPointerMove={pointerMove}
         onPointerUp={pointerUp}
         onPointerCancel={pointerUp}
-        // A right click swaps to the eraser and back (see rightDown), so it doesn't open the browser's menu.
+        // A held right click erases (see rightDown), so it doesn't open the browser's menu.
         onContextMenu={(e) => e.preventDefault()}
         onDoubleClick={() => !editing && fit()}
       >
