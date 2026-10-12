@@ -1,4 +1,5 @@
 import io
+import socket
 import sys
 import zipfile
 
@@ -142,6 +143,16 @@ def test_open_is_refused_for_remote_clients(client, design, monkeypatch):
     assert opened == []
 
 
+def test_is_local_host_recognises_this_machine():
+    own = socket.getaddrinfo(socket.gethostname(), None)[0][4][0].split("%")[0]
+
+    assert local_files.is_local_host("127.0.0.1")
+    assert local_files.is_local_host("::1")
+    assert local_files.is_local_host(own)
+    assert not local_files.is_local_host("testclient")
+    assert not local_files.is_local_host("203.0.113.9")
+    assert not local_files.is_local_host(None)
+
 def test_check_path_reports_files_folders_and_missing_paths(design):
     folder = local_files.check_path(design.as_uri())
     assert folder == {"exists": True, "name": "Design data", "type": "directory", "path": str(design), "unc_path": str(design)}
@@ -215,6 +226,19 @@ def test_to_unc_path_resolves_mapped_drives_and_keeps_unc_paths(monkeypatch):
 
 
 @windows_only
+def test_to_mapped_path_resolves_unc_to_mapped_drive(monkeypatch):
+    shares = {"O:": SHARE, "P:": r"\\syfileapp1\Archive Data"}
+    monkeypatch.setattr(local_files, "_mapped_share", shares.get)
+
+    assert local_files.to_mapped_path(SHARE + r"\Lawrences Files") == r"O:\Lawrences Files"
+    assert local_files.to_mapped_path("//syfileapp1/Archive Data/Older Yachts/x") == r"O:\x"
+    assert local_files.to_mapped_path(SHARE) == "O:\\"
+    assert local_files.to_mapped_path(r"\\syfileapp1\Archive Data\Other") == r"P:\Other"
+    assert local_files.to_mapped_path(r"\\otherserver\share\x") == r"\\otherserver\share\x"
+    assert local_files.to_mapped_path(r"C:\Projects\C7801") == r"C:\Projects\C7801"
+
+
+@windows_only
 def test_shortcut_points_at_the_network_share(design, monkeypatch):
     monkeypatch.setattr(local_files, "to_unc_path", lambda _raw: SHARE + r"\Lawrences Files")
     content, name, unc = local_files.generate_shortcut_content(str(design))
@@ -250,3 +274,32 @@ def test_shortcut_endpoint_names_non_ascii_files(client, design):
 def test_stat_and_check_report_the_unc_path(client, design):
     assert client.get("/api/local-files/stat", params={"path": str(design)}).json()["unc_path"] == str(design)
     assert client.get("/api/local-files/check", params={"path": str(design)}).json()["unc_path"] == str(design)
+
+
+def test_protocol_installer_endpoint(client):
+    response = client.get("/api/local-files/protocol-installer")
+
+    assert response.status_code == 200
+    assert response.headers["content-disposition"] == 'attachment; filename="install-copilot-open.bat"'
+    assert response.headers["x-content-type-options"] == "nosniff"
+    script = response.text
+    assert "\r\n" in script and "\n" not in script.replace("\r\n", "")
+    assert r"HKCU\Software\Classes\copilot-open" in script
+    assert "copilot-open.js" in script
+    assert r'wscript.exe //NoLogo //E:JScript \"%JS%\" \"%%1\"' in script
+    assert "curl.exe" in script and "/api/local-files/download" in script
+
+
+def test_protocol_installer_ps1_endpoint(client):
+    response = client.get("/api/local-files/protocol-installer.ps1")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "text/plain; charset=utf-8"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert "content-disposition" not in response.headers
+    script = response.text
+    assert r"HKCU:\Software\Classes\copilot-open" in script
+    assert "copilot-open.js" in script
+    assert "Unblock-File -LiteralPath $js" in script
+    assert "curl.exe" in script and "/api/local-files/download" in script
+    assert "$code = @'\n" in script and script.count("\n'@\n") == 1

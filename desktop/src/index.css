@@ -327,18 +327,18 @@ body {
 
 /* Links to local files and folders (file:///…, C:\…, \\server\…; see lib/localFiles): pills like attachments', with a
    folder icon. Opened on this machine, downloaded on a remote one. */
-.note-body a:is([href^="file:" i], [href*=":\\"], [href*=":/"]:not([href*="://"]), [href^="\\\\"]) {
+.note-body a:not(.reference-pill):is([href^="file:" i], [href*=":\\"], [href*=":/"]:not([href*="://"]), [href^="\\\\"]) {
   @apply inline-flex items-center gap-1.5 rounded-full border border-border-default bg-surface-raised px-2.5 py-0.5 text-xs font-medium text-text-primary no-underline align-middle mx-1;
 }
-.note-body a:is([href^="file:" i], [href*=":\\"], [href*=":/"]:not([href*="://"]), [href^="\\\\"]):hover {
+.note-body a:not(.reference-pill):is([href^="file:" i], [href*=":\\"], [href*=":/"]:not([href*="://"]), [href^="\\\\"]):hover {
   @apply bg-surface-hover border-border-strong;
 }
-.note-body a:is([href^="file:" i], [href*=":\\"], [href*=":/"]:not([href*="://"]), [href^="\\\\"]),
-.note-body a:is([href^="file:" i], [href*=":\\"], [href*=":/"]:not([href*="://"]), [href^="\\\\"]) *,
-.note-body a:is([href^="file:" i], [href*=":\\"], [href*=":/"]:not([href*="://"]), [href^="\\\\"])::before {
+.note-body a:not(.reference-pill):is([href^="file:" i], [href*=":\\"], [href*=":/"]:not([href*="://"]), [href^="\\\\"]),
+.note-body a:not(.reference-pill):is([href^="file:" i], [href*=":\\"], [href*=":/"]:not([href*="://"]), [href^="\\\\"]) *,
+.note-body a:not(.reference-pill):is([href^="file:" i], [href*=":\\"], [href*=":/"]:not([href*="://"]), [href^="\\\\"])::before {
   cursor: pointer;
 }
-.note-body a:is([href^="file:" i], [href*=":\\"], [href*=":/"]:not([href*="://"]), [href^="\\\\"])::before {
+.note-body a:not(.reference-pill):is([href^="file:" i], [href*=":\\"], [href*=":/"]:not([href*="://"]), [href^="\\\\"])::before {
   content: "";
   display: inline-block;
   width: 12px;

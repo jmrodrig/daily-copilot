@@ -1,4 +1,4 @@
-import { getJson, message, sendJson } from "./api";
+import { getJson, message } from "./api";
 
 // Shape of GET /api/local-files/stat (see LocalFileStat in backend/schemas.py).
 export type LocalFileStat = { name: string; type: "file" | "directory"; size: number; partial: boolean; unc_path?: string | null };
@@ -34,12 +34,8 @@ export async function checkLocalFile(href: string, signal?: AbortSignal): Promis
   }
 }
 
-function isLocalhost(): boolean {
-  return ["localhost", "127.0.0.1", "[::1]"].includes(window.location.hostname);
-}
-
 /** Copy text to the clipboard; false if the browser won't (`navigator.clipboard` needs HTTPS or localhost). */
-async function copyText(text: string): Promise<boolean> {
+export async function copyText(text: string): Promise<boolean> {
   try {
     if (navigator.clipboard) {
       await navigator.clipboard.writeText(text);
@@ -63,33 +59,41 @@ async function copyText(text: string): Promise<boolean> {
   }
 }
 
+function encodeParam(value: string): string {
+  return encodeURIComponent(value).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+}
+
 /**
- * Open a linked local file or folder. On the machine running the backend it opens in its default program. A remote
- * client downloads a small Windows shortcut (`.url`) to it on the network share, which opens it straight from the share,
- * and gets the share's path on its clipboard in case the shortcut is blocked; nothing large crosses HTTP.
+ * A `copilot-open:` URL for a remote Windows client's protocol handler (see `protocol-installer` on the backend):
+ * carries both the path as linked (`Y:\…`) and the share's UNC path (`\\server\share\…`), so whichever the client
+ * reaches opens in its default program or Explorer. With the app's `origin`, a client that reaches neither downloads
+ * the file from the server and opens that copy.
+ */
+export function protocolUrl(path: string, uncPath?: string | null, origin?: string | null): string {
+  const parts = [`path=${encodeParam(path)}`];
+  if (uncPath && uncPath !== path) parts.push(`unc=${encodeParam(uncPath)}`);
+  if (origin) parts.push(`origin=${encodeParam(origin)}`);
+  return `copilot-open://open?${parts.join("&")}`;
+}
+
+/**
+ * Open a linked local file or folder through the `copilot-open:` protocol, on whichever machine the browser runs: the
+ * backend registers it on its own machine at startup, and a remote client gets it from the setup script in Space
+ * Preferences. Launched from the browser, it opens in the user's visible desktop (unlike a backend started as a
+ * background service), straight from the mapped drive or network share; the share's path goes on the clipboard as a
+ * fallback, and nothing large crosses HTTP.
  */
 export async function openLocalFile(href: string): Promise<void> {
   try {
-    if (isLocalhost()) {
-      await sendJson("POST", "/api/local-files/open", { path: href });
-      return;
-    }
     // `check`, not `stat`: it doesn't total a folder's size, so it answers at once even for a huge share.
     const found = await getJson<LocalFileCheck>(`/api/local-files/check?path=${encodeURIComponent(href)}`);
     if (!found.exists) throw new Error(found.error ?? "Not found");
-    const networkPath = found.unc_path || href;
-    const copied = await copyText(networkPath);
+    void copyText(found.unc_path || found.path || href);
     const anchor = document.createElement("a");
-    anchor.href = `/api/local-files/shortcut?path=${encodeURIComponent(href)}`;
-    anchor.download = `${found.name || "Network-Shortcut"}.url`;
+    anchor.href = protocolUrl(found.path || href, found.unc_path, window.location.origin);
     document.body.appendChild(anchor);
     anchor.click();
     anchor.remove();
-    window.alert(
-      copied
-        ? `Opening via network drive... (Shortcut downloaded. Network path also copied to clipboard: ${networkPath})`
-        : `Opening via network drive... (Shortcut downloaded. Network path: ${networkPath})`,
-    );
   } catch (err) {
     window.alert(`Could not open ${href}: ${message(err)}`);
   }

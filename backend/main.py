@@ -85,6 +85,7 @@ CAPTURE_SOURCE = "android_app"
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     init_db()
+    local_files.install_protocol_handler()
     with database.SessionLocal() as db:
         spaces.migrate(db)
         for space in db.scalars(select(Space)).all():
@@ -912,9 +913,6 @@ DESKTOP_SOURCE = "desktop"
 # Files and folders on this machine linked from notes (see local_files): opened here, and opened from the network share
 # through a downloaded Windows shortcut by remote clients.
 
-_LOOPBACK = {"127.0.0.1", "::1", "localhost"}
-
-
 def _local_file_errors(exc: Exception) -> HTTPException:
     if isinstance(exc, FileNotFoundError):
         return HTTPException(status_code=404, detail=str(exc))
@@ -926,7 +924,7 @@ def _local_file_errors(exc: Exception) -> HTTPException:
 @app.post("/api/local-files/open", status_code=204)
 def open_local_file(request: LocalPathRequest, http: Request) -> None:
     """Open a linked file or folder with its default program; only for a client on this machine."""
-    if http.client is None or http.client.host not in _LOOPBACK:
+    if http.client is None or not local_files.is_local_host(http.client.host):
         raise HTTPException(status_code=403, detail="Local files can only be opened on the machine running Co-Pilot")
     try:
         local_files.open_path(request.path)
@@ -965,6 +963,32 @@ def get_local_file_shortcut(path: str) -> Response:
             "Content-Disposition": f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(filename)}",
             "X-Content-Type-Options": "nosniff",
         },
+    )
+
+
+@app.get("/api/local-files/protocol-installer")
+def get_protocol_installer() -> Response:
+    """A one-time Windows setup script (`install-copilot-open.bat`) that registers the `copilot-open:` URL protocol
+    for the current user on a remote client, so file and folder links open straight from its mapped network drive."""
+    content, filename = local_files.generate_protocol_installer()
+    return Response(
+        content=content.encode("utf-8"),
+        media_type="application/x-bat",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@app.get("/api/local-files/protocol-installer.ps1")
+def get_protocol_installer_ps1() -> Response:
+    """PowerShell setup script (`irm .../api/local-files/protocol-installer.ps1 | iex`) that registers `copilot-open:`
+    on a remote Windows client without a browser file download, so Windows 11 Smart App Control does not block it."""
+    return Response(
+        content=local_files.generate_protocol_installer_ps1().encode("utf-8"),
+        media_type="text/plain; charset=utf-8",
+        headers={"X-Content-Type-Options": "nosniff"},
     )
 
 

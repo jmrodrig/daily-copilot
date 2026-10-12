@@ -4,7 +4,7 @@ import { useLocation } from "react-router-dom";
 import ColorPicker from "../components/ColorPicker";
 import { Tag } from "../components/TriageBoard";
 import { errorDetail, getJson, message, PROMPTS_CHANGED, sendJson, type SavedPrompt } from "../lib/api";
-import { checkLocalFile } from "../lib/localFiles";
+import { checkLocalFile, copyText } from "../lib/localFiles";
 import { pillStyle } from "../lib/colors";
 import { useSpace, type CustomFieldDef, type CustomFieldType, type Space } from "../lib/space";
 import { DEFAULT_STATUS_COLORS, statusColor, STATUS_LABELS, STATUSES, type ProjectOption, type ProjectUpdate, type StatusFlow, type TaskStatus } from "../lib/tasks";
@@ -151,7 +151,15 @@ function RagFoldersEditor({ space, onSave }: { space: Space; onSave: (folders: s
   const [path, setPath] = useState("");
   const [checking, setChecking] = useState(false);
   const [invalid, setInvalid] = useState<string | null>(null);
+  const [copied, setCopied] = useState<boolean | null>(null);
   const { save, saving, status, touched } = useSaver(onSave);
+  // Run from Win+R or PowerShell, it fetches the installer in memory, so Smart App Control has no downloaded file to block.
+  const setupCommand = `powershell -NoProfile -ExecutionPolicy Bypass -Command "irm '${window.location.origin}/api/local-files/protocol-installer.ps1' | iex"`;
+
+  async function copySetupCommand() {
+    setCopied(await copyText(setupCommand));
+    window.setTimeout(() => setCopied(null), 2000);
+  }
 
   async function add(event: FormEvent) {
     event.preventDefault();
@@ -221,6 +229,28 @@ function RagFoldersEditor({ space, onSave }: { space: Space; onSave: (folders: s
       </form>
       {invalid && <p className="text-xs text-accent">{invalid}</p>}
       {status}
+      <div className="flex flex-col gap-2 border-t border-border-default pt-3">
+        <div className="flex items-center gap-3">
+          <p className="flex-1 text-[13px] text-text-muted">
+            On another Windows PC, copy this command, press <kbd className="font-semibold">Win + R</kbd> (or open
+            PowerShell), paste it, and press Enter once so clicked file and folder links open straight from its mapped
+            network drive (bypasses Smart App Control).
+          </p>
+          <button type="button" className="btn min-h-8 !text-xs" onClick={() => void copySetupCommand()}>
+            {copied === null ? "Copy Setup Command" : copied ? "Copied!" : "Copy failed"}
+          </button>
+        </div>
+        <code className="block select-all break-all rounded-lg border border-border-default px-3 py-2 font-mono text-[12px]">
+          {setupCommand}
+        </code>
+        <p className="text-[13px] text-text-muted">
+          Or{" "}
+          <a href="/api/local-files/protocol-installer" download="install-copilot-open.bat" className="underline">
+            download the Windows Link Opener (.bat)
+          </a>{" "}
+          if Smart App Control is off.
+        </p>
+      </div>
     </section>
   );
 }

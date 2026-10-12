@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { protocolUrl } from '../src/lib/localFiles';
 
 const MANUAL = String.raw`\\SYFILEAPP1\Shared\Spirit 44E\Owner's Manual.pdf`;
 const PLANS = String.raw`\\SYFILEAPP1\Shared\Spirit 44E\Plans`;
@@ -103,4 +104,17 @@ test('a published note shows a UNC pill as a local file link, opening the file o
 
   await link.click();
   await expect.poll(() => opened).toEqual([MANUAL]);
+});
+
+test('protocolUrl encodes the linked and UNC paths into a copilot-open: link', () => {
+  const mapped = String.raw`Y:\Spirit 44E\Owner's (1) [1] & co.pdf`;
+  const unc = String.raw`\\SYFILEAPP1\Shared\Spirit 44E\Owner's (1) [1] & co.pdf`;
+  const encoded = 'Spirit%2044E%5COwner%27s%20%281%29%20%5B1%5D%20%26%20co.pdf';
+
+  expect(protocolUrl(mapped, unc)).toBe(`copilot-open://open?path=Y%3A%5C${encoded}&unc=%5C%5CSYFILEAPP1%5CShared%5C${encoded}`);
+  expect(protocolUrl(unc, unc)).toBe(`copilot-open://open?path=%5C%5CSYFILEAPP1%5CShared%5C${encoded}`);
+  expect(protocolUrl(mapped, null)).toBe(`copilot-open://open?path=Y%3A%5C${encoded}`);
+  expect(protocolUrl(mapped, unc, 'https://designer.tailf76a98.ts.net')).toBe(
+    `copilot-open://open?path=Y%3A%5C${encoded}&unc=%5C%5CSYFILEAPP1%5CShared%5C${encoded}&origin=https%3A%2F%2Fdesigner.tailf76a98.ts.net`,
+  );
 });

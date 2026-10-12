@@ -13,6 +13,7 @@ import fnmatch
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -81,7 +82,7 @@ def check_path(raw: str) -> dict[str, Any]:
             "exists": True,
             "name": path.name or str(path),
             "type": "directory" if is_dir else "file",
-            "path": str(path),
+            "path": to_mapped_path(raw),
             "unc_path": to_unc_path(raw),
         }
     except (LocalFileError, OSError) as exc:
@@ -131,6 +132,24 @@ def open_path(raw: str) -> None:
         subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", str(path)])
 
 
+_LOOPBACK = {"127.0.0.1", "::1", "localhost"}
+
+
+def is_local_host(host: str | None) -> bool:
+    """True when `host` is this machine itself: a loopback address, or one of this machine's own network/Tailscale
+    interface addresses (as seen when the user on this machine opens Co-Pilot through its LAN or Tailscale URL)."""
+    if not host:
+        return False
+    clean = host.split("%")[0].strip("[]")
+    if clean in _LOOPBACK:
+        return True
+    try:
+        own = {info[4][0].split("%")[0] for info in socket.getaddrinfo(socket.gethostname(), None)}
+    except OSError:
+        return False
+    return clean in own
+
+
 _ERROR_MORE_DATA = 234
 _ERROR_CONNECTION_UNAVAIL = 1201  # a persistent mapping that isn't connected right now; its share is still known
 
@@ -171,6 +190,31 @@ def to_unc_path(raw: str) -> str:
     return text
 
 
+def to_mapped_path(raw: str) -> str:
+    r"""A link's path through a mapped drive when there is one: on Windows a UNC path under a mapped share becomes
+    the drive's path (`\\syfileapp1\Archive Data\Older Yachts\Lawrences Files` -> `O:\Lawrences Files`), using the
+    longest matching share; any other path is returned as it is."""
+    path = to_path(raw)
+    text = str(path)
+    if sys.platform != "win32" or not text.startswith(("\\\\", "//")):
+        return text
+    text = text.replace("/", "\\")
+    best: tuple[str, str] | None = None
+    for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+        share = _mapped_share(f"{letter}:")
+        if not share:
+            continue
+        share = share.rstrip("\\")
+        if (text.lower() == share.lower() or text.lower().startswith(share.lower() + "\\")) and (
+            best is None or len(share) > len(best[1])
+        ):
+            best = (letter, share)
+    if best:
+        letter, share = best
+        return f"{letter}:{text[len(share):] or chr(92)}"
+    return str(path)
+
+
 def _file_url(path: str) -> str:
     """A `file:` URL for a UNC or local path (`file://server/share/a%20b`, `file:///C:/x`, `file:///home/x`),
     percent-encoded so the shortcut is plain ASCII whatever the code page."""
@@ -187,6 +231,155 @@ def generate_shortcut_content(raw: str) -> tuple[str, str, str]:
     unc_path = to_unc_path(raw)
     content = f"[InternetShortcut]\r\nURL={_file_url(unc_path)}\r\n"
     return content, f"{path.name or 'Network-Shortcut'}.url", unc_path
+
+
+# The `copilot-open:` handler on a remote Windows client, run by `wscript.exe` (no console window): opens the path as
+# linked (`Y:\...`) if the client has it, else the share's UNC path, in its default program or Windows Explorer.
+# A client that reaches neither (over Tailscale, say) downloads the file from the server (`origin`) to %TEMP% instead.
+# Programs and scripts are refused, so a web page can't use a link to run one. JScript is ES3; no double quotes or `%`,
+# so `_echo_lines` can write it from a batch file.
+_PROTOCOL_OPENER_JS = r"""// Co-Pilot Link Opener: opens copilot-open://open?path=...&unc=...&origin=... links (installed by install-copilot-open.bat).
+var BLOCKED = /\.(exe|com|scr|pif|bat|cmd|ps1|psm1|vbs|vbe|js|jse|wsf|wsh|hta|msi|msp|lnk|reg|cpl|jar|application)$/i;
+var uri = WScript.Arguments.length ? WScript.Arguments(0) : '';
+var start = uri.indexOf('?');
+var pairs = start < 0 ? [] : uri.substring(start + 1).replace(/\/+$/, '').split('&');
+var params = {};
+for (var i = 0; i < pairs.length; i++) {
+  var eq = pairs[i].indexOf('=');
+  if (eq < 0) continue;
+  try {
+    params[pairs[i].substring(0, eq)] = decodeURIComponent(pairs[i].substring(eq + 1).replace(/\+/g, ' '));
+  } catch (e) {}
+}
+var path = params.path || '';
+var unc = params.unc || '';
+var origin = (params.origin || '').replace(/\/+$/, '');
+var fso = new ActiveXObject('Scripting.FileSystemObject');
+var shell = new ActiveXObject('WScript.Shell');
+function exists(p) {
+  return !!p && (fso.FileExists(p) || fso.FolderExists(p));
+}
+var target = exists(path) ? path : exists(unc) ? unc : unc || path;
+if (!exists(target) && /^https?:\/\//i.test(origin) && !BLOCKED.test(target)) {
+  var name = target.replace(/[\\\/]+$/, '').split(/[\\\/]/).pop() || 'file';
+  var dir = fso.GetSpecialFolder(2) + '\\CoPilot';
+  if (!fso.FolderExists(dir)) {
+    try { fso.CreateFolder(dir); } catch (e) {}
+  }
+  var temp = dir + '\\' + name;
+  var q = String.fromCharCode(34);
+  var dl = origin + '/api/local-files/download?path=' + encodeURIComponent(unc || path);
+  try {
+    if (fso.FileExists(temp)) fso.DeleteFile(temp, true);
+    shell.Run('curl.exe -f -s -L -o ' + q + temp + q + ' ' + q + dl + q, 0, true);
+  } catch (e) {}
+  if (fso.FileExists(temp)) target = temp;
+}
+if (!exists(target)) {
+  shell.Popup('Could not find file or folder on this computer:\n\n' + target + '\n\nMake sure the network drive is connected.', 0, 'Co-Pilot Link Opener', 48);
+} else if (fso.FileExists(target) && BLOCKED.test(target)) {
+  shell.Popup('Co-Pilot links do not run programs or scripts:\n\n' + target, 0, 'Co-Pilot Link Opener', 48);
+} else {
+  new ActiveXObject('Shell.Application').ShellExecute(target, '', '', 'open', 1);
+}
+"""
+
+_BATCH_SPECIAL = re.compile(r"([&|<>^()])")
+
+
+def _echo_lines(text: str, target: str) -> list[str]:
+    """Batch lines writing `text` (no double quotes or `%`) to the file `target` names, one `echo` per line."""
+    lines = []
+    for index, line in enumerate(text.splitlines()):
+        if '"' in line or "%" in line:
+            raise ValueError(f"Can't echo from a batch file: {line}")
+        lines.append(f'{">" if index == 0 else ">>"}"{target}" echo({_BATCH_SPECIAL.sub(r"^\1", line)}')
+    return lines
+
+
+def generate_protocol_installer() -> tuple[str, str]:
+    """A Windows batch script registering the `copilot-open:` URL protocol for the current user (no admin rights):
+    `(content, file name)`. It writes the handler to `%LOCALAPPDATA%\\CoPilot\\copilot-open.js` and points
+    `HKCU\\Software\\Classes\\copilot-open` at it, so a remote client opens linked files from its mapped drive or share."""
+    lines = [
+        "@echo off",
+        "setlocal DisableDelayedExpansion",
+        "rem Co-Pilot Link Opener: lets file and folder links clicked in Co-Pilot open on this computer.",
+        'set "DIR=%LOCALAPPDATA%\\CoPilot"',
+        'set "JS=%DIR%\\copilot-open.js"',
+        'if not exist "%DIR%" mkdir "%DIR%"',
+        *_echo_lines(_PROTOCOL_OPENER_JS, "%JS%"),
+        'if not exist "%JS%" goto failed',
+        'reg add "HKCU\\Software\\Classes\\copilot-open" /ve /d "URL:Co-Pilot Local File Protocol" /f >nul || goto failed',
+        'reg add "HKCU\\Software\\Classes\\copilot-open" /v "URL Protocol" /d "" /f >nul || goto failed',
+        # %%1 is the clicked link, passed on by Windows; \" is a quote inside reg's value.
+        'reg add "HKCU\\Software\\Classes\\copilot-open\\shell\\open\\command" /ve'
+        ' /d "wscript.exe //NoLogo //E:JScript \\"%JS%\\" \\"%%1\\"" /f >nul || goto failed',
+        "echo Co-Pilot Link Opener installed. File and folder links in Co-Pilot now open on this computer.",
+        "pause",
+        "exit /b 0",
+        ":failed",
+        "echo Could not install the Co-Pilot Link Opener.",
+        "pause",
+        "exit /b 1",
+    ]
+    return "\r\n".join(lines) + "\r\n", "install-copilot-open.bat"
+
+
+def generate_protocol_installer_ps1() -> str:
+    r"""A PowerShell setup script registering the `copilot-open:` URL protocol for the current user (no admin rights).
+
+    Meant to be run once on a remote Windows client as `irm '<origin>/api/local-files/protocol-installer.ps1' | iex`
+    (from Win+R or a terminal), which fetches and runs it in memory. Unlike a batch file downloaded from the browser,
+    the handler script it writes to `%LOCALAPPDATA%\CoPilot\copilot-open.js` never carries a Mark-of-the-Web, so
+    Windows 11 Smart App Control doesn't block it; it also runs `Unblock-File` on it to be sure. It then points
+    `HKCU\Software\Classes\copilot-open` at the handler, exactly as `generate_protocol_installer` and
+    `install_protocol_handler` do, so linked files open from the client's mapped drive or share.
+    """
+    return (
+        "$ErrorActionPreference = 'Stop'\n"
+        "$dir = Join-Path $env:LOCALAPPDATA 'CoPilot'\n"
+        "New-Item -ItemType Directory -Path $dir -Force | Out-Null\n"
+        "$js = Join-Path $dir 'copilot-open.js'\n"
+        # A single-quoted here-string keeps the handler literal; none of its lines start with the '@ terminator.
+        "$code = @'\n"
+        f"{_PROTOCOL_OPENER_JS}"
+        "'@\n"
+        "[System.IO.File]::WriteAllText($js, $code, [System.Text.UTF8Encoding]::new($false))\n"
+        "Unblock-File -LiteralPath $js -ErrorAction SilentlyContinue\n"
+        "New-Item -Path 'HKCU:\\Software\\Classes\\copilot-open\\shell\\open\\command' -Force | Out-Null\n"
+        "Set-ItemProperty -Path 'HKCU:\\Software\\Classes\\copilot-open' -Name '(Default)' "
+        "-Value 'URL:Co-Pilot Local File Protocol'\n"
+        "New-ItemProperty -Path 'HKCU:\\Software\\Classes\\copilot-open' -Name 'URL Protocol' -Value '' "
+        "-PropertyType String -Force | Out-Null\n"
+        # %1 is the clicked link, passed on by Windows to the handler.
+        "Set-ItemProperty -Path 'HKCU:\\Software\\Classes\\copilot-open\\shell\\open\\command' -Name '(Default)' "
+        "-Value ('wscript.exe //NoLogo //E:JScript \"' + $js + '\" \"%1\"')\n"
+        "(New-Object -ComObject WScript.Shell).Popup('Co-Pilot Link Opener installed. "
+        "File and folder links in Co-Pilot now open on this computer.', 0, 'Co-Pilot Link Opener', 64) | Out-Null\n"
+    )
+
+
+def install_protocol_handler() -> bool:
+    """Register the `copilot-open:` URL protocol for the current Windows user on this machine, as the
+    `generate_protocol_installer` script does on a remote client; False off Windows or if it fails. A link opened from
+    the browser runs in the user's visible desktop, unlike `open_path` from a backend started as a background service."""
+    if sys.platform != "win32":
+        return False
+    import winreg
+
+    js_path = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local")) / "CoPilot" / "copilot-open.js"
+    try:
+        js_path.parent.mkdir(parents=True, exist_ok=True)
+        js_path.write_text(_PROTOCOL_OPENER_JS, encoding="utf-8")
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\Classes\copilot-open") as key:
+            winreg.SetValueEx(key, "", 0, winreg.REG_SZ, "URL:Co-Pilot Local File Protocol")
+            winreg.SetValueEx(key, "URL Protocol", 0, winreg.REG_SZ, "")
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\Classes\copilot-open\shell\open\command") as key:
+            winreg.SetValueEx(key, "", 0, winreg.REG_SZ, f'wscript.exe //NoLogo //E:JScript "{js_path}" "%1"')
+    except OSError:
+        return False
+    return True
 
 
 def file_path(raw: str) -> Path:
