@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode, type RefObject } from "react";
 import Markdown, { defaultUrlTransform, type Components } from "react-markdown";
 import { Link, useLocation, type Location } from "react-router-dom";
 import rehypeKatex from "rehype-katex";
@@ -59,6 +59,10 @@ type UsedPrompt = { command: string; instruction: string; rest: string };
 type Entry =
   | { role: "user"; content: string; prompt: UsedPrompt | null; context: string | null }
   | { role: "assistant"; content: string; edits: Edit[]; written: string[]; toolCalls: ToolCall[] };
+/** A conversation, kept in the space's chat history. */
+type ChatThread = { id: string; title: string; createdAt: number; updatedAt: number; entries: Entry[] };
+/** A space's conversations (most recent first) and the one open, null for a blank new chat. */
+type ChatHistory = { spaceId: number; threads: ChatThread[]; activeId: string | null };
 
 const MODES: { value: AccessMode; label: string }[] = [
   { value: "read_only", label: "Read only" },
@@ -79,6 +83,13 @@ const EFFORTS: { value: Effort; label: string; hint: string }[] = [
 const EFFORT_KEY = "copilot_reasoning_effort";
 const CONTEXT_LINES = 3;
 const COMMAND_RE = /^(\/[a-z0-9][a-z0-9_-]*)(?:\s+([\s\S]*))?$/i;
+// Per space: its conversations (JSON ChatThread[]), and the id of the open one ("__new__" for a blank new chat).
+const historyKey = (spaceId: number) => `copilot.chatHistory.${spaceId}`;
+const activeChatKey = (spaceId: number) => `copilot.activeChat.${spaceId}`;
+const NEW_CHAT = "__new__";
+const MAX_THREADS = 50;
+const TITLE_LENGTH = 60;
+const NO_ENTRIES: Entry[] = [];
 
 // The model picker's sections: Claude models run on the local `claude` CLI and Gemini ones on the local `gemini`
 // CLI, both signed in with the user's account (no API key).
@@ -101,6 +112,73 @@ function storedEffort(): Effort {
 function storedMode(): AccessMode {
   const value = localStorage.getItem(MODE_KEY);
   return MODES.some((m) => m.value === value) ? (value as AccessMode) : "ask_first";
+}
+
+/** Most recent first, keeping the latest `MAX_THREADS`. */
+function sortThreads(threads: ChatThread[]): ChatThread[] {
+  return [...threads].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, MAX_THREADS);
+}
+
+/** The space's saved conversations; an edit left "Saving…" when the page closed is back to waiting for approval. */
+function storedHistory(spaceId: number): ChatHistory {
+  let threads: ChatThread[] = [];
+  try {
+    const saved: unknown = JSON.parse(localStorage.getItem(historyKey(spaceId)) ?? "[]");
+    if (Array.isArray(saved)) threads = saved as ChatThread[];
+  } catch {
+    // Unreadable: start a fresh history.
+  }
+  threads = sortThreads(
+    threads.map((thread) => ({
+      ...thread,
+      entries: thread.entries.map((entry) =>
+        entry.role === "assistant"
+          ? {
+              ...entry,
+              edits: entry.edits.map((e) => (e.status.state === "applying" ? { ...e, status: { state: "pending" } } : e)),
+            }
+          : entry,
+      ),
+    })),
+  );
+  // The conversation open last, else the most recent one.
+  const active = localStorage.getItem(activeChatKey(spaceId));
+  const open = active === NEW_CHAT ? undefined : (threads.find((t) => t.id === active) ?? threads[0]);
+  return { spaceId, threads, activeId: open?.id ?? null };
+}
+
+function saveHistory({ spaceId, threads, activeId }: ChatHistory) {
+  try {
+    localStorage.setItem(historyKey(spaceId), JSON.stringify(threads));
+    localStorage.setItem(activeChatKey(spaceId), activeId ?? NEW_CHAT);
+  } catch {
+    // Storage full: the conversation goes on, unsaved.
+  }
+}
+
+/** A conversation's title: its first question on one line, cut at a word near `TITLE_LENGTH` characters. */
+function threadTitle(entries: Entry[]): string {
+  const first = entries.find((entry) => entry.role === "user");
+  if (!first) return "New chat";
+  const text = (first.prompt ? `${first.prompt.command} ${first.prompt.rest}` : first.content).replace(/\s+/g, " ").trim();
+  if (text.length <= TITLE_LENGTH) return text;
+  const cut = text.slice(0, TITLE_LENGTH);
+  const space = cut.lastIndexOf(" ");
+  return `${(space > TITLE_LENGTH / 2 ? cut.slice(0, space) : cut).trimEnd()}…`;
+}
+
+const newThreadId = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+
+/** When a conversation was last active, e.g. "5m ago", "Yesterday" or "Mar 4". */
+function relativeTime(time: number): string {
+  const minutes = Math.floor((Date.now() - time) / 60_000);
+  if (minutes < 1) return "Just now";
+  if (minutes < 60) return `${minutes}m ago`;
+  const day = (t: number) => new Date(t).setHours(0, 0, 0, 0);
+  const days = Math.round((day(Date.now()) - day(time)) / 86_400_000);
+  if (days === 0) return `${Math.floor(minutes / 60)}h ago`;
+  if (days === 1) return "Yesterday";
+  return new Date(time).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
 /** What the chat shows as its context, the hint sent to the model with each question, and the open note. */
@@ -248,9 +326,14 @@ function chatUrlTransform(url: string): string {
 }
 
 const CHAT_MARKDOWN_COMPONENTS: Components = {
-  // The browser won't open a local path from a web page, so a link to one opens through the backend.
+  // A link to a page of the app (a note, a task view) opens in place. The browser won't open a local path from a web
+  // page, so a link to one opens through the backend.
   a: ({ node: _node, ref: _ref, ...props }) => {
     const href = props.href;
+    if (href && /^\/(?!\/|api\/)/.test(href)) {
+      const { href: _href, ...rest } = props;
+      return <Link {...rest} to={href} />;
+    }
     if (!isLocalHref(href)) return <a {...props} target="_blank" rel="noopener noreferrer" />;
     return (
       <a
@@ -360,7 +443,14 @@ export default function CopilotChat({
   pinned: boolean;
   onPinnedChange: (pinned: boolean) => void;
 }) {
-  const [entries, setEntries] = useState<Entry[]>([]);
+  const location = useLocation();
+  const { spaceId, space } = useSpace();
+  // The open conversation lives in the space's history, saved as it changes; it stays put across pages.
+  const [history, setHistory] = useState<ChatHistory>(() => storedHistory(spaceId));
+  const [historyMenu, setHistoryMenu] = useState(false);
+  const historyButtonRef = useRef<HTMLButtonElement>(null);
+  const activeThread = history.threads.find((t) => t.id === history.activeId) ?? null;
+  const entries = activeThread?.entries ?? NO_ENTRIES;
   const [input, setInput] = useState("");
   const [mode, setMode] = useState<AccessMode>(storedMode);
   const [sending, setSending] = useState(false);
@@ -384,16 +474,18 @@ export default function CopilotChat({
   const abortControllerRef = useRef<AbortController | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
-  const location = useLocation();
-  const { spaceId, space } = useSpace();
   const context = withTask(pageContext(location, spaceId), location);
 
-  // A conversation (and its proposed edits) belongs to one space: start over when it changes.
+  // A conversation (and its proposed edits) belongs to one space: pick up that space's history when it changes.
   useEffect(() => {
     abortControllerRef.current?.abort();
-    setEntries([]);
+    setHistory((prev) => (prev.spaceId === spaceId ? prev : storedHistory(spaceId)));
     setError(null);
   }, [spaceId]);
+
+  useEffect(() => {
+    saveHistory(history);
+  }, [history]);
 
   useEffect(() => {
     return () => {
@@ -494,11 +586,56 @@ export default function CopilotChat({
     return prompt ? { command: prompt.command, instruction: prompt.instruction, rest: (match[2] ?? "").trim() } : null;
   }
 
+  /** Opens a new conversation with its first turns; returns its id. */
+  function startThread(first: Entry[]): string {
+    const now = Date.now();
+    const thread: ChatThread = { id: newThreadId(), title: threadTitle(first), createdAt: now, updatedAt: now, entries: first };
+    setHistory((prev) => ({ ...prev, threads: sortThreads([thread, ...prev.threads]), activeId: thread.id }));
+    return thread.id;
+  }
+
+  /** Changes a conversation's turns (if it is still in the history); one left with none is dropped. */
+  function updateThread(id: string, update: (entries: Entry[]) => Entry[]) {
+    setHistory((prev) => {
+      const thread = prev.threads.find((t) => t.id === id);
+      if (!thread) return prev;
+      const next = update(thread.entries);
+      if (next.length === 0) {
+        const threads = prev.threads.filter((t) => t.id !== id);
+        return { ...prev, threads, activeId: prev.activeId === id ? null : prev.activeId };
+      }
+      const changed = { ...thread, title: threadTitle(next), updatedAt: Date.now(), entries: next };
+      return { ...prev, threads: sortThreads(prev.threads.map((t) => (t.id === id ? changed : t))) };
+    });
+  }
+
+  /** A blank conversation; the one open stays in the history. */
+  function startNewChat() {
+    setHistory((prev) => ({ ...prev, activeId: null }));
+    setError(null);
+  }
+
+  function openThread(id: string) {
+    setHistory((prev) => ({ ...prev, activeId: id }));
+    setError(null);
+    setHistoryMenu(false);
+  }
+
+  function deleteThread(id: string) {
+    setHistory((prev) => ({
+      ...prev,
+      threads: prev.threads.filter((t) => t.id !== id),
+      activeId: prev.activeId === id ? null : prev.activeId,
+    }));
+    if (id === history.activeId) setError(null);
+  }
+
   async function send() {
     const text = input.trim();
     if (!text || sending) return;
     const next: Entry[] = [...entries, { role: "user", content: text, prompt: usedPrompt(text), context: context.hint }];
-    setEntries(next);
+    const threadId = activeThread?.id ?? startThread(next);
+    if (activeThread) updateThread(threadId, () => next);
     setInput("");
     setMenuDismissed(false);
     setError(null);
@@ -524,7 +661,7 @@ export default function CopilotChat({
       const body = await readResponse(res, (event) =>
         setLiveProgress((progress) => progressWith(progress ?? NO_PROGRESS, event)),
       );
-      setEntries((prev) => [
+      updateThread(threadId, (prev) => [
         ...prev,
         {
           role: "assistant",
@@ -540,8 +677,8 @@ export default function CopilotChat({
         setError(null);
         return;
       }
-      // Put the question back so it can be retried without two user turns in a row.
-      setEntries(entries);
+      // Put the question back so it can be retried without two user turns in a row (a new chat's thread goes away).
+      updateThread(threadId, () => entries);
       setInput(text);
       setError(message(err));
     } finally {
@@ -601,8 +738,8 @@ export default function CopilotChat({
     }, 0);
   }
 
-  function setEditStatus(entryIndex: number, path: string, status: EditStatus) {
-    setEntries((prev) =>
+  function setEditStatus(threadId: string, entryIndex: number, path: string, status: EditStatus) {
+    updateThread(threadId, (prev) =>
       prev.map((entry, i) =>
         i === entryIndex && entry.role === "assistant"
           ? { ...entry, edits: entry.edits.map((e) => (e.path === path ? { ...e, status } : e)) }
@@ -611,8 +748,8 @@ export default function CopilotChat({
     );
   }
 
-  async function approve(entryIndex: number, edit: Edit) {
-    setEditStatus(entryIndex, edit.path, { state: "applying" });
+  async function approve(threadId: string, entryIndex: number, edit: Edit) {
+    setEditStatus(threadId, entryIndex, edit.path, { state: "applying" });
     try {
       const res = await fetch("/api/notes/apply-edit", {
         method: "POST",
@@ -626,9 +763,9 @@ export default function CopilotChat({
         }),
       });
       if (!res.ok) throw new Error(await errorDetail(res));
-      setEditStatus(entryIndex, edit.path, { state: "applied" });
+      setEditStatus(threadId, entryIndex, edit.path, { state: "applied" });
     } catch (err: unknown) {
-      setEditStatus(entryIndex, edit.path, { state: "error", message: message(err) });
+      setEditStatus(threadId, entryIndex, edit.path, { state: "error", message: message(err) });
     }
   }
 
@@ -662,6 +799,46 @@ export default function CopilotChat({
       <div className="flex items-center justify-between border-b border-border-default px-3.5 py-2">
         <h2 className="text-xs font-semibold tracking-wide text-text-secondary">Ask the knowledge base</h2>
         <div className="flex items-center gap-1">
+          <HeaderButton label="New chat" onClick={startNewChat} disabled={sending || !activeThread}>
+            <PlusIcon />
+          </HeaderButton>
+          <HeaderButton
+            buttonRef={historyButtonRef}
+            label="Chat history"
+            onClick={() => setHistoryMenu((open) => !open)}
+            expanded={historyMenu}
+          >
+            <HistoryIcon />
+          </HeaderButton>
+          <Popover
+            anchor={historyButtonRef}
+            open={historyMenu}
+            onClose={() => setHistoryMenu(false)}
+            label="Chat history"
+            role="dialog"
+            align="end"
+            className="w-72"
+          >
+            <div className="border-b border-border-default px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wider text-text-muted">
+              Chat history
+            </div>
+            {history.threads.length === 0 ? (
+              <p className="px-2.5 py-2 text-xs text-text-muted">No past conversations yet.</p>
+            ) : (
+              <div className="max-h-80 overflow-y-auto py-1">
+                {history.threads.map((thread) => (
+                  <ThreadItem
+                    key={thread.id}
+                    thread={thread}
+                    active={thread.id === history.activeId}
+                    disabled={sending}
+                    onOpen={() => openThread(thread.id)}
+                    onDelete={() => deleteThread(thread.id)}
+                  />
+                ))}
+              </div>
+            )}
+          </Popover>
           <PinButton pinned={pinned} onClick={() => onPinnedChange(!pinned)} />
           <IconButton label="Collapse chat" onClick={onCollapse} direction="right" />
         </div>
@@ -674,7 +851,7 @@ export default function CopilotChat({
             for your saved commands.
           </p>
         )}
-        {entries.map((entry, i) =>
+        {activeThread?.entries.map((entry, i) =>
           entry.role === "user" ? (
             <div key={i} className="group flex max-w-[85%] flex-col items-end gap-1 self-end">
               <div className="whitespace-pre-wrap rounded-lg bg-surface-active px-2.5 py-1.5 text-xs leading-relaxed">
@@ -734,8 +911,8 @@ export default function CopilotChat({
                 <EditCard
                   key={edit.path}
                   edit={edit}
-                  onApprove={() => approve(i, edit)}
-                  onReject={() => setEditStatus(i, edit.path, { state: "rejected" })}
+                  onApprove={() => approve(activeThread.id, i, edit)}
+                  onReject={() => setEditStatus(activeThread.id, i, edit.path, { state: "rejected" })}
                 />
               ))}
             </div>
@@ -889,14 +1066,11 @@ export default function CopilotChat({
           </div>
           <button
             type="button"
-            onClick={() => {
-              setEntries([]);
-              setError(null);
-            }}
-            disabled={sending || entries.length === 0}
+            onClick={startNewChat}
+            disabled={sending || !activeThread}
             className="ml-auto rounded px-1.5 py-0.5 text-[11px] text-text-muted hover:bg-surface-raised hover:text-text-primary disabled:opacity-40"
           >
-            Clear
+            New chat
           </button>
         </div>
         <div className="flex flex-wrap gap-1">
@@ -1002,6 +1176,35 @@ function StopIcon() {
   return (
     <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" className="shrink-0" aria-hidden>
       <rect x="3" y="3" width="10" height="10" rx="1.5" />
+    </svg>
+  );
+}
+
+function PlusIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M12 5v14" />
+      <path d="M5 12h14" />
+    </svg>
+  );
+}
+
+function HistoryIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M3 12a9 9 0 1 0 3-6.7L3 8" />
+      <path d="M3 3v5h5" />
+      <path d="M12 7v5l3 2" />
+    </svg>
+  );
+}
+
+function TrashIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0" aria-hidden>
+      <path d="M3 6h18" />
+      <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+      <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
     </svg>
   );
 }
@@ -1280,6 +1483,91 @@ function Diff({ before, after }: { before: string; after: string }) {
         ),
       )}
     </pre>
+  );
+}
+
+/** A square icon button in the chat's header, beside the pin. */
+function HeaderButton({
+  label,
+  onClick,
+  disabled = false,
+  expanded,
+  buttonRef,
+  children,
+}: {
+  label: string;
+  onClick: () => void;
+  disabled?: boolean;
+  expanded?: boolean;
+  buttonRef?: RefObject<HTMLButtonElement>;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      ref={buttonRef}
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      aria-label={label}
+      aria-haspopup={expanded === undefined ? undefined : "dialog"}
+      aria-expanded={expanded}
+      title={label}
+      className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-border-light bg-surface-raised text-text-secondary hover:text-text-primary disabled:opacity-40 disabled:hover:text-text-secondary"
+    >
+      {children}
+    </button>
+  );
+}
+
+/** A past conversation in the chat history: opens it, or deletes it. */
+function ThreadItem({
+  thread,
+  active,
+  disabled,
+  onOpen,
+  onDelete,
+}: {
+  thread: ChatThread;
+  active: boolean;
+  disabled: boolean;
+  onOpen: () => void;
+  onDelete: () => void;
+}) {
+  const count = thread.entries.length;
+  return (
+    <div
+      className={`group flex items-center gap-1 rounded transition-colors ${
+        active ? "bg-accent/20" : "hover:bg-surface-hover"
+      }`}
+    >
+      <button
+        type="button"
+        aria-current={active || undefined}
+        onClick={onOpen}
+        disabled={disabled}
+        className="flex min-w-0 flex-1 flex-col items-start gap-0.5 px-2.5 py-1.5 text-left disabled:cursor-default"
+      >
+        <span className={`w-full truncate text-xs ${active ? "font-medium text-accent-soft" : "text-text-primary"}`}>
+          {thread.title}
+        </span>
+        <span className="text-[11px] text-text-muted">
+          {relativeTime(thread.updatedAt)} · {count} message{count === 1 ? "" : "s"}
+        </span>
+      </button>
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          onDelete();
+        }}
+        disabled={disabled && active}
+        aria-label={`Delete “${thread.title}”`}
+        title="Delete conversation"
+        className="mr-1 shrink-0 rounded p-1 text-text-muted opacity-60 hover:bg-surface-active hover:text-red-400 focus-visible:opacity-100 group-hover:opacity-100 disabled:opacity-20 disabled:hover:bg-transparent disabled:hover:text-text-muted"
+      >
+        <TrashIcon />
+      </button>
+    </div>
   );
 }
 

@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
 
-type Position = { left: number; top: number; minWidth: number; maxHeight: number; above: boolean };
+type Position = { left?: number; right?: number; top: number; minWidth: number; maxHeight: number; above: boolean };
 
 const GAP = 4;
 const MAX_HEIGHT = 288;
@@ -17,6 +17,7 @@ export default function Popover({
   id,
   label,
   role = "listbox",
+  align = "start",
   className = "",
   children,
 }: {
@@ -26,6 +27,7 @@ export default function Popover({
   id?: string;
   label: string;
   role?: "listbox" | "menu" | "dialog";
+  align?: "start" | "end";
   className?: string;
   children: ReactNode;
 }) {
@@ -41,13 +43,30 @@ export default function Popover({
       if (!rect) return;
       const below = window.innerHeight - rect.bottom - GAP * 2;
       const above = below < 160 && rect.top > below;
-      setPosition({
-        left: rect.left,
-        top: above ? rect.top - GAP : rect.bottom + GAP,
-        minWidth: rect.width,
-        maxHeight: Math.min(MAX_HEIGHT, Math.max(120, (above ? rect.top : below) - GAP)),
-        above,
-      });
+      const maxHeight = Math.min(MAX_HEIGHT, Math.max(120, (above ? rect.top : below) - GAP));
+      const top = above ? rect.top - GAP : rect.bottom + GAP;
+      const panelWidth = panel.current?.offsetWidth ?? 0;
+      const shouldAlignEnd = align === "end" || (panelWidth > 0 && rect.left + panelWidth > window.innerWidth - GAP);
+
+      if (shouldAlignEnd) {
+        const right = Math.max(GAP, window.innerWidth - rect.right);
+        setPosition({
+          right,
+          top,
+          minWidth: rect.width,
+          maxHeight,
+          above,
+        });
+      } else {
+        const left = Math.max(GAP, panelWidth > 0 ? Math.min(rect.left, window.innerWidth - panelWidth - GAP) : rect.left);
+        setPosition({
+          left,
+          top,
+          minWidth: rect.width,
+          maxHeight,
+          above,
+        });
+      }
     };
     place();
     window.addEventListener("scroll", place, true);
@@ -56,7 +75,40 @@ export default function Popover({
       window.removeEventListener("scroll", place, true);
       window.removeEventListener("resize", place);
     };
-  }, [open, anchor]);
+  }, [open, anchor, align]);
+
+  useLayoutEffect(() => {
+    if (!open || !panel.current) return;
+    const el = panel.current;
+    const observer = new ResizeObserver(() => {
+      const rect = anchor.current?.getBoundingClientRect();
+      if (!rect) return;
+      const below = window.innerHeight - rect.bottom - GAP * 2;
+      const above = below < 160 && rect.top > below;
+      const maxHeight = Math.min(MAX_HEIGHT, Math.max(120, (above ? rect.top : below) - GAP));
+      const top = above ? rect.top - GAP : rect.bottom + GAP;
+      const panelWidth = el.offsetWidth;
+      const shouldAlignEnd = align === "end" || (panelWidth > 0 && rect.left + panelWidth > window.innerWidth - GAP);
+
+      if (shouldAlignEnd) {
+        const right = Math.max(GAP, window.innerWidth - rect.right);
+        setPosition((prev) =>
+          prev && prev.right === right && prev.top === top && prev.maxHeight === maxHeight && prev.above === above
+            ? prev
+            : { right, top, minWidth: rect.width, maxHeight, above }
+        );
+      } else {
+        const left = Math.max(GAP, Math.min(rect.left, window.innerWidth - panelWidth - GAP));
+        setPosition((prev) =>
+          prev && prev.left === left && prev.top === top && prev.maxHeight === maxHeight && prev.above === above
+            ? prev
+            : { left, top, minWidth: rect.width, maxHeight, above }
+        );
+      }
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [open, anchor, align]);
 
   useEffect(() => {
     if (!open) return;
@@ -78,6 +130,7 @@ export default function Popover({
       aria-label={label}
       style={{
         left: position.left,
+        right: position.right,
         top: position.top,
         minWidth: position.minWidth,
         maxHeight: position.maxHeight,
