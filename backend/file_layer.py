@@ -168,6 +168,11 @@ def _history_id(path: Path, notes_dir: str | Path | None) -> str:
     return _relative(path, notes_dir)
 
 
+def note_history_id(filepath: str | Path, notes_dir: str | Path | None = None) -> str:
+    """The `history` entity id the changes of the note at `filepath` are recorded under."""
+    return _history_id(resolve_note_path(filepath, notes_dir), notes_dir)
+
+
 def _check_access(
     mode: AccessMode, approved: bool, path: Path, verb: str, approval: Callable[[], ApprovalRequiredError]
 ) -> None:

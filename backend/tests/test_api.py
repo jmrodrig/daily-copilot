@@ -732,6 +732,87 @@ def test_update_note_tags(client, notes_dir):
     assert client.get("/api/notes/file", params={"path": "a.md"}).json()["frontmatter"] == {"state": "draft"}
 
 
+def _save(client, content, **fields):
+    res = client.put("/api/notes/file", json={"space_id": 1, "path": "a.md", "content": content, **fields})
+    assert res.status_code == 200
+
+
+def test_note_history_lists_versions_newest_first(client, notes_dir):
+    file_layer.write_note("a.md", "One\n", {"state": "draft", "title": "First"}, "write_directly", source="desktop")
+    _save(client, "One two\n", title="Second")
+    _save(client, "One two three\n")
+
+    versions = client.get("/api/notes/history", params={"path": "a.md"}).json()
+    assert [(v["action"], v["source"], v["title"], v["state"], v["content_length"]) for v in versions] == [
+        ("update", "desktop", "Second", "draft", 14),
+        ("update", "desktop", "Second", "draft", 8),
+        ("create", "desktop", "First", "draft", 4),
+    ]
+    assert versions[0]["id"] > versions[1]["id"] > versions[2]["id"]
+    assert client.get("/api/notes/history", params={"path": "missing.md"}).json() == []
+    assert client.get("/api/notes/history", params={"path": "../x.md"}).status_code == 400
+    assert client.get("/api/notes/history", params={"path": "a.md", "space_id": 99}).status_code == 404
+
+
+def test_note_history_follows_renames(client, notes_dir):
+    file_layer.write_note("old.md", "Before\n", {}, "write_directly")
+    file_layer.rename_note("old.md", "new.md", "write_directly")
+    file_layer.write_note("new.md", "After\n", {}, "write_directly")
+    # A different note later created at the old path is not part of new.md's history.
+    file_layer.write_note("old.md", "Someone else\n", {}, "write_directly")
+
+    versions = client.get("/api/notes/history", params={"path": "new.md"}).json()
+    assert [v["action"] for v in versions] == ["update", "rename", "create"]
+    assert client.get(f"/api/notes/history/{versions[-1]['id']}").json()["path"] == "old.md"
+
+
+def test_note_version_detail(client, notes_dir):
+    file_layer.write_note("a.md", "Hello\n", {"created": date(2026, 9, 30), "tags": ["x"]}, "write_directly")
+    (version,) = client.get("/api/notes/history", params={"path": "a.md"}).json()
+
+    detail = client.get(f"/api/notes/history/{version['id']}").json()
+    assert detail | {"timestamp": None} == {
+        "id": version["id"],
+        "timestamp": None,
+        "action": "create",
+        "source": "manual",
+        "path": "a.md",
+        "frontmatter": {"created": "2026-09-30", "tags": ["x"]},
+        "content": "Hello\n",
+    }
+    assert client.get("/api/notes/history/9999").status_code == 404
+
+
+def test_restore_note_version(client, notes_dir):
+    file_layer.write_note("a.md", "Original\n", {"created": date(2026, 9, 30), "state": "draft"}, "write_directly")
+    _save(client, "Rewritten\n", title="New title")
+    original = client.get("/api/notes/history", params={"path": "a.md"}).json()[-1]
+
+    res = client.post(f"/api/notes/history/{original['id']}/restore", params={"path": "a.md", "space_id": 1})
+    assert res.status_code == 200
+    assert res.json() == {
+        "path": "a.md",
+        "frontmatter": {"created": "2026-09-30", "state": "draft"},
+        "content": "Original\n",
+    }
+    # On disk, with the unchanged date still a YAML date rather than a string.
+    assert (notes_dir / "a.md").read_text(encoding="utf-8") == "---\ncreated: 2026-09-30\nstate: draft\n---\nOriginal\n"
+    # The restore is a new version of its own, so it can be undone too.
+    latest = client.get("/api/notes/history", params={"path": "a.md"}).json()
+    assert len(latest) == 3
+    assert (latest[0]["action"], latest[0]["source"], latest[0]["title"]) == ("update", "restore", None)
+
+
+def test_restore_refuses_versions_of_other_notes(client, notes_dir):
+    file_layer.write_note("a.md", "A\n", {}, "write_directly")
+    file_layer.write_note("b.md", "B\n", {}, "write_directly")
+    (b_version,) = client.get("/api/notes/history", params={"path": "b.md"}).json()
+
+    res = client.post(f"/api/notes/history/{b_version['id']}/restore", params={"path": "a.md"})
+    assert res.status_code == 404
+    assert (notes_dir / "a.md").read_text(encoding="utf-8") == "A\n"
+
+
 def test_capture_records_source(client, notes_dir):
     path = client.post("/api/capture", json={"content": "Hi", "source": "Verbal"}).json()["path"]
     assert file_layer.read_note(path)["frontmatter"]["source"] == "verbal"

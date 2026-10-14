@@ -512,6 +512,30 @@ class NoteFile(BaseModel):
     content: str
 
 
+class NoteVersionSummary(BaseModel):
+    """One entry of `GET /api/notes/history`: a saved version of a note, newest first."""
+
+    id: int
+    timestamp: datetime = Field(description="When the version was saved (naive UTC)")
+    action: str = Field(description="create, update, rename, delete")
+    source: str = Field(description="Who made the change: desktop, gemini, restore, ...")
+    title: str | None = Field(default=None, description="The version's front-matter `title`")
+    state: str | None = Field(default=None, description="The version's front-matter `state`")
+    content_length: int = Field(description="Characters in the version's body")
+
+
+class NoteVersionDetail(BaseModel):
+    """`GET /api/notes/history/{id}`: a saved version of a note in full."""
+
+    id: int
+    timestamp: datetime
+    action: str
+    source: str
+    path: str = Field(description="The note's path when this version was saved")
+    frontmatter: dict[str, Any] = Field(default_factory=dict)
+    content: str
+
+
 class NoteState(str, Enum):
     """A note's `state` front-matter: drafts are edited in the desktop app, published notes are read-only there.
 

@@ -27,7 +27,7 @@ import local_files
 import spaces
 from database import get_db, init_db
 from history import set_source, soft_delete, to_jsonable, utcnow
-from models import FolderMeta, Person, Project, SavedPrompt, Space, Task, TaskView, TimeLog
+from models import FolderMeta, HistoryRecord, Person, Project, SavedPrompt, Space, Task, TaskView, TimeLog
 import schemas
 from schemas import (
     AccessMode,
@@ -63,6 +63,8 @@ from schemas import (
     NoteRecent,
     NoteSummary,
     NoteUpdate,
+    NoteVersionDetail,
+    NoteVersionSummary,
     Priority,
     ProjectOption,
     Status,
@@ -808,6 +810,127 @@ def update_note(request: NoteUpdate, db: Session = Depends(get_db)) -> NoteFile:
         note["path"], content, frontmatter, AccessMode.WRITE_DIRECTLY, notes_dir=root, source=DESKTOP_SOURCE
     )
     return NoteFile(path=note["path"], frontmatter=to_jsonable(frontmatter), content=content)
+
+
+# --- Note version history ---------------------------------------------------------
+# Every write, rename and delete of a note is snapshotted in `history` by the file layer (see file_layer._recorded).
+
+RESTORE_SOURCE = "restore"
+
+
+def _note_versions(db: Session, folder: Path, path: str) -> list[HistoryRecord]:
+    """The saved versions of the note at `path`, newest first, following its renames back to its earlier paths."""
+    try:
+        entity_id = file_layer.note_history_id(path, folder)
+    except file_layer.FileLayerError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    versions: list[HistoryRecord] = []
+    before: int | None = None
+    while True:
+        query = select(HistoryRecord).where(HistoryRecord.entity_type == "Note", HistoryRecord.entity_id == entity_id)
+        if before is not None:
+            query = query.where(HistoryRecord.id < before)
+        previous = None
+        for record in db.scalars(query.order_by(HistoryRecord.id.desc())):
+            versions.append(record)
+            # A rename is recorded under the new path; what came before it is under the old one.
+            if record.action == "rename" and isinstance(record.snapshot.get("previous_path"), str):
+                previous = record
+                break
+        if previous is None:
+            return versions
+        try:
+            entity_id = file_layer.note_history_id(previous.snapshot["previous_path"], folder)
+        except file_layer.FileLayerError:
+            return versions
+        before = previous.id
+
+
+def _snapshot_frontmatter(record: HistoryRecord) -> dict[str, Any]:
+    frontmatter = record.snapshot.get("frontmatter")
+    return frontmatter if isinstance(frontmatter, dict) else {}
+
+
+@app.get("/api/notes/history")
+def note_history(
+    path: str,
+    space_id: int = spaces.DEFAULT_SPACE_ID,
+    root: NoteRoot = NoteRoot.CONTENT,
+    db: Session = Depends(get_db),
+) -> list[NoteVersionSummary]:
+    """The saved versions of a note (or template), newest first, for the desktop's version history."""
+    folder = spaces.root_dir(_space_id_or_404(db, space_id), root)
+    versions = []
+    for record in _note_versions(db, folder, path):
+        frontmatter = _snapshot_frontmatter(record)
+        title, state = frontmatter.get("title"), frontmatter.get("state")
+        versions.append(
+            NoteVersionSummary(
+                id=record.id,
+                timestamp=record.timestamp,
+                action=record.action,
+                source=record.source,
+                title=str(title) if title not in (None, "") else None,
+                state=str(state) if state not in (None, "") else None,
+                content_length=len(str(record.snapshot.get("content") or "")),
+            )
+        )
+    return versions
+
+
+@app.get("/api/notes/history/{version_id}")
+def note_version(version_id: int, db: Session = Depends(get_db)) -> NoteVersionDetail:
+    """One saved version of a note in full, to preview it or compare it with the note as it is now."""
+    record = db.get(HistoryRecord, version_id)
+    if record is None or record.entity_type != "Note":
+        raise HTTPException(status_code=404, detail=f"No note version {version_id}")
+    return NoteVersionDetail(
+        id=record.id,
+        timestamp=record.timestamp,
+        action=record.action,
+        source=record.source,
+        path=str(record.snapshot.get("path") or record.entity_id),
+        frontmatter=_snapshot_frontmatter(record),
+        content=str(record.snapshot.get("content") or ""),
+    )
+
+
+@app.post("/api/notes/history/{version_id}/restore")
+def restore_note_version(
+    version_id: int,
+    path: str,
+    space_id: int = spaces.DEFAULT_SPACE_ID,
+    root: NoteRoot = NoteRoot.CONTENT,
+    db: Session = Depends(get_db),
+) -> NoteFile:
+    """Put a saved version's body and front-matter back into the note at `path` (which it must be a version of).
+
+    The restore is itself recorded in `history` (source "restore"), so it can be undone the same way.
+    """
+    folder = spaces.root_dir(_space_id_or_404(db, space_id), root)
+    record = next((r for r in _note_versions(db, folder, path) if r.id == version_id), None)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"No version {version_id} of {path}")
+    try:
+        current = file_layer.read_note(path, notes_dir=folder)
+    except file_layer.FileLayerError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"No note at {path}") from exc
+    if root is NoteRoot.CONTENT and _hidden(current["path"]):
+        raise HTTPException(status_code=400, detail=f"{current['path']} is in a hidden folder")
+    # Snapshots store front-matter as JSON (dates as strings): values that haven't changed keep their YAML type.
+    frontmatter = {
+        key: current["frontmatter"][key]
+        if key in current["frontmatter"] and to_jsonable(current["frontmatter"][key]) == value
+        else value
+        for key, value in _snapshot_frontmatter(record).items()
+    }
+    content = str(record.snapshot.get("content") or "")
+    file_layer.write_note(
+        current["path"], content, frontmatter, AccessMode.WRITE_DIRECTLY, notes_dir=folder, source=RESTORE_SOURCE
+    )
+    return NoteFile(path=current["path"], frontmatter=to_jsonable(frontmatter), content=content)
 
 
 MAX_ASSET_BYTES = 50 * 1024 * 1024

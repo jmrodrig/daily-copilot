@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ComponentProps, type ReactNode } from "react";
 import Markdown, { defaultUrlTransform, type Components } from "react-markdown";
+import { createPortal } from "react-dom";
 import { Link, useSearchParams } from "react-router-dom";
 import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
@@ -15,6 +16,7 @@ import { useSpace } from "../lib/space";
 import { useTitle } from "../lib/title";
 import { isOverdue, STATUS_LABELS, taskIdFromHref, useTaskChanges, useTaskPanel, type TaskItem } from "../lib/tasks";
 import MediaLightbox, { ExpandButton, isPdfUrl, MarkupOverlay } from "../components/MediaLightbox";
+import NoteHistoryModal, { type RestoredNote } from "../components/NoteHistoryModal";
 import { isTyping } from "../components/markupCore";
 import NoteEditor from "../components/NoteEditor";
 import { PillIcon, refKind, StatusTag, useTaskStatus } from "../components/referencePill";
@@ -83,6 +85,15 @@ export default function NotePage() {
   // A whiteboard page's board, filling the window (over the sidebar and the page) till Escape or its button.
   const [boardFullscreen, setBoardFullscreen] = useState(false);
   useEffect(() => setBoardFullscreen(false), [path]);
+  // The version history, over the page; and the message shown once a version's been restored.
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [restoredToast, setRestoredToast] = useState<string | null>(null);
+  useEffect(() => {
+    setHistoryOpen(false);
+    setRestoredToast(null);
+  }, [path, spaceId, isTemplate]);
+  // Counted up as a version's restored, so the editor (which only reads its value as it mounts) loads it afresh.
+  const [restores, setRestores] = useState(0);
   // The title and body that last failed to save: auto-save waits for another edit rather than retrying them.
   const failedRef = useRef<string | null>(null);
   // The draft's unsaved changes, saved when the page moves to another note (or closes) before auto-save has.
@@ -228,6 +239,26 @@ export default function NotePage() {
     }
   }
 
+  /** Open the version history, saving the draft's unsaved edits first so they're a version of their own. */
+  async function openHistory() {
+    if (state === "draft" && dirty) await save();
+    setHistoryOpen(true);
+  }
+
+  /** A version was restored (POST /api/notes/history/{id}/restore): show it as the note. */
+  function restored(saved: RestoredNote) {
+    unsavedRef.current = null;
+    failedRef.current = null;
+    setSaveError(null);
+    setNote({ state: "ok", note: saved });
+    setBody(saved.content);
+    setTitleDraft(noteTitle(saved.frontmatter, path));
+    setRestores((n) => n + 1);
+    setHistoryOpen(false);
+    setRestoredToast(`Restored “${noteTitle(saved.frontmatter, path)}” to an earlier version`);
+    refreshTree(); // the title may have changed
+  }
+
   const status =
     state === "draft" ? (
       <div className="flex items-center gap-3">
@@ -254,6 +285,16 @@ export default function NotePage() {
   const actions = (
     <div className="flex items-center gap-3 print:hidden">
       {status}
+      <button
+        type="button"
+        className="btn inline-flex items-center gap-1.5"
+        onClick={() => void openHistory()}
+        disabled={note.state !== "ok" || saving !== null}
+        title="Version history"
+      >
+        <ClockIcon />
+        History
+      </button>
       {!whiteboard && (
         <button type="button" className="btn" onClick={() => window.print()} disabled={note.state !== "ok"}>
           Print / PDF
@@ -304,6 +345,30 @@ export default function NotePage() {
     </div>
   );
 
+  const overlays = (
+    <>
+      {historyOpen && note.state === "ok" && (
+        <NoteHistoryModal
+          spaceId={spaceId}
+          path={path}
+          isTemplate={isTemplate}
+          title={title}
+          current={note.note}
+          renderPreview={(version) =>
+            isWhiteboardNote(version.frontmatter) ? (
+              <WhiteboardFrame value={version.content.trim()} editable={false} />
+            ) : (
+              <NoteMarkdown content={version.content} />
+            )
+          }
+          onRestored={restored}
+          onClose={() => setHistoryOpen(false)}
+        />
+      )}
+      {restoredToast && <RestoredToast label={restoredToast} onClose={() => setRestoredToast(null)} />}
+    </>
+  );
+
   if (whiteboard && note.state === "ok") {
     const editable = state === "draft" && saving !== "state";
     return (
@@ -335,7 +400,7 @@ export default function NotePage() {
         )}
         {details && <div className="flex flex-col gap-3">{details}</div>}
         <WhiteboardView
-          key={path}
+          key={`${path}:${restores}`}
           value={body}
           onChange={setBody}
           editable={editable}
@@ -359,6 +424,7 @@ export default function NotePage() {
               : "min-h-[360px] flex-1 rounded-lg border border-border-default"
           }
         />
+        {overlays}
       </div>
     );
   }
@@ -376,7 +442,7 @@ export default function NotePage() {
       {state === "draft" && note.state === "ok" ? (
         // The editor's toolbar sits above the title, which is edited in place, and the properties.
         <NoteEditor
-          key={path}
+          key={`${path}:${restores}`}
           spaceId={spaceId}
           notePath={path}
           onTaskCreated={(task) => task.note_path === path && setTasks((current) => [...current, task])}
@@ -397,22 +463,68 @@ export default function NotePage() {
           {note.state === "ok" && (
             <>
               {details && <div className={`${NOTE_COLUMN} flex flex-col gap-5`}>{details}</div>}
-              <article className="note-body markdown text-[16px] leading-relaxed text-text-secondary" onCopy={copyCleanSelection}>
-                {/* Inline HTML carries text and cell colors, alignment and image and table sizes; anything else in it is stripped. */}
-                <Markdown
-                  remarkPlugins={[remarkGfm, remarkMath]}
-                  rehypePlugins={[rehypeRaw, [rehypeSanitize, NOTE_HTML_SCHEMA], liftCellColors, layoutMedia, rehypeKatex]}
-                  components={NOTE_COMPONENTS}
-                  urlTransform={noteUrlTransform}
-                >
-                  {note.note.content}
-                </Markdown>
-              </article>
+              <NoteMarkdown content={note.note.content} />
             </>
           )}
         </>
       )}
+      {overlays}
     </div>
+  );
+}
+
+/** A note's body as the read-only page shows it (and the version history previews it). */
+function NoteMarkdown({ content }: { content: string }) {
+  return (
+    <article className="note-body markdown text-[16px] leading-relaxed text-text-secondary" onCopy={copyCleanSelection}>
+      {/* Inline HTML carries text and cell colors, alignment and image and table sizes; anything else in it is stripped. */}
+      <Markdown
+        remarkPlugins={[remarkGfm, remarkMath]}
+        rehypePlugins={[rehypeRaw, [rehypeSanitize, NOTE_HTML_SCHEMA], liftCellColors, layoutMedia, rehypeKatex]}
+        components={NOTE_COMPONENTS}
+        urlTransform={noteUrlTransform}
+      >
+        {content}
+      </Markdown>
+    </article>
+  );
+}
+
+function ClockIcon() {
+  return (
+    <svg aria-hidden width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="8" cy="8" r="6.25" />
+      <path d="M8 4.5V8l2.5 1.5" />
+    </svg>
+  );
+}
+
+// How long the "restored" message stays up (ms).
+const TOAST_DURATION = 4000;
+
+/** The message that a version's been restored, at the foot of the window till it times out or is dismissed. */
+function RestoredToast({ label, onClose }: { label: string; onClose: () => void }) {
+  useEffect(() => {
+    const timer = window.setTimeout(onClose, TOAST_DURATION);
+    return () => window.clearTimeout(timer);
+  }, [label]);
+  return createPortal(
+    <div
+      role="status"
+      aria-live="polite"
+      className="fixed bottom-6 left-1/2 z-40 flex -translate-x-1/2 animate-toast-in items-center gap-3 rounded-xl border border-border-default bg-surface-raised py-2 pl-4 pr-2 text-[13px] shadow-xl print:hidden"
+    >
+      <svg aria-hidden width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" className="text-accent">
+        <path d="M2.5 7.5l3 3 6-7" />
+      </svg>
+      <span className="max-w-[420px] truncate text-text-primary">{label}</span>
+      <button type="button" aria-label="Dismiss" onClick={onClose} className="rounded-md p-1.5 text-text-muted transition-colors hover:bg-surface-hover hover:text-text-primary">
+        <svg aria-hidden width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+          <path d="M2 2l6 6M8 2l-6 6" />
+        </svg>
+      </button>
+    </div>,
+    document.body,
   );
 }
 
