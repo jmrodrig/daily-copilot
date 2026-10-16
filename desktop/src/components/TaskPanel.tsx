@@ -1,26 +1,47 @@
-import { useEffect, useLayoutEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import {
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ClipboardEvent,
+  type FormEvent,
+  type KeyboardEvent,
+} from "react";
 import { Link } from "react-router-dom";
 
 import { getJson, message, sendJson } from "../lib/api";
-import { colouredOptions, optionColor } from "../lib/colors";
+import { colouredOptions, optionColor, pillStyle } from "../lib/colors";
 import { AssigneeSelect, usePeople } from "../lib/people";
 import { notePath, useSpace, type CustomFieldDef } from "../lib/space";
 import {
   allowedStatuses,
   announceTaskChange,
+  createTaskLink,
+  deleteTaskLink,
+  fetchTaskDependencies,
   isOverdue,
   STATUS_LABELS,
+  statusColor,
+  useLinksChanged,
   useTaskChanges,
+  useTaskPanel,
   type CustomFieldValue,
+  type ProjectOption,
   type TaskComment,
+  type TaskDependencies,
   type TaskItem,
+  type TaskLinkItem,
   type TaskPatch,
   type TaskPriority,
   type TaskStatus,
 } from "../lib/tasks";
 import NoteEditor from "./NoteEditor";
+import Popover from "./Popover";
 import { postStatusComment, useStatusChangePrompt } from "./StatusChangeDialog";
 import { OptionPill } from "./ColorPicker";
+import { ProjectPicker } from "./ProjectPicker";
+import { linkPill, linkSegments, pastedLink, pillMarkdown, StaticPill } from "./referencePill";
 import { ME, NEUTRAL_TAG, ProjectTag, Tag, TagPills } from "./TriageBoard";
 
 type State = { state: "loading" } | { state: "ok"; task: TaskItem } | { state: "error"; message: string };
@@ -132,6 +153,23 @@ export default function TaskPanel({ taskId, onClose }: { taskId: number; onClose
   );
 }
 
+/** The projects of a task's space: the active space's are already loaded, another space's are fetched. */
+function useProjects(spaceId: number): ProjectOption[] {
+  const { spaceId: activeId, projects: active } = useSpace();
+  const [other, setOther] = useState<ProjectOption[]>([]);
+
+  useEffect(() => {
+    if (spaceId === activeId) return;
+    const controller = new AbortController();
+    getJson<ProjectOption[]>(`/api/projects?space_id=${spaceId}`, controller.signal)
+      .then(setOther)
+      .catch(() => {});
+    return () => controller.abort();
+  }, [spaceId, activeId]);
+
+  return spaceId === activeId ? active : other;
+}
+
 function TaskFields({
   task,
   onPatch,
@@ -151,6 +189,7 @@ function TaskFields({
   const statuses = allowedStatuses(space?.status_flow, task.status);
   const customFields = space?.custom_fields_schema ?? [];
   const people = usePeople(task.space_id);
+  const projects = useProjects(task.space_id);
   return (
     <>
       <div className="flex flex-col gap-2">
@@ -160,7 +199,7 @@ function TaskFields({
           required
           multiline
           onSave={(title) => onPatch({ title })}
-          className="block w-full rounded-md border border-transparent bg-transparent px-1 py-0.5 text-base font-semibold leading-snug text-text-primary hover:border-border-default focus:border-accent/70 focus:outline-none"
+          className="block w-full rounded-md border border-transparent bg-transparent px-1 py-0.5 text-xl font-semibold leading-snug text-text-primary hover:border-border-default focus:border-accent/70 focus:outline-none"
         />
         <div className="flex flex-wrap items-center gap-1.5 px-1">
           <ProjectTag code={task.project_code} color={task.project_color} />
@@ -219,6 +258,15 @@ function TaskFields({
           />
         </label>
         <label className={`${label} col-span-2`}>
+          Project
+          <ProjectPicker
+            value={task.project_id}
+            projects={projects}
+            onChange={(project_id) => onPatch({ project_id })}
+            className="field flex min-h-[38px] w-full items-center justify-between py-1.5 text-[15px]"
+          />
+        </label>
+        <label className={`${label} col-span-2`}>
           Assignee
           <AssigneeSelect
             value={task.assignee}
@@ -238,6 +286,8 @@ function TaskFields({
       </div>
 
       <LinkedNote task={task} onPatch={onPatch} />
+
+      <Dependencies task={task} />
 
       <div className="flex flex-col gap-1">
         <span className="text-[13px] text-text-muted">Description</span>
@@ -625,6 +675,265 @@ function PencilIcon() {
   );
 }
 
+// --- Dependencies -----------------------------------------------------------------
+
+type DepsState = { state: "loading" } | { state: "ok"; deps: TaskDependencies } | { state: "error"; message: string };
+
+/**
+ * The tasks this one waits on ("Blocked by") and the tasks waiting on it ("Blocks"), collapsed by default. Each shows
+ * its status and dates, a caution triangle when the dates contradict the dependency, and × to remove it.
+ */
+function Dependencies({ task }: { task: TaskItem }) {
+  const [dependenciesOpen, setDependenciesOpen] = useState(false);
+  const [deps, setDeps] = useState<DepsState>({ state: "loading" });
+  const [reload, setReload] = useState(0);
+  const [error, setError] = useState<string | null>(null);
+  const { openTask } = useTaskPanel();
+  const statusColors = useSpace().spaces.find((s) => s.id === task.space_id)?.status_colors;
+  const contentId = useId();
+
+  // Loaded even while collapsed, so the header can show the count and any conflicts. Moving this task's dates
+  // can make (or clear) a conflict, as can moving another task's on the board or the Gantt.
+  useEffect(() => {
+    const controller = new AbortController();
+    fetchTaskDependencies(task.id, controller.signal)
+      .then((body) => setDeps({ state: "ok", deps: body }))
+      .catch((err: unknown) => {
+        if (!controller.signal.aborted) setDeps({ state: "error", message: message(err) });
+      });
+    return () => controller.abort();
+  }, [task.id, task.start_date, task.deadline, reload]);
+  useLinksChanged(() => setReload((n) => n + 1));
+  useTaskChanges("panel", () => setReload((n) => n + 1));
+
+  async function add(predecessorId: number, successorId: number) {
+    setError(null);
+    try {
+      await createTaskLink(predecessorId, successorId);
+      return true;
+    } catch (err: unknown) {
+      setError(`Could not add the dependency: ${message(err)}`);
+      return false;
+    }
+  }
+
+  async function remove(item: TaskLinkItem) {
+    setError(null);
+    try {
+      await deleteTaskLink(item.link_id);
+    } catch (err: unknown) {
+      setError(`Could not remove the dependency: ${message(err)}`);
+    }
+  }
+
+  const all = deps.state === "ok" ? [...deps.deps.blocked_by, ...deps.deps.blocks] : [];
+  const conflicts = all.filter((d) => d.conflict).length;
+  const exclude = new Set([task.id, ...all.map((d) => d.task_id)]);
+
+  const group = (title: string, items: TaskLinkItem[], direction: "blocked_by" | "blocks") => (
+    <div className="flex flex-col gap-1.5">
+      <span className="text-[12px] font-medium uppercase tracking-wide text-text-muted">{title}</span>
+      {items.length === 0 ? (
+        <span className="text-xs text-text-muted">None</span>
+      ) : (
+        <ul className="flex flex-col gap-1">
+          {items.map((item) => (
+            <li key={item.link_id} className="flex min-w-0 items-center gap-2 rounded-md border border-border-default bg-surface-raised px-2 py-1 text-[13px]">
+              {item.conflict && (
+                <span role="img" aria-label="Date conflict" title={item.conflict_reason ?? "The dates contradict this dependency"} className="shrink-0 text-amber-500">
+                  ⚠
+                </span>
+              )}
+              <button
+                type="button"
+                onClick={() => openTask(item.task_id)}
+                className="min-w-0 flex-1 truncate text-left text-text-primary hover:text-accent hover:underline"
+                title={`Open #${item.task_id} ${item.title}`}
+              >
+                {item.title}
+              </button>
+              <Tag className="shrink-0" style={pillStyle(statusColor(statusColors, item.status))}>
+                {STATUS_LABELS[item.status]}
+              </Tag>
+              {(item.start_date || item.deadline) && (
+                <span className="shrink-0 font-mono text-[11px] text-text-muted">{dateRange(item.start_date, item.deadline)}</span>
+              )}
+              <button
+                type="button"
+                onClick={() => void remove(item)}
+                aria-label={`Remove dependency on ${item.title}`}
+                title="Remove this dependency"
+                className="shrink-0 text-text-muted hover:text-accent"
+              >
+                ×
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <TaskSearch
+        spaceId={task.space_id}
+        exclude={exclude}
+        placeholder={direction === "blocked_by" ? "Add a task this one waits on…" : "Add a task waiting on this one…"}
+        onPick={(other) => (direction === "blocked_by" ? add(other.id, task.id) : add(task.id, other.id))}
+      />
+    </div>
+  );
+
+  return (
+    <div className="flex flex-col gap-2">
+      <button
+        type="button"
+        onClick={() => setDependenciesOpen((o) => !o)}
+        aria-expanded={dependenciesOpen}
+        aria-controls={contentId}
+        className="flex items-center gap-1.5 self-start text-[13px] text-text-muted hover:text-text-primary"
+      >
+        <span aria-hidden className={`inline-block transition-transform ${dependenciesOpen ? "rotate-90" : ""}`}>
+          ▸
+        </span>
+        Dependencies
+        {all.length > 0 && <span className="rounded-full border border-border-default px-1.5 font-mono text-[11px] leading-4">{all.length}</span>}
+        {conflicts > 0 && (
+          <span className="text-amber-500" title={`${conflicts} date conflict${conflicts === 1 ? "" : "s"}`}>
+            ⚠ {conflicts}
+          </span>
+        )}
+      </button>
+      {dependenciesOpen && (
+        <div id={contentId} className="flex flex-col gap-3 pl-4">
+          {deps.state === "loading" && <span className="text-xs text-text-muted">Loading…</span>}
+          {deps.state === "error" && <span className="text-xs text-text-secondary">Could not load the dependencies ({deps.message}).</span>}
+          {deps.state === "ok" && (
+            <>
+              {group("Blocked by", deps.deps.blocked_by, "blocked_by")}
+              {group("Blocks", deps.deps.blocks, "blocks")}
+            </>
+          )}
+          {error && <p className="text-xs text-accent">{error}</p>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** "1 Oct → 10 Oct" for a task's dates (either may be missing). */
+function dateRange(start: string | null, end: string | null): string {
+  const day = (iso: string) => {
+    const [y, m, d] = iso.split("-").map(Number);
+    return new Date(y, m - 1, d).toLocaleDateString(undefined, { day: "numeric", month: "short" });
+  };
+  if (start && end) return `${day(start)} → ${day(end)}`;
+  if (start) return `from ${day(start)}`;
+  return end ? `due ${day(end)}` : "";
+}
+
+type TaskOption = Pick<TaskItem, "id" | "title" | "status">;
+
+/** Type to find another task of the space (by title or #id); the space's tasks load the first time it's focused. */
+function TaskSearch({
+  spaceId,
+  exclude,
+  placeholder,
+  onPick,
+}: {
+  spaceId: number;
+  exclude: Set<number>;
+  placeholder: string;
+  onPick: (task: TaskOption) => Promise<boolean>;
+}) {
+  const [tasks, setTasks] = useState<TaskOption[] | null>(null);
+  const [query, setQuery] = useState("");
+  const [open, setOpen] = useState(false);
+  const [highlight, setHighlight] = useState(0);
+  const anchor = useRef<HTMLDivElement>(null);
+  const listId = useId();
+
+  function load() {
+    if (tasks !== null) return;
+    getJson<TaskItem[]>(`/api/tasks?space_id=${spaceId}`)
+      .then((body) => setTasks(body.map(({ id, title, status }) => ({ id, title, status }))))
+      .catch(() => setTasks([]));
+  }
+
+  const needle = query.trim().toLowerCase().replace(/^#/, "");
+  const choices = (tasks ?? [])
+    .filter((t) => !exclude.has(t.id) && (!needle || t.title.toLowerCase().includes(needle) || String(t.id) === needle))
+    .slice(0, 50);
+
+  async function pick(choice: TaskOption) {
+    setOpen(false);
+    if (await onPick(choice)) setQuery("");
+  }
+
+  return (
+    <div ref={anchor} className="relative">
+      <input
+        role="combobox"
+        aria-label={placeholder}
+        aria-expanded={open}
+        aria-controls={listId}
+        aria-autocomplete="list"
+        aria-activedescendant={open && choices[highlight] ? `${listId}-${choices[highlight].id}` : undefined}
+        value={query}
+        placeholder={placeholder}
+        autoComplete="off"
+        onFocus={() => {
+          load();
+          setOpen(true);
+        }}
+        onChange={(e) => {
+          setQuery(e.target.value);
+          setHighlight(0);
+          setOpen(true);
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+            e.preventDefault();
+            if (choices.length === 0) return;
+            const step = e.key === "ArrowDown" ? 1 : -1;
+            setHighlight((h) => (h + step + choices.length) % choices.length);
+            setOpen(true);
+          } else if (e.key === "Enter" && open && choices[highlight]) {
+            e.preventDefault();
+            void pick(choices[highlight]);
+          } else if (e.key === "Escape" && (open || query)) {
+            e.stopPropagation();
+            setOpen(false);
+            setQuery("");
+          }
+        }}
+        className="field w-full py-1 text-xs"
+      />
+      <Popover anchor={anchor} open={open && tasks !== null} onClose={() => setOpen(false)} id={listId} label={placeholder}>
+        {choices.length === 0 ? (
+          <div className="px-2 py-1.5 text-xs text-text-muted">{needle ? "No matching tasks" : "No other tasks"}</div>
+        ) : (
+          choices.map((choice, index) => (
+            <div
+              key={choice.id}
+              id={`${listId}-${choice.id}`}
+              role="option"
+              aria-selected={index === highlight}
+              // Keep the focus in the input while picking.
+              onMouseDown={(e) => e.preventDefault()}
+              onMouseEnter={() => setHighlight(index)}
+              onClick={() => void pick(choice)}
+              className={`flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-[13px] ${
+                index === highlight ? "bg-surface-raised text-text-primary" : "text-text-secondary"
+              }`}
+            >
+              <span className="font-mono text-[11px] text-text-muted">#{choice.id}</span>
+              <span className="truncate">{choice.title}</span>
+              <span className="ml-auto shrink-0 text-[11px] text-text-muted">{STATUS_LABELS[choice.status]}</span>
+            </div>
+          ))
+        )}
+      </Popover>
+    </div>
+  );
+}
+
 // --- Comments ---------------------------------------------------------------------
 
 function Comments({ task, onSave }: { task: TaskItem; onSave: (request: () => Promise<unknown>, what: string) => Promise<boolean> }) {
@@ -662,6 +971,7 @@ function Comments({ task, onSave }: { task: TaskItem; onSave: (request: () => Pr
           aria-label="New comment"
           value={text}
           onChange={(e) => setText(e.target.value)}
+          onPaste={(e) => pasteLink(e, setText)}
           onKeyDown={(e) => {
             if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) post();
           }}
@@ -719,6 +1029,7 @@ function CommentItem({ comment, onEdit, onDelete }: { comment: TaskComment; onEd
             autoFocus
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
+            onPaste={(e) => pasteLink(e, setDraft)}
             onKeyDown={(e) => {
               if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) commit();
               if (e.key === "Escape") setEditing(false);
@@ -736,10 +1047,39 @@ function CommentItem({ comment, onEdit, onDelete }: { comment: TaskComment; onEd
           </div>
         </div>
       ) : (
-        <p className="mt-1 whitespace-pre-wrap break-words text-text-secondary">{comment.text}</p>
+        <p className="mt-1 whitespace-pre-wrap break-words text-text-secondary">
+          <CommentText text={comment.text} />
+        </p>
       )}
     </li>
   );
+}
+
+/** A comment's text with its links (pills, markdown links and bare URLs) shown as pills. */
+function CommentText({ text }: { text: string }) {
+  return (
+    <>
+      {linkSegments(text).map((segment, i) =>
+        typeof segment === "string" ? segment : <StaticPill key={i} {...segment} />,
+      )}
+    </>
+  );
+}
+
+/**
+ * A link pasted into a comment goes in as a pill's markdown: over the selected text, labelled by it, or at the caret,
+ * labelled by the link. Anything else pastes as usual.
+ */
+function pasteLink(event: ClipboardEvent<HTMLTextAreaElement>, setValue: (value: string) => void) {
+  const href = pastedLink(event.clipboardData.getData("text/plain"));
+  if (!href) return;
+  event.preventDefault();
+  const el = event.currentTarget;
+  const { selectionStart: start, selectionEnd: end, value } = el;
+  const pill = pillMarkdown(linkPill(href, value.slice(start, end)));
+  setValue(value.slice(0, start) + pill + value.slice(end));
+  // After React has put the new value in, the caret goes after the pill.
+  requestAnimationFrame(() => el.setSelectionRange(start + pill.length, start + pill.length));
 }
 
 /** The backend stores naive UTC (see `utcnow`): read a time without a zone as UTC. */

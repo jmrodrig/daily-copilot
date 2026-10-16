@@ -284,6 +284,8 @@ class Person(Versioned, Base):
     avatar_url: Mapped[str | None] = mapped_column(default=None)
     # The app's user: at most one person per space is "me" (see `main._only_me`).
     is_me: Mapped[bool] = mapped_column(default=False, server_default=false())
+    # "#rrggbb" for their avatar medallion; None uses the default.
+    color: Mapped[str | None] = mapped_column(String(7), default=None)
     created_at: Mapped[dt.datetime] = mapped_column(server_default=func.now())
 
     def __repr__(self) -> str:

@@ -6,6 +6,7 @@ import { OptionPill } from "../components/ColorPicker";
 import GanttChart, { type GanttDateChange, type GanttProject } from "../components/GanttChart";
 import MultiSelect from "../components/MultiSelect";
 import PageHeader from "../components/PageHeader";
+import { ProjectPicker, projectLabel } from "../components/ProjectPicker";
 import { postStatusComment, useStatusChangePrompt } from "../components/StatusChangeDialog";
 import {
   AddTaskButton,
@@ -15,7 +16,6 @@ import {
   formatCustomValue,
   NewTaskRow,
   newTaskDefaults,
-  ProjectPicker,
   TITLE_COLUMN,
   useColumns,
   type Column,
@@ -76,8 +76,6 @@ const SUBTITLES: Record<ViewType, string> = {
 type OnStatus = (task: TaskItem, status: TaskStatus) => void;
 
 type State = { state: "loading" } | { state: "ok"; tasks: TaskItem[] } | { state: "error"; message: string };
-
-const NO_PROJECT_ID = -1;
 
 /** A saved view (`/views/:id`) from the sidebar. Changed filters apply at once; "Save view" keeps them. */
 export default function SavedTaskView() {
@@ -408,7 +406,7 @@ function TaskBoard({
             <MultiSelect
               label="Project"
               anyLabel="All projects"
-              options={projectChoices.map((p) => ({ value: p.id, label: p.name !== p.code ? `${p.code} · ${p.name}` : p.code }))}
+              options={projectChoices.map((p) => ({ value: p.id, label: projectLabel(p) }))}
               value={filters.project_id}
               onChange={(project_id) => onFilters({ ...filters, project_id })}
               className="w-44 py-1.5 text-[15px]"
@@ -546,51 +544,54 @@ function Kanban({
   }
 
   return (
-    <div className="grid min-h-[420px] grid-cols-4 gap-3">
-      {BOARD_COLUMNS.map(({ status, label }) => {
-        // Most pressing first; the sort is stable, so equal priorities keep the server's order.
-        const column = tasks
-          .filter((t) => boardColumn(t.status) === status)
-          .sort((a, b) => PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority]);
-        return (
-          <section
-            key={status}
-            aria-label={label}
-            onDragOver={(e) => {
-              if (e.dataTransfer.types.includes(DRAG_TYPE)) {
-                e.preventDefault();
-                setOver(status);
-              }
-            }}
-            onDragLeave={() => setOver((prev) => (prev === status ? null : prev))}
-            onDrop={(e) => drop(e, status)}
-            className={`flex max-h-[calc(100vh-300px)] min-h-0 flex-col rounded-lg border bg-surface-panel ${
-              over === status ? "border-accent/70" : "border-border-default"
-            }`}
-          >
-            <h3 className="flex items-center justify-between px-3 py-2 text-xs font-medium uppercase tracking-wider text-text-muted">
-              <span>{label}</span>
-              <span className="font-mono">{column.length}</span>
-            </h3>
-            <ul className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-2 pb-2">
-              {column.map((task) => (
-                <KanbanCard key={task.id} task={task} {...card} />
-              ))}
-            </ul>
-            {(status === "todo" || status === "in_progress") && (
-              <KanbanAddCard
-                status={status}
-                spaceId={spaceId}
-                defaults={newTaskDefaults}
-                projects={projects}
-                people={card.people}
-                customFields={card.customFields}
-                onCreated={onCreated}
-              />
-            )}
-          </section>
-        );
-      })}
+    // Scrolls sideways rather than squashing the columns on a narrow window.
+    <div className="overflow-x-auto">
+      <div className="grid min-h-[420px] min-w-[750px] grid-cols-5 gap-3">
+        {BOARD_COLUMNS.map(({ status, label }) => {
+          // Most pressing first; the sort is stable, so equal priorities keep the server's order.
+          const column = tasks
+            .filter((t) => boardColumn(t.status) === status)
+            .sort((a, b) => PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority]);
+          return (
+            <section
+              key={status}
+              aria-label={label}
+              onDragOver={(e) => {
+                if (e.dataTransfer.types.includes(DRAG_TYPE)) {
+                  e.preventDefault();
+                  setOver(status);
+                }
+              }}
+              onDragLeave={() => setOver((prev) => (prev === status ? null : prev))}
+              onDrop={(e) => drop(e, status)}
+              className={`flex max-h-[calc(100vh-300px)] min-h-0 flex-col rounded-lg border bg-surface-panel ${
+                over === status ? "border-accent/70" : "border-border-default"
+              }`}
+            >
+              <h3 className="flex items-center justify-between px-3 py-2 text-xs font-medium uppercase tracking-wider text-text-muted">
+                <span>{label}</span>
+                <span className="font-mono">{column.length}</span>
+              </h3>
+              <ul className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-2 pb-2">
+                {column.map((task) => (
+                  <KanbanCard key={task.id} task={task} {...card} />
+                ))}
+              </ul>
+              {(status === "todo" || status === "in_progress" || status === "in_review") && (
+                <KanbanAddCard
+                  status={status}
+                  spaceId={spaceId}
+                  defaults={newTaskDefaults}
+                  projects={projects}
+                  people={card.people}
+                  customFields={card.customFields}
+                  onCreated={onCreated}
+                />
+              )}
+            </section>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -725,7 +726,7 @@ function KanbanAddCard({
           className="w-full bg-transparent text-[15px] text-text-primary placeholder:text-text-muted focus:outline-none"
         />
         <div className="flex flex-wrap items-center gap-1.5">
-          <ProjectPicker value={draft.project_id} projects={projects} onChange={(project_id) => set({ project_id })} />
+          <ProjectPicker value={draft.project_id} projects={projects} onChange={(project_id) => set({ project_id })} ariaLabel="New task project" />
           {inlineFields.map((field) => (
             <CustomFieldInput
               key={field.id}
@@ -760,7 +761,7 @@ function KanbanAddCard({
   );
 }
 
-function KanbanCard({ task, flow, people, me, customFields, onStatus }: { task: TaskItem } & CardProps) {
+function KanbanCard({ task, people, me, customFields }: { task: TaskItem } & CardProps) {
   const overdue = isOverdue(task);
   const { taskId, openTask } = useTaskPanel();
   const active = taskId === task.id;
@@ -812,21 +813,6 @@ function KanbanCard({ task, flow, people, me, customFields, onStatus }: { task: 
         >
           {task.deadline ? `${formatDay(task.deadline)}${overdue ? " · late" : ""}` : "No due date"}
         </span>
-        {/* Keyboard alternative to dragging. */}
-        <select
-          aria-label={`Status of ${task.title}`}
-          value={task.status}
-          // Changing the status shouldn't also open the card.
-          onClick={(e) => e.stopPropagation()}
-          onChange={(e) => onStatus(task, e.target.value as TaskStatus)}
-          className="min-w-0 max-w-[104px] rounded border border-border-default bg-surface-panel px-1 py-0.5 text-[13px] text-text-muted"
-        >
-          {allowedStatuses(flow, task.status).map((value) => (
-            <option key={value} value={value}>
-              {STATUS_LABELS[value]}
-            </option>
-          ))}
-        </select>
       </div>
       {task.assignee && (
         <div className="mt-1.5 text-[13px] text-text-muted">
@@ -1016,22 +1002,12 @@ function BacklogRow({
       case "project":
         return (
           <td key={id} className="px-2 py-1.5">
-            <select
-              aria-label={`Project of ${task.title}`}
-              value={task.project_id ?? NO_PROJECT_ID}
-              onChange={(e) => {
-                const projectId = Number(e.target.value);
-                onPatch(task, { project_id: projectId === NO_PROJECT_ID ? null : projectId });
-              }}
-              className={`${cell} w-full`}
-            >
-              <option value={NO_PROJECT_ID}>—</option>
-              {projectChoices.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.code}
-                </option>
-              ))}
-            </select>
+            <ProjectPicker
+              value={task.project_id}
+              projects={projectChoices}
+              onChange={(projectId) => onPatch(task, { project_id: projectId })}
+              ariaLabel={`Project of ${task.title}`}
+            />
           </td>
         );
       case "status":
@@ -1161,10 +1137,12 @@ function TaskGantt({
   }, [tasks, projects]);
 
   const { taskId, openTask } = useTaskPanel();
+  const { spaceId } = useSpace();
   if (groups.length === 0) return <p className="panel text-center text-sm text-text-muted">No tasks match these filters.</p>;
   return (
     <GanttChart
       projects={groups}
+      spaceId={spaceId}
       customFields={customFields}
       colorBy={filters.gantt_color_by}
       onColorBy={(gantt_color_by) => onFilters({ ...filters, gantt_color_by })}

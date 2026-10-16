@@ -138,7 +138,7 @@ const DAY = /^\d{4}-\d{2}-\d{2}$/;
 
 // Kept here rather than imported, as tasks.ts imports this module.
 const PRIORITIES: readonly TaskPriority[] = ["low", "normal", "high", "urgent"];
-const STATUSES: readonly TaskStatus[] = ["backlog", "todo", "in_progress", "blocked", "done", "archived"];
+const STATUSES: readonly TaskStatus[] = ["backlog", "todo", "in_progress", "in_review", "blocked", "done", "archived"];
 
 function flag(value: string | null): boolean | null {
   return value === "true" ? true : value === "false" ? false : null;

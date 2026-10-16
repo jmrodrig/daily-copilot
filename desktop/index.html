@@ -16,9 +16,83 @@
       href="https://fonts.googleapis.com/css2?family=Cinzel:wght@700&display=swap"
     />
     <title>Daily Copilot</title>
+    <!-- The splash below shows until React mounts and replaces #root's contents. -->
+    <style>
+      .dc-splash {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 18px;
+        background: var(--dc-bg, #101820);
+        color: var(--dc-fg, #f3f5f6);
+        animation: dc-splash-in 0.4s ease-out both;
+      }
+      .dc-splash-mark {
+        width: 72px;
+        height: 72px;
+        color: var(--dc-fg);
+      }
+      .dc-splash-mark .t {
+        fill: var(--dc-accent);
+      }
+      .dc-splash-title {
+        margin: 0;
+        font-family: var(--dc-font-display);
+        font-size: 22px;
+        font-weight: 700;
+        letter-spacing: 0.18em;
+      }
+      .dc-splash-bar {
+        position: relative;
+        width: 140px;
+        height: 3px;
+        overflow: hidden;
+        border-radius: 2px;
+        background: var(--dc-line);
+      }
+      .dc-splash-bar::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        width: 40%;
+        border-radius: 2px;
+        background: var(--dc-accent);
+        animation: dc-splash-slide 1.2s ease-in-out infinite;
+      }
+      @keyframes dc-splash-in {
+        from { opacity: 0; }
+        to { opacity: 1; }
+      }
+      @keyframes dc-splash-slide {
+        0% { transform: translateX(-100%); opacity: 0.5; }
+        50% { opacity: 1; }
+        100% { transform: translateX(250%); opacity: 0.5; }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .dc-splash { animation: none; }
+        .dc-splash-bar::after { animation-duration: 3s; }
+      }
+    </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div class="dc-splash" role="status" aria-live="polite">
+        <svg class="dc-splash-mark" viewBox="0 0 120 120" aria-hidden="true">
+          <g stroke="currentColor" stroke-linejoin="round" stroke-linecap="round">
+            <polygon points="20,37 60,60 60,106 20,83" fill="none" stroke-width="5" />
+            <polygon points="60,60 100,37 100,83 60,106" fill="none" stroke-width="5" />
+            <path d="M70 54.2 V100.2 M80 48.5 V94.5 M90 42.8 V88.8" stroke-width="2.5" fill="none" stroke-linecap="butt" />
+            <polygon class="t" points="60,14 100,37 60,60 20,37" stroke-width="5" />
+          </g>
+        </svg>
+        <h1 class="dc-splash-title">DAILY COPILOT</h1>
+        <div class="dc-splash-bar" aria-hidden="true"></div>
+        <span style="position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0)">Loading…</span>
+      </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

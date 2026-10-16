@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent } from "react";
 
 import Popover from "../components/Popover";
 import { getJson } from "./api";
@@ -14,6 +14,8 @@ export type Person = {
   avatar_url: string | null;
   /** The app's user: at most one person per space. */
   is_me: boolean;
+  /** "#rrggbb" for their avatar medallion; null uses the default. */
+  color?: string | null;
 };
 
 /** The longest name a task's assignee can hold (`TaskUpdate.assignee`), so People names are capped to it too. */
@@ -68,18 +70,32 @@ export function personLabel(person: Pick<Person, "name" | "is_me">): string {
   return person.is_me ? `${person.name} (Me)` : person.name;
 }
 
-export function Avatar({ person, size = "h-11 w-11 shrink-0 rounded-full", textClass = "text-[15px]" }: { person: Pick<Person, "name" | "avatar_url" | "is_external">; size?: string; textClass?: string }) {
+type AvatarPerson = Pick<Person, "name" | "avatar_url" | "is_external" | "color">;
+
+/** The medallion colours for a person's chosen colour: a tinted fill and border, and the colour itself for the initials. */
+function medallionStyle(color: string | null | undefined): CSSProperties | undefined {
+  if (!color) return undefined;
+  return {
+    backgroundColor: `color-mix(in srgb, ${color} 16%, transparent)`,
+    borderColor: `color-mix(in srgb, ${color} 60%, transparent)`,
+    color,
+  };
+}
+
+export function Avatar({ person, size = "h-11 w-11 shrink-0 rounded-full", textClass = "text-[15px]" }: { person: AvatarPerson; size?: string; textClass?: string }) {
   const [broken, setBroken] = useState(false);
   useEffect(() => setBroken(false), [person.avatar_url]);
   
   if (person.avatar_url && !broken) {
     return <img src={person.avatar_url} alt="" onError={() => setBroken(true)} className={`${size} border border-border-default object-cover`} />;
   }
+  const custom = medallionStyle(person.color);
   return (
     <span
       aria-hidden
+      style={custom}
       className={`${size} flex items-center justify-center border font-mono ${textClass} font-semibold ${
-        person.is_external ? "border-accent/50 bg-accent/[0.12] text-accent-soft" : "border-border-strong bg-surface-panel text-text-secondary"
+        custom ? "" : person.is_external ? "border-accent/50 bg-accent/[0.12] text-accent-soft" : "border-border-strong bg-surface-panel text-text-secondary"
       }`}
     >
       {initials(person.name)}
@@ -87,7 +103,7 @@ export function Avatar({ person, size = "h-11 w-11 shrink-0 rounded-full", textC
   );
 }
 
-export function PersonBadge({ person }: { person: Pick<Person, "name" | "avatar_url" | "is_external" | "is_me"> }) {
+export function PersonBadge({ person }: { person: AvatarPerson & Pick<Person, "is_me"> }) {
   return (
     <div className="flex items-center gap-2">
       <Avatar person={person} size="h-5 w-5 shrink-0 rounded-full" textClass="text-[9px]" />

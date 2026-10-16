@@ -6,7 +6,7 @@ import { TableKit, TableView } from "@tiptap/extension-table";
 import TextAlign from "@tiptap/extension-text-align";
 import { Color } from "@tiptap/extension-text-style";
 import { Markdown } from "@tiptap/markdown";
-import { Fragment, type Node as ProseMirrorNode } from "@tiptap/pm/model";
+import { Fragment, Slice, type Node as ProseMirrorNode, type Schema } from "@tiptap/pm/model";
 import { Plugin, PluginKey, TextSelection, type EditorState, type Transaction } from "@tiptap/pm/state";
 import { insertPoint } from "@tiptap/pm/transform";
 import { Decoration, DecorationSet, type EditorView } from "@tiptap/pm/view";
@@ -29,7 +29,17 @@ import { checkLocalFile, isLocalHref, openLocalFile } from "../lib/localFiles";
 import type { TaskItem as TaskRow } from "../lib/tasks";
 import MediaLightbox, { ExpandButton, isPdfUrl, MarkupOverlay } from "./MediaLightbox";
 import { LinkPanel, panelPosition, TaskPanel, type PanelDraft } from "./refPanels";
-import { pillContent, ReferencePill, taskHref, type RefPillAttrs } from "./referencePill";
+import {
+  BARE_URL,
+  linkPill,
+  pastedLink,
+  pillBareUrlsInMarkdown,
+  pillContent,
+  ReferencePill,
+  taskHref,
+  trimUrl,
+  type RefPillAttrs,
+} from "./referencePill";
 import { SlashCommand, SlashMenu, type SlashItem, type SlashMenuState } from "./slashCommand";
 import { WhiteboardIcon } from "./markupUi";
 import { WhiteboardNode } from "./WhiteboardWidget";
@@ -168,9 +178,12 @@ export default function NoteEditor({
       },
       // Math copied rendered (from the chat or a note) comes back as math, not its text twice over.
       transformPastedHTML: (html) => transformNotePastedHTML(html),
-      // A pasted screenshot or a dropped file is uploaded to the space rather than inlined as base64, and markdown
-      // pasted as plain text (with no HTML beside it) is read as markdown rather than taken literally. Local paths
-      // pasted as inline code or links become pills once the paste has landed (see pillLocalPathsRef).
+      // Bare web URLs in pasted text become link pills (outside code).
+      transformPasted: (slice, view) => new Slice(pillBareUrls(slice.content, view.state.schema), slice.openStart, slice.openEnd),
+      // A pasted screenshot or a dropped file is uploaded to the space rather than inlined as base64, a pasted link
+      // becomes a link pill (over the selected text, which labels it), and markdown pasted as plain text (with no HTML
+      // beside it) is read as markdown rather than taken literally. Local paths pasted as inline code or links become
+      // pills once the paste has landed (see pillLocalPathsRef).
       handlePaste: (view, event) => {
         if (!view.editable) return false;
         setTimeout(() => void pillLocalPathsRef.current());
@@ -181,9 +194,15 @@ export default function NoteEditor({
           return true;
         }
         const text = event.clipboardData?.getData("text/plain") ?? "";
-        if (event.clipboardData?.getData("text/html") || !MARKDOWN_SYNTAX.test(text)) return false;
         const { $from } = view.state.selection;
         if ($from.parent.type.spec.code || $from.marks().some((mark) => mark.type.spec.code)) return false;
+        const link = pastedLink(text);
+        if (link) {
+          event.preventDefault();
+          pasteLinkRef.current(link);
+          return true;
+        }
+        if (event.clipboardData?.getData("text/html") || !MARKDOWN_SYNTAX.test(text)) return false;
         event.preventDefault();
         pasteMarkdownRef.current(text.replace(/​/g, ""));
         return true;
@@ -207,7 +226,16 @@ export default function NoteEditor({
 
   const pasteMarkdownRef = useRef<(markdown: string) => void>(() => {});
   pasteMarkdownRef.current = (markdown: string) => {
-    if (editor && !editor.isDestroyed) editor.commands.insertContent(markdown, { contentType: "markdown" });
+    if (editor && !editor.isDestroyed) editor.commands.insertContent(pillBareUrlsInMarkdown(markdown), { contentType: "markdown" });
+  };
+
+  /** A pasted link as a pill: over the selected text, labelled by it, or at the caret, labelled by the link. */
+  const pasteLinkRef = useRef<(href: string) => void>(() => {});
+  pasteLinkRef.current = (href: string) => {
+    if (!editor || editor.isDestroyed) return;
+    const { from, to } = editor.state.selection;
+    const label = editor.state.doc.textBetween(from, to, " ");
+    insertPill({ text: label.replace(/\s+/g, " ").trim(), from, to, top: 0, left: 0 }, linkPill(href, label));
   };
 
   /**
@@ -400,7 +428,10 @@ export default function NoteEditor({
   );
 }
 
-/** The menu over selected text (not a link, which has its own): turn the selection into a task or a link. */
+/**
+ * The menu over selected text (not a link, which has its own): format it close to where it is (block type, bold,
+ * italic, strikethrough, color, lists), or turn it into a task or a link.
+ */
 function SelectionMenu({ editor, onOpen }: { editor: Editor; onOpen: (type: "task" | "link") => void }) {
   const options = useMemo(() => ({ placement: "top" as const, offset: 8 }), []);
   const shouldShow = useCallback(
@@ -412,8 +443,22 @@ function SelectionMenu({ editor, onOpen }: { editor: Editor; onOpen: (type: "tas
       state.doc.textBetween(from, to, " ").trim() !== "",
     [],
   );
+  const active = useEditorState({
+    editor,
+    selector: ({ editor: e }) => ({
+      bold: e.isActive("bold"),
+      italic: e.isActive("italic"),
+      strike: e.isActive("strike"),
+      bulletList: e.isActive("bulletList"),
+      orderedList: e.isActive("orderedList"),
+      taskList: e.isActive("taskList"),
+      heading: HEADING_LEVELS.find((level) => e.isActive("heading", { level })) ?? 0,
+      color: (e.getAttributes("textStyle").color as string | undefined) ?? null,
+    }),
+  });
+  const chain = () => editor.chain().focus();
   const button =
-    "flex items-center gap-1.5 px-3 py-2 text-xs font-bold uppercase tracking-wider text-text-secondary hover:bg-surface-hover hover:text-accent focus:outline-none";
+    "flex h-8 items-center gap-1.5 rounded px-2.5 text-xs font-bold uppercase tracking-wider text-text-secondary hover:bg-surface-hover hover:text-accent focus:outline-none";
 
   return (
     <BubbleMenu
@@ -421,19 +466,62 @@ function SelectionMenu({ editor, onOpen }: { editor: Editor; onOpen: (type: "tas
       pluginKey="selectionMenu"
       options={options}
       shouldShow={shouldShow}
-      className="flex items-center overflow-hidden rounded-lg border border-border-default bg-surface-raised shadow-xl"
+      className="flex items-center gap-0.5 rounded-lg border border-border-default bg-surface-raised p-0.5 shadow-xl"
     >
-      {/* Each keeps the editor's selection until the click lands. */}
-      <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => onOpen("task")} className={button}>
+      {/* Each keeps the editor's selection until the click lands (see ToolButton). */}
+      <div role="toolbar" aria-label="Format selection" className="flex items-center gap-0.5">
+        <ToolButton label="Normal text" on={active.heading === 0} disabled={false} onClick={() => chain().setParagraph().run()}>
+          <span className="text-[13px]">T</span>
+        </ToolButton>
+        {HEADING_LEVELS.map((level) => (
+          <ToolButton
+            key={level}
+            label={`Heading ${level}`}
+            on={active.heading === level}
+            disabled={false}
+            onClick={() => chain().toggleHeading({ level }).run()}
+          >
+            <span className="text-[13px] font-semibold">H{level}</span>
+          </ToolButton>
+        ))}
+        <Divider />
+        <ToolButton label="Bold (Ctrl+B)" on={active.bold} disabled={false} onClick={() => chain().toggleBold().run()}>
+          <span className="font-bold">B</span>
+        </ToolButton>
+        <ToolButton label="Italic (Ctrl+I)" on={active.italic} disabled={false} onClick={() => chain().toggleItalic().run()}>
+          <span className="font-serif italic">I</span>
+        </ToolButton>
+        <ToolButton label="Strikethrough" on={active.strike} disabled={false} onClick={() => chain().toggleStrike().run()}>
+          <span className="line-through">S</span>
+        </ToolButton>
+        <ColorPicker
+          label="Text color"
+          colors={TEXT_COLORS}
+          color={active.color}
+          disabled={false}
+          // A native color input takes the focus, which would close this menu.
+          custom={false}
+          onPick={(color) => (color ? chain().setColor(color).run() : chain().unsetColor().run())}
+        >
+          <span className="font-semibold">A</span>
+        </ColorPicker>
+        <Divider />
+        <ToolButton label="Bullet list" on={active.bulletList} disabled={false} onClick={() => chain().toggleBulletList().run()}>
+          •≡
+        </ToolButton>
+        <ToolButton label="Numbered list" on={active.orderedList} disabled={false} onClick={() => chain().toggleOrderedList().run()}>
+          1.
+        </ToolButton>
+        <ToolButton label="Checklist" on={active.taskList} disabled={false} onClick={() => chain().toggleTaskList().run()}>
+          ☑
+        </ToolButton>
+      </div>
+      <Divider />
+      <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => onOpen("task")} title="Create a task from the selection" className={button}>
         <CheckboxIcon />
-        Create task
+        Task
       </button>
-      <button
-        type="button"
-        onMouseDown={(event) => event.preventDefault()}
-        onClick={() => onOpen("link")}
-        className={`${button} border-l border-border-default`}
-      >
+      <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => onOpen("link")} title="Link the selection" className={button}>
         <LinkIcon />
         Link
       </button>
@@ -1027,6 +1115,40 @@ function normalizeDoc(state: EditorState): Transaction | null {
 }
 
 /** The files of a paste or drop, if any. */
+/**
+ * Pasted content with its bare web URLs as link pills: in running text, and links whose text is their own URL. Code
+ * (blocks and inline) and links with text of their own are left as they are.
+ */
+function pillBareUrls(fragment: Fragment, schema: Schema): Fragment {
+  const nodes: ProseMirrorNode[] = [];
+  fragment.forEach((node) => {
+    if (node.isText) nodes.push(...pillBareUrlsInText(node, schema));
+    else if (node.type.spec.code || node.isLeaf) nodes.push(node);
+    else nodes.push(node.copy(pillBareUrls(node.content, schema)));
+  });
+  return Fragment.fromArray(nodes);
+}
+
+function pillBareUrlsInText(node: ProseMirrorNode, schema: Schema): ProseMirrorNode[] {
+  const text = node.text ?? "";
+  if (node.marks.some((mark) => mark.type.spec.code)) return [node];
+  const pill = (href: string) => schema.nodes.referencePill.create(linkPill(href));
+  const link = node.marks.find((mark) => mark.type.name === "link");
+  if (link) return pastedLink(text) === link.attrs.href ? [pill(link.attrs.href as string)] : [node];
+  const nodes: ProseMirrorNode[] = [];
+  let last = 0;
+  for (const match of text.matchAll(BARE_URL)) {
+    const start = match.index ?? 0;
+    const url = trimUrl(match[0]);
+    if (start > last) nodes.push(schema.text(text.slice(last, start), node.marks));
+    nodes.push(pill(url));
+    last = start + url.length;
+  }
+  if (!nodes.length) return [node];
+  if (last < text.length) nodes.push(schema.text(text.slice(last), node.marks));
+  return nodes;
+}
+
 function extractFiles(data: DataTransfer | null): File[] {
   return Array.from(data?.files ?? []);
 }
@@ -1374,6 +1496,7 @@ function ColorPicker({
   colors,
   color,
   disabled,
+  custom = true,
   onPick,
   children,
 }: {
@@ -1381,6 +1504,8 @@ function ColorPicker({
   colors: { name: string; value: string }[];
   color: string | null;
   disabled: boolean;
+  /** Whether to offer a custom color picker beside the swatches. */
+  custom?: boolean;
   onPick: (color: string | null) => void;
   children: ReactNode;
 }) {
@@ -1432,6 +1557,7 @@ function ColorPicker({
             <ToolText label={`Remove ${label.toLowerCase()}`} disabled={false} onClick={() => pick(null)}>
               Default
             </ToolText>
+            {custom && (
             <label className="flex cursor-pointer items-center gap-1.5 rounded px-2 py-1 text-xs text-text-secondary hover:bg-surface-hover hover:text-text-primary">
               Custom
               <input
@@ -1443,6 +1569,7 @@ function ColorPicker({
                 className="h-5 w-6 cursor-pointer border-0 bg-transparent p-0"
               />
             </label>
+            )}
           </div>
         </div>
       )}

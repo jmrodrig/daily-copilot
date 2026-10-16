@@ -44,7 +44,7 @@ test('typing / offers Task and Link; a task created from it goes in as a pill', 
   await page.keyboard.type('/');
 
   const menu = page.getByRole('listbox', { name: 'Insert' });
-  await expect(menu.getByRole('option')).toHaveText([/Task/, /Link/]);
+  await expect(menu.getByRole('option')).toHaveText([/Task/, /Link/, /Whiteboard/]);
   await page.keyboard.type('ta');
   await expect(menu.getByRole('option')).toHaveCount(1);
   await page.keyboard.press('Enter');
@@ -53,7 +53,7 @@ test('typing / offers Task and Link; a task created from it goes in as a pill', 
   await expect(panel).toBeVisible();
   await expect(editor).toHaveText('Start'); // the `/ta` is gone
   await panel.getByLabel('Title').fill('Weld the frame');
-  await expect(panel.getByLabel('Project')).toHaveValue('1'); // the note's project folder
+  await expect(panel.getByLabel('Project')).toContainText('Bridge'); // the note's project folder
   await panel.getByLabel('Assignee').fill('Sam');
   await panel.getByLabel('Due in').selectOption('7');
   await panel.getByRole('switch', { name: /In progress/ }).click();
@@ -147,8 +147,45 @@ test('a task pill in a published note opens the task panel beside the note, even
   await expect(page).toHaveURL(/\/note\?.*taskId=3/);
   const panel = page.getByRole('region', { name: 'Task details' });
   await expect(panel.getByLabel('Title')).toHaveValue('Order the steel');
-  await expect(panel.getByLabel('Description')).toHaveValue('Grade S355');
+  await expect(panel.getByText('Grade S355')).toBeVisible();
   await panel.getByRole('button', { name: 'Close task' }).click();
   await expect(panel).toHaveCount(0);
   await expect(page).not.toHaveURL(/taskId=/);
 });
+
+test('inferred pills without ref title render as pills in published notes and resolve relative paths', async ({ page }) => {
+  await setup(
+    page,
+    'See [Rig loads](C7801/Rig%20loads.md), [Task three](/tasks/backlog?taskId=3), and [External](https://example.com).',
+    'published'
+  );
+  const article = page.locator('article.note-body');
+  const notePill = article.locator('a.reference-pill.note');
+  await expect(notePill).toHaveText('Rig loads');
+  await expect(notePill).not.toHaveAttribute('target', '_blank');
+
+  const taskPill = article.locator('a.reference-pill.task');
+  await expect(taskPill).toHaveText('Task three');
+
+  // External link without ref: title is a plain link, not a reference-pill
+  const plainLink = article.locator('a[href="https://example.com"]');
+  await expect(plainLink).toHaveText('External');
+  await expect(plainLink).not.toHaveClass(/reference-pill/);
+
+  // Clicking relative note pill navigates with spaceId and encoded path
+  await notePill.click();
+  await expect(page).toHaveURL(/note\?space=1&path=C7801(%2F|\/)Rig(%20|\+)loads\.md/);
+});
+
+test('inferred pills without ref title are parsed as reference pills in editor', async ({ page }) => {
+  await setup(
+    page,
+    'Check [Rig loads](C7801/review.md) and [Task 3](/tasks/backlog?taskId=3) and [Plain](https://example.com).'
+  );
+  const editor = page.locator('.note-body');
+  await expect(editor.locator('.reference-pill.note')).toHaveText('Rig loads');
+  await expect(editor.locator('.reference-pill.task')).toHaveText('Task 3');
+  await expect(editor.locator('.reference-pill')).toHaveCount(2);
+  await expect(editor.locator('a[href="https://example.com"]')).toHaveText('Plain');
+});
+

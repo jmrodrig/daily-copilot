@@ -6,3 +6,4 @@ pyyaml>=6.0
 python-multipart>=0.0.9
 pymupdf>=1.24
 litellm>=1.50
+extract-msg>=0.48

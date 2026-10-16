@@ -158,3 +158,8 @@ export function notePath(spaceId: number, path: string, root: "content" | "templ
   if (root === "templates") params.set("root", root);
   return `/note?${params}`;
 }
+
+/** Opens a note (or template) in a new browser window or tab, e.g. to read it beside another. */
+export function openNoteInNewWindow(spaceId: number, path: string, root: "content" | "templates" = "content") {
+  window.open(`${window.location.origin}${notePath(spaceId, path, root)}`, "_blank", "noopener,noreferrer");
+}

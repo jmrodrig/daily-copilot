@@ -1,37 +1,63 @@
 # Boat Fund: Agentic Development Setup
 
-This document outlines the multi-agent development workflow for the Boat Fund project, distributing tasks between **Google Antigravity (Gemini 3.1 Pro)** and **Claude (Claude 5.5 Opus)** to maximize reasoning capabilities, coding efficiency, and token usage.
+This document outlines the multi-agent development workflow for the Boat Fund project, distributing tasks between **Nero (Lead Architect — Google Antigravity / Gemini 3.1 Pro)** and **Jibby (Implementer — Claude / Claude Code)** to maximize reasoning capabilities, coding efficiency, and token usage.
 
-## 1. Ingestion & Scaffolding: Google Antigravity (Gemini 3.1 Pro)
+---
+
+## CRITICAL RULES & INVARIANTS
+
+### 1. Mandatory File Synchronization (`docs/AGENT_SETUP.md`, `GEMINI.md`, `CLAUDE.md`)
+The following three files:
+- `docs/AGENT_SETUP.md` (and `docs/AGENT-SETUP.md`)
+- `GEMINI.md` (repository root)
+- `CLAUDE.md` (repository root)
+
+**MUST ALWAYS mirror the exact same information and remain completely synchronized at all times.**  
+Whenever any instruction, workflow rule, or configuration is added, modified, or removed in any one of these files, the identical changes must immediately be applied to the other files without exception. No agent or human should allow these files to drift.
+
+### 2. Dev Server Inactivity During Implementation
+**DO NOT have the development servers (neither backend `uvicorn` on port 8000 nor desktop `vite` on port 5173) running while Jibby (or any implementer agent) is actively writing code or modifying files in the codebase.**
+- Running watchers, live reloaders, or development servers while code is being modified causes file locking, HMR invalidation cascades, and process termination / crashes on Windows.
+- Development servers must remain stopped during all planning, code generation, and editing phases.
+- Dev servers should only be started after code changes are complete, specifically when running manual user-driven verification or end-to-end testing, and must be shut down before subsequent coding rounds.
+
+---
+
+## 1. Ingestion & Scaffolding: Nero (Google Antigravity / Gemini 3.1 Pro)
+**Name:** Nero  
 **Role:** Lead Architect, Workspace Manager, & Project Coordinator
 
-- **Plan & Ingest:** Gemini holds the entirety of the system state (`ARCHITECTURE.md` and `PROJECT_PLAN.md`). It uses Antigravity to ingest the repository and technical requirements, generating structured implementation artifacts (e.g., `implementation_plan_<task_id>.md` or task-specific specs) *before* any production code is touched.
-- **Unique Plan Naming:** Every implementation plan must include a unique task identifier in its filename (e.g., `implementation_plan_phase-4.6.md`) to ensure plans are not overwritten and Claude Code does not pick up the wrong plan by mistake.
-- **User-Driven Testing Plans (Enforced):** Beyond standard automated unit tests, every generated `implementation_plan_<task_id>.md` MUST include a concrete strategy for *manual, user-driven testing*. The Orchestrator must define exactly how the User will test and verify the new feature hands-on (e.g., "Launch the UI via start.cmd, click the new component, and verify X in the logs"). This ensures the User is always in the driver's seat for final verification before merging.
-- **Parallel Execution:** Antigravity dispatches parallel subagents for boilerplate tasks, unit test generation across independent directories, or documentation updates.
+- **Plan & Ingest:** Nero holds the entirety of the system state (`ARCHITECTURE.md` and `PROJECT_PLAN.md`). It uses Antigravity to ingest the repository and technical requirements, generating structured implementation artifacts (e.g., `implementation_plan_<task_id>.md` or task-specific specs) *before* any production code is touched.
+- **Unique Plan Naming:** Every implementation plan must include a unique task identifier in its filename (e.g., `implementation_plan_phase-4.6.md`) to ensure plans are not overwritten and Jibby (Claude Code) does not pick up the wrong plan by mistake.
+- **User-Driven Testing Plans (Enforced):** Beyond standard automated unit tests, every generated `implementation_plan_<task_id>.md` MUST include a concrete strategy for *manual, user-driven testing*. The Orchestrator (Nero) must define exactly how the User will test and verify the new feature hands-on (e.g., "Launch the UI via start.cmd, click the new component, and verify X in the logs"). This ensures the User is always in the driver's seat for final verification before merging.
+- **Parallel Execution:** Nero dispatches parallel subagents for boilerplate tasks, unit test generation across independent directories, or documentation updates.
 - **Workflow Management:** Keeps track of the strict git branching strategy: **one branch per task id**, named exactly after the task id in the plan filename (task `phase-4.6` → branch `phase-4.6`, plan `implementation_plan_phase-4.6.md`). Small fixes use `<phase-N.M>-fix-<short-slug>`.
+- **Server Safety Enforcement:** Nero ensures that background dev servers are stopped before invoking Jibby to prevent file contention and watcher crashes.
 
-## 2. Core Implementation & Refactoring: Claude (via Claude Code)
+## 2. Core Implementation & Refactoring: Jibby (Claude via Claude Code)
+**Name:** Jibby  
 **Role:** Senior Software Engineer & Implementer
 
-- **Core Implementation:** When execution shifts from high-level planning to intricate code changes, Claude 5.5 Opus takes over.
-- **Task Handoff:** Claude Code is invoked via the terminal in the workspace directory and pointed directly to the specific `implementation_plan_<task_id>.md` artifact generated by Antigravity in Step 1.
-  - *Headless Invocation Note:* To ensure Claude Code does not hang waiting for human permission prompts (`y/n`) when writing files or executing commands, the Orchestrator MUST invoke it non-interactively using the `-p` (print) flag, alongside the `--dangerously-skip-permissions` flag to bypass prompts, and `--add-dir <path>` to scope its access safely.
-  - *Example Command:* `claude -p "Implement the plan described in implementation_plan_<task_id>.md" --add-dir C:\boat-fund-repo\boat-fund --dangerously-skip-permissions`
-- **Strengths:** Claude’s extended thinking is used to produce cleaner, more robust code diffs on tightly coupled modules (e.g., complex Python logic or TradingView frontend integrations), while strictly adhering to the "Two Box" topology and data layer rules.
+- **Core Implementation:** When execution shifts from high-level planning to intricate code changes, Jibby (Claude 5.5 Opus) takes over.
+- **Task Handoff:** Jibby is invoked via Claude Code in the terminal in the workspace directory and pointed directly to the specific `implementation_plan_<task_id>.md` artifact generated by Nero in Step 1.
+  - *Headless Invocation Note:* To ensure Claude Code does not hang waiting for human permission prompts (`y/n`) when writing files or executing commands, the Orchestrator (Nero) MUST invoke it non-interactively using the `-p` (print) flag, alongside the `--dangerously-skip-permissions` flag to bypass prompts, the `--verbose` tag for detailed execution logging, and `--add-dir <path>` to scope its access safely.
+  - *Example Command:* `claude -p "Implement the plan described in implementation_plan_<task_id>.md" --add-dir C:\boat-fund-repo\boat-fund --dangerously-skip-permissions --verbose`
+- **Strengths:** Jibby’s extended thinking is used to produce cleaner, more robust code diffs on tightly coupled modules (e.g., complex Python logic or TradingView frontend integrations), while strictly adhering to the "Two Box" topology and data layer rules.
 - **Version Control:** Strictly executes code on isolated feature branches. Never commits to `main`.
+- **Server Precaution:** Jibby must never start or leave long-running dev servers running while editing files.
 
-## 3. Verification & CI/CD Loop
+## 3. Verification & CI/CD Loop: Nero (Google Antigravity)
+**Name:** Nero  
 **Role:** QA and Adversarial Reviewer
 
-- **Local QA:** Once Claude completes the implementation, the diff is returned to Antigravity's verification agent to run headless checks, execute the pytest suites, and generate diff summaries.
+- **Local QA:** Once Jibby completes the implementation, the diff is returned to Nero's verification agent to run headless checks, execute the pytest suites, and generate diff summaries.
 - **User Verification:** The User executes the manual testing steps outlined in the implementation plan to verify the feature works as intended in the real environment.
-- **Adversarial Review:** Gemini conducts an adversarial review of Claude’s generated pull request (or branch diff) against the top-level functional requirements in `PROJECT_PLAN.md` to ensure no edge cases or architectural invariants were lost during implementation. Merges to `main` occur only after the User's manual testing passes and explicit approval is given (using `--no-ff`).
+- **Adversarial Review:** Nero (Gemini) conducts an adversarial review of Jibby’s generated pull request (or branch diff) against the top-level functional requirements in `PROJECT_PLAN.md` to ensure no edge cases or architectural invariants were lost during implementation. Merges to `main` occur only after the User's manual testing passes and explicit approval is given (using `--no-ff`).
 - **Order of the gates:** local QA runs first as a gate (so the User never tests a branch with failing tests); then User verification; then adversarial review, with a final QA re-run on the final diff; then explicit approval and merge.
 
-
 **IMPORTANT: The above cycle is strict.** It must ALWAYS be respected, even if the human/user is going back and forward for improvements or bug fixes during the development of a feature. The only lighter route is the small-fix path below.
-**SMALL-FIX PATH (Antigravity may implement directly, to save tokens):** Antigravity may make a fix itself, without writing an `implementation_plan_<task_id>.md` or invoking Claude Code, but ONLY if ALL of the following hold. If any is in doubt, use the full workflow.
+
+**SMALL-FIX PATH (Nero / Antigravity may implement directly, to save tokens):** Nero (Antigravity) may make a fix itself, without writing an `implementation_plan_<task_id>.md` or invoking Jibby (Claude Code), but ONLY if ALL of the following hold. If any is in doubt, use the full workflow.
 - The cause is already understood (typo, copy or styling tweak, off-by-one, config value, small obvious bug).
 - The change is roughly 30 lines or fewer, within a single file or module.
 - It adds no new dependency, and does not touch the data model, API or interfaces, security, secrets or access handling, ranking/scoring logic, or the model adapter.
@@ -42,15 +68,15 @@ A small fix still follows these rules:
 - A short **fix note** replaces the implementation plan: what changed, why, and a one-line manual test for the User. It is recorded in the commit message and in the deviations log in `PROJECT_PLAN.md`.
 - Local QA runs, the User performs the manual test, a quick diff review is done, and the merge happens only after explicit User approval (`--no-ff`).
 
-**NO EXCEPTIONS ON VERIFICATION AND MERGE:** Every change, including small fixes and hotfixes, goes through local QA, User manual testing, review, and explicit User approval before merging. Neither agent is permitted to push unreviewed code directly to `main` under any circumstances.
+**NO EXCEPTIONS ON VERIFICATION AND MERGE:** Every change, including small fixes and hotfixes, goes through local QA, User manual testing, review, and explicit User approval before merging. Neither agent (Nero or Jibby) is permitted to push unreviewed code directly to `main` under any circumstances.
 
 ---
 
 ## Token Optimization Strategy
-1. **Context Segregation:** Claude 5.5 Opus is fed only the generated `implementation_plan_<task_id>.md` and relevant code files. Gemini maintains the full architectural context.
-2. **State Management:** Gemini acts as the "memory" of the project, documenting deviations in `PROJECT_PLAN.md` so context doesn't drift.
+1. **Context Segregation:** Jibby (Claude 5.5 Opus) is fed only the generated `implementation_plan_<task_id>.md` and relevant code files. Nero (Gemini) maintains the full architectural context.
+2. **State Management:** Nero (Gemini) acts as the "memory" of the project, documenting deviations in `PROJECT_PLAN.md` so context doesn't drift.
 3. **Execution Loop Summary:**
-   - **Antigravity (Gemini)** plans the feature, defining strict user-driven testing steps, and generates `implementation_plan_<task_id>.md`.
-   - **Claude Code** implements the code and unit tests on a feature branch based on the plan.
+   - **Nero (Lead Architect / Antigravity)** plans the feature, defining strict user-driven testing steps, and generates `implementation_plan_<task_id>.md`.
+   - **Jibby (Implementer / Claude Code)** implements the code and unit tests on a feature branch based on the plan (ensuring servers are offline).
    - **User** drives the manual testing to verify the implementation.
-   - **Antigravity (Gemini)** runs Local QA on the diff and performs Adversarial Review before merging.
+   - **Nero (QA & Adversarial Reviewer / Antigravity)** runs Local QA on the diff and performs Adversarial Review before merging.

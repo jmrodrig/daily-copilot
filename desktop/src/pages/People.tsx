@@ -1,13 +1,15 @@
 import { useEffect, useState, type FormEvent } from "react";
 
+import ColorPicker from "../components/ColorPicker";
 import PageHeader from "../components/PageHeader";
 import { getJson, message, sendJson } from "../lib/api";
+import type { HexColor } from "../lib/colors";
 import { announcePeopleChange, ASSIGNEE_MAX, Avatar, byName, type Person } from "../lib/people";
 import { useSpace } from "../lib/space";
 
-type PersonDraft = Pick<Person, "name" | "is_external"> & { email: string; company: string; avatar_url: string };
+type PersonDraft = Pick<Person, "name" | "is_external"> & { email: string; company: string; avatar_url: string; color: HexColor | null };
 
-const EMPTY_DRAFT: PersonDraft = { name: "", email: "", company: "", is_external: false, avatar_url: "" };
+const EMPTY_DRAFT: PersonDraft = { name: "", email: "", company: "", is_external: false, avatar_url: "", color: null };
 
 type State = { state: "loading" } | { state: "ok"; people: Person[] } | { state: "error"; message: string };
 type Show = "all" | "internal" | "external";
@@ -45,8 +47,8 @@ export default function People() {
   /** Mark (or unmark) a person as the app's user. */
   async function setMe(person: Person, isMe: boolean) {
     setError(null);
-    const { space_id, name, email, company, is_external, avatar_url } = person;
-    const body = { space_id, name, email, company, is_external, avatar_url, is_me: isMe };
+    const { space_id, name, email, company, is_external, avatar_url, color } = person;
+    const body = { space_id, name, email, company, is_external, avatar_url, color: color ?? null, is_me: isMe };
     try {
       store(await sendJson<Person>("PUT", `/api/people/${person.id}`, body));
     } catch (err: unknown) {
@@ -204,7 +206,14 @@ function PersonForm({
 }) {
   const [draft, setDraft] = useState<PersonDraft>(
     person
-      ? { name: person.name, email: person.email ?? "", company: person.company ?? "", is_external: person.is_external, avatar_url: person.avatar_url ?? "" }
+      ? {
+          name: person.name,
+          email: person.email ?? "",
+          company: person.company ?? "",
+          is_external: person.is_external,
+          avatar_url: person.avatar_url ?? "",
+          color: person.color ?? null,
+        }
       : EMPTY_DRAFT,
   );
   const [saving, setSaving] = useState(false);
@@ -223,6 +232,7 @@ function PersonForm({
       company: draft.company.trim() || null,
       is_external: draft.is_external,
       avatar_url: draft.avatar_url.trim() || null,
+      color: draft.color,
       is_me: person?.is_me ?? false, // a PUT replaces every detail: keep who is "me"
     };
     try {
@@ -246,7 +256,7 @@ function PersonForm({
       aria-label={person ? `Edit ${person.name}` : "Add a person"}
       className="flex flex-wrap items-end gap-2 rounded-lg border border-border-default bg-surface-raised p-3"
     >
-      <Avatar person={{ name: draft.name || "?", avatar_url: draft.avatar_url.trim() || null, is_external: draft.is_external }} />
+      <Avatar person={{ name: draft.name || "?", avatar_url: draft.avatar_url.trim() || null, is_external: draft.is_external, color: draft.color }} />
       <label className={`${label} min-w-[180px] flex-1`}>
         {person ? "Name" : "New person"}
         <input
@@ -274,6 +284,12 @@ function PersonForm({
         <input type="checkbox" checked={draft.is_external} onChange={(e) => set({ is_external: e.target.checked })} />
         External
       </label>
+      <div className={label}>
+        Avatar colour
+        <div className="flex min-h-9 items-center">
+          <ColorPicker value={draft.color} onChange={(color) => set({ color })} label={`${draft.name.trim() || "this person"}'s avatar`} />
+        </div>
+      </div>
       <div className="flex gap-2">
         {onCancel && (
           <button type="button" className="btn min-h-9" onClick={onCancel}>

@@ -12,7 +12,8 @@ The tools the model may call:
   (design data such as PDFs, CAD and Maxsurf files outside the notes; see `local_files`).
 - `search_web` / `fetch_web_page`: search the live web (DuckDuckGo) and read web pages, for online research.
 
-Models named in `CLAUDE_CLI_MODELS` and `GEMINI_CLI_MODELS` don't go through litellm: the turn runs on the
+Gemini models in `GEMINI_API_MODELS` run on litellm with `COPILOT_GEMINI_API_KEY` (the Gemini API) and the tools
+above. Models named in `CLAUDE_CLI_MODELS` and `GEMINI_CLI_MODELS` don't go through litellm: the turn runs on the
 local `claude` CLI (Claude Code, signed in with the user's subscription) or the local `gemini` CLI (signed in with
 the user's Google account), never with an API key, using the CLI's own file and web tools. Both write notes by
 putting `<write_note path="...">` blocks in their reply (see `_run_claude_cli` and `_run_gemini_cli`).
@@ -43,7 +44,7 @@ import subprocess
 import threading
 import urllib.parse
 import urllib.request
-from collections.abc import Callable, Generator, Iterator, Sequence
+from collections.abc import Callable, Generator, Iterator, Sequence, Sized
 from datetime import date
 from html.parser import HTMLParser
 from pathlib import Path
@@ -59,7 +60,7 @@ import local_files
 import spaces
 from config import Settings, get_settings
 from models import FolderMeta, Project, Space, Task
-from schemas import AccessMode, ChatMessage, ChatResponse, ProposedEdit, Status, ToolCallSummary, clean_rag_folders
+from schemas import AccessMode, ChatAttachment, ChatMessage, ChatResponse, ProposedEdit, Status, ToolCallSummary, clean_rag_folders
 
 # History sources: the agent writing by itself, and the user approving a proposed edit.
 AGENT_SOURCE = "copilot_agent"
@@ -84,21 +85,33 @@ CLAUDE_CLI_TOOLS = "Read,Glob,Grep,WebSearch,WebFetch"
 CLAUDE_CLI_TIMEOUT_SECONDS = 900
 CLI_TASK_LIMIT = 200  # open tasks put into the CLI prompt
 
+# Gemini models run on the Gemini API via litellm (`COPILOT_GEMINI_API_KEY`): chat name -> litellm model.
+GEMINI_API_MODELS: dict[str, str] = {
+    "gemini-3.8-flash": "gemini/gemini-3.8-flash",
+    "gemini-3.5-flash": "gemini/gemini-3.5-flash",
+    "gemini-3.1-pro-preview": "gemini/gemini-3.1-pro-preview",
+}
+
 # Gemini models run on the local `gemini` CLI (the user's Google sign-in, no API key): chat name -> CLI model.
 GEMINI_CLI_MODELS: dict[str, str] = {
-    "gemini-3.1-pro-preview": "gemini-3.1-pro-preview",
     "gemini-3-pro-preview": "gemini-3-pro-preview",
-    "gemini-3.8-flash": "gemini-3.8-flash",
-    "gemini-3.5-flash": "gemini-3.5-flash",
-    "gemini-3.5-flash-lite": "gemini-3.5-flash-lite",
     "gemini-2.5-pro": "gemini-2.5-pro",
     "gemini-2.5-flash": "gemini-2.5-flash",
     "gemini-2.5-flash-lite": "gemini-2.5-flash-lite",
 }
+# Gemini models no longer offered, and the model a saved pick of one now runs on, so it never fails or falls
+# through to litellm.
+RETIRED_GEMINI_CLI_MODELS: dict[str, str] = {
+    "gemini-3.5-flash-lite": "gemini-2.5-flash-lite",
+}
+# The model a turn is retried on, once, when the CLI says the picked one doesn't exist.
+GEMINI_CLI_FALLBACK = "gemini-2.5-flash"
 GEMINI_CLI_TIMEOUT_SECONDS = 900
 GEMINI_CLI_PROMPT = "Follow the system instructions and answer the latest user message in the conversation above."
 # What the Gemini CLI prints when it has no usable Google sign-in.
 _GEMINI_AUTH_MARKERS = ("Authentication cancelled", "Opening authentication page", "Please set an Auth method")
+# What it prints when the model asked for isn't served (a 404 from the API).
+_GEMINI_MODEL_NOT_FOUND_MARKERS = ("ModelNotFoundError", "Requested entity was not found")
 
 # Online research: DuckDuckGo's HTML results page, and plain page fetches.
 WEB_SEARCH_URL = "https://html.duckduckgo.com/html/"
@@ -139,6 +152,11 @@ Rules:
 - Look things up with the tools before answering; do not guess. Cite note paths you relied on.
 - For schedule questions (overdue, due soon, who is on what) use `list_tasks`.
 - Keep answers short and practical. Use markdown.
+- Format links in notes as reference pills:
+  - Tasks: `[Task title](/tasks/backlog?taskId=<id> "ref:task")`
+  - Notes: `[Note title](/note?space={space_id}&path=<encoded_path> "ref:note")` or `[Note title](<relative_path>.md "ref:note")`
+  - Local files: `[File name](<local_path> "ref:url")`
+  - Web URLs: `[Site name](https://... "ref:url")`
 - A message starting with `[Saved prompt /<command>]` is one of the user's saved routines (e.g. /prep for \
 meeting prep): carry out its instruction with the tools, using any `User input:` that follows it.
 - `[The user is looking at ...]` says which page or note the user has open; "this page" or "this note" means it.
@@ -146,8 +164,8 @@ meeting prep): carry out its instruction with the tools, using any `User input:`
 files with `read_local_file` to find design data outside the notes (PDF drawings and reports, CAD files, Maxsurf \
 models, spreadsheets, ...). To find files on a topic, start with `search_local_files` on the root folder rather than \
 browsing folder by folder. Use absolute paths, e.g. ones linked from a note (`file:///C:/...`, `C:\\...`, \
-`\\\\server\\share\\...`). Text and PDF files can be read; for other formats you get only their size and dates. \
-Cite the file paths you relied on.
+`\\\\server\\share\\...`). Text files, PDFs and Outlook emails (`.msg`: headers, attachment names and body) can \
+be read; for other formats you get only their size and dates. Cite the file paths you relied on.
 - You can search the live internet with `search_web` and read web pages with `fetch_web_page` for online technical \
 research: standards, classification rules, vendor and product data, papers and publications. Search first, then \
 read the most relevant pages. Cite the URLs you relied on.
@@ -164,6 +182,11 @@ _WRITE_RULES = {
 _WRITE_GUIDE = (
     "\n- `write_note` replaces the whole note: to edit, read the note first and send the full new content."
     "\n- New notes go in the project's folder, e.g. `C7801/Task summary 2026-10-03.md`."
+    "\n- Format links in notes as reference pills:"
+    '\n  - Tasks: `[Task title](/tasks/backlog?taskId=<id> "ref:task")`'
+    '\n  - Notes: `[Note title](/note?space={space_id}&path=<encoded_path> "ref:note")` or `[Note title](<relative_path>.md "ref:note")`'
+    '\n  - Local files: `[File name](<local_path> "ref:url")`'
+    '\n  - Web URLs: `[Site name](https://... "ref:url")`'
 )
 
 _PATH_PARAM = {"type": "string", "description": "Note path relative to the notes folder, e.g. `C7801/Keel.md`"}
@@ -244,7 +267,7 @@ TOOLS: dict[str, dict[str, Any]] = {
     },
     "read_local_file": {
         "description": "Read a file on the local file system: text files (.txt, .md, .csv, .json, ...) as they are and "
-        "the text of PDFs; other formats (Word, Excel, CAD, Maxsurf, ...) return only their size and dates.",
+        "the text of PDFs and Outlook emails (.msg: subject, sender, recipients, date, attachment names and body); other formats (Word, Excel, CAD, Maxsurf, ...) return only their size and dates.",
         "parameters": {"type": "object", "properties": {"path": _LOCAL_PATH_PARAM}, "required": ["path"]},
     },
     "search_web": {
@@ -697,11 +720,12 @@ class _Turn:
 
 
 def bare_model_name(model: str | None) -> str:
-    """A model name without its provider prefixes (`gemini/`, `claude/`, `models/`), e.g. `gemini-2.5-pro`."""
+    """A model name without its provider prefixes (`gemini/`, `claude/`, `models/`), e.g. `gemini-2.5-pro`. A
+    retired Gemini model is named as the one that replaces it (`RETIRED_GEMINI_CLI_MODELS`)."""
     name = (model or "").strip()
     while name.startswith(("gemini/", "claude/", "models/")):
         name = name.split("/", 1)[1]
-    return name
+    return RETIRED_GEMINI_CLI_MODELS.get(name, name)
 
 
 def is_claude_cli_model(model: str | None) -> bool:
@@ -710,25 +734,30 @@ def is_claude_cli_model(model: str | None) -> bool:
 
 
 def is_gemini_cli_model(model: str | None) -> bool:
-    """Whether `model` (e.g. `gemini-2.5-pro` or `gemini/gemini-2.5-pro`) runs on the local Gemini CLI."""
-    return bare_model_name(model) in GEMINI_CLI_MODELS
+    """Whether `model` (e.g. `gemini-2.5-pro` or `gemini/gemini-2.5-pro`) runs on the local Gemini CLI. Retired
+    Gemini models do too, on the model that replaces them. `GEMINI_API_MODELS` never do: they run on litellm."""
+    bare = bare_model_name(model)
+    return bare in GEMINI_CLI_MODELS and bare not in GEMINI_API_MODELS
 
 
 def list_models(settings: Settings | None = None) -> list[str]:
-    """The models the chat can use (bare names): the configured one first, then the Claude CLI models, then the
-    Gemini CLI ones. They all run on a local CLI, so no API key is needed to list or use them."""
+    """The models the chat can use (bare names): the configured one first, then the Claude CLI models (run on the
+    local `claude` CLI), then the Gemini API ones (run on litellm, needing `COPILOT_GEMINI_API_KEY` to answer)."""
     settings = settings or get_settings()
     configured = bare_model_name(settings.chat_model)
-    return list(dict.fromkeys([configured, *CLAUDE_CLI_MODELS, *GEMINI_CLI_MODELS]))
+    return list(dict.fromkeys([configured, *CLAUDE_CLI_MODELS, *GEMINI_API_MODELS]))
 
 
 def chat_model_id(model: str | None, settings: Settings) -> str:
     """The litellm model string for a model picked in the chat that runs on neither CLI (a Gemini API one), or
-    the configured default."""
+    the configured default. A `GEMINI_API_MODELS` one is named as litellm knows it."""
     if not model or not model.strip():
-        return settings.chat_model
-    model = model.strip().removeprefix("models/")
-    return model if model.startswith("gemini/") else f"gemini/{model}"
+        model = settings.chat_model
+    bare = bare_model_name(model)
+    if bare in GEMINI_API_MODELS:
+        return GEMINI_API_MODELS[bare]
+    bare = bare.removeprefix("models/")
+    return bare if bare.startswith("gemini/") else f"gemini/{bare}"
 
 
 # --- Chat loop ----------------------------------------------------------------
@@ -794,7 +823,8 @@ tools named above. Map them as follows:
 - The space's notes are the markdown files under `{notes_dir}` (paths in this prompt are relative to it): find them \
 with Glob and Grep and read them with Read, instead of `search_notes` and `read_note`.
 - Local design files (instead of `search_local_files`, `list_local_directory`, `read_local_file`): Glob, Grep and \
-Read with absolute paths.
+Read with absolute paths. Outlook emails (`.msg`) are binary and Read can't parse them: ask the user to attach the \
+email to the chat (its text then comes with the message) or to run `python scripts/read_msg.py <path>`.
 - Online research (instead of `search_web`, `fetch_web_page`): WebSearch and WebFetch. Cite the URLs you relied on.
 - The space's open tasks are listed below (instead of `list_tasks`)."""
 
@@ -804,7 +834,9 @@ read and research tools, mapped as follows:
 - The space's notes are the markdown files under `{notes_dir}` (paths in this prompt are relative to it): find them \
 with glob and grep_search and read them with read_file, instead of `search_notes` and `read_note`.
 - Local design files (instead of `search_local_files`, `list_local_directory`, `read_local_file`): glob, \
-grep_search, list_directory and read_file with absolute paths.
+grep_search, list_directory and read_file with absolute paths. Outlook emails (`.msg`) are binary and read_file \
+can't parse them: ask the user to attach the email to the chat (its text then comes with the message) or to run \
+`python scripts/read_msg.py <path>`.
 - Online research (instead of `search_web`, `fetch_web_page`): google_web_search and web_fetch. Cite the URLs you \
 relied on.
 - The space's open tasks are listed below (instead of `list_tasks`).
@@ -823,7 +855,12 @@ type: report
 </write_note>
 The Co-pilot app will automatically process this block according to the active access mode (proposing a diff card \
 for user approval in ASK FIRST mode, or saving it in WRITE DIRECTLY mode). The block replaces the whole note: to \
-edit one, Read it first and send its full new content. Without front-matter, an existing note keeps its own."""
+edit one, Read it first and send its full new content. Without front-matter, an existing note keeps its own.
+- Format links in notes as reference pills:
+  - Tasks: `[Task title](/tasks/backlog?taskId=<id> "ref:task")`
+  - Notes: `[Note title](/note?space={space_id}&path=<encoded_path> "ref:note")` or `[Note title](<relative_path>.md "ref:note")`
+  - Local files: `[File name](<local_path> "ref:url")`
+  - Web URLs: `[Site name](https://... "ref:url")`"""
 
 _CLI_WRITE_RULES = {
     AccessMode.READ_ONLY: _WRITE_RULES[AccessMode.READ_ONLY],
@@ -837,6 +874,36 @@ _WRITE_NOTE_BLOCK = re.compile(r"<write_note\s+path\s*=\s*\"([^\"]+)\"\s*>\r?\n?
 _FRONTMATTER = re.compile(r"\A---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|\Z)", re.DOTALL)
 
 
+_ASSET_URL = re.compile(r"/api/notes/image/([^/?#]+)")
+
+
+def _attachment_block(attachment: ChatAttachment, root: Path) -> str:
+    """How a file attached to a chat message reaches the model: its name, size and path on disk, and the text of a
+    text file, PDF or Outlook email (truncated like `read_local_file`'s)."""
+    size = f"{attachment.size} bytes" if attachment.size is not None else "unknown"
+    match = _ASSET_URL.search(attachment.url)
+    try:
+        if match is None:
+            raise FileNotFoundError(attachment.url)
+        path = file_layer.asset_path(match.group(1), notes_dir=root).resolve()
+    except (file_layer.NotePathError, FileNotFoundError):
+        return f'[Attached file: "{attachment.name}" (size: {size}; not found in this space\'s files)]'
+    header = f'[Attached file: "{attachment.name}" (size: {size}, local path: {path})]'
+    if path.suffix.lower() not in {*local_files.TEXT_SUFFIXES, ".pdf", ".msg"}:
+        return header
+    try:
+        content = local_files.read_local_file(str(path))["content"]
+    except (local_files.LocalFileError, OSError):
+        return header
+    return f'{header}\n<attachment_content name="{attachment.name}">\n{content}\n</attachment_content>'
+
+
+def _message_text(message: ChatMessage, root: Path) -> str:
+    """A chat message's text, followed by its attachments (see `_attachment_block`)."""
+    blocks = [_attachment_block(a, root) for a in message.attachments]
+    return "\n\n".join([message.content, *blocks]) if blocks else message.content
+
+
 def _cli_prompt(
     messages: Sequence[ChatMessage],
     mode: AccessMode,
@@ -848,14 +915,21 @@ def _cli_prompt(
     """Everything a CLI gets on stdin: the system prompt (with `tools_guide`, how the CLI's own tools stand in for
     ours), the space's notes folder and tasks, and the chat."""
     space_name, context = space_context(space_id, note_path)
+    write_rules = _CLI_WRITE_RULES[mode].format(space_id=space_id)
     system = SYSTEM_PROMPT.format(
-        today=date.today().isoformat(), write_rules=_CLI_WRITE_RULES[mode], space_name=space_name, context=context
+        today=date.today().isoformat(),
+        write_rules=write_rules,
+        space_name=space_name,
+        space_id=space_id,
+        context=context,
     )
     tasks = list_tasks(space_id=space_id)["tasks"]
     task_lines = [_task_line({**t, "title": f"[{t['project'] or 'no project'}] {t['title']}"}) for t in tasks]
     if len(tasks) > CLI_TASK_LIMIT:
         task_lines = [*task_lines[:CLI_TASK_LIMIT], f"… and {len(tasks) - CLI_TASK_LIMIT} more."]
-    conversation = "\n\n".join(f"<{m.role.value}>\n{m.content}\n</{m.role.value}>" for m in messages)
+    conversation = "\n\n".join(
+        f"<{m.role.value}>\n{_message_text(m, turn.root)}\n</{m.role.value}>" for m in messages
+    )
     return (
         f"<system>\n{system}\n{tools_guide.format(notes_dir=turn.root.resolve())}\n</system>\n\n"
         f"<open_tasks today=\"{date.today().isoformat()}\" count=\"{len(tasks)}\">\n"
@@ -1330,8 +1404,45 @@ def _run_gemini_cli(
     stdout, stderr = process.stdout or "", process.stderr or ""
     reply, error, summaries = _parse_gemini_stream(stdout)
     needs_sign_in = any(marker in stdout for marker in _GEMINI_AUTH_MARKERS)
+    if _gemini_should_fall_back(model, needs_sign_in, error, stderr, process.returncode, reply, summaries):
+        response = _run_gemini_cli(
+            messages, mode, space_id=space_id, note_path=note_path, model=GEMINI_CLI_FALLBACK
+        )
+        return response.model_copy(
+            update={"reply": f"_{_gemini_fallback_notice(model)}_\n\n{response.reply}"}
+        )
     _check_gemini(needs_sign_in, error, stderr, process.returncode)
     return _cli_response(reply, summaries, turn)
+
+
+def _gemini_model_not_found(error: str | None, stderr: str) -> bool:
+    """Whether the Gemini CLI failed because the model it was asked for isn't served."""
+    return any(marker in text for text in (error or "", stderr) for marker in _GEMINI_MODEL_NOT_FOUND_MARKERS)
+
+
+def _gemini_should_fall_back(
+    model: str,
+    needs_sign_in: bool,
+    error: str | None,
+    stderr: str,
+    returncode: int | None,
+    reply: str,
+    calls: Sized,
+) -> bool:
+    """Whether a Gemini CLI turn on `model` should be run again on `GEMINI_CLI_FALLBACK`: it failed because the
+    model isn't served, before it wrote any reply or called any tool, and it wasn't on the fallback already."""
+    return (
+        model != GEMINI_CLI_FALLBACK
+        and not needs_sign_in
+        and (bool(error) or returncode != 0)
+        and _gemini_model_not_found(error, stderr)
+        and not reply
+        and not calls
+    )
+
+
+def _gemini_fallback_notice(model: str) -> str:
+    return f"Model '{model}' is currently unavailable; answered with {GEMINI_CLI_FALLBACK}."
 
 
 def _check_gemini(needs_sign_in: bool, error: str | None, stderr: str, returncode: int | None) -> None:
@@ -1372,8 +1483,19 @@ def _stream_gemini_cli(
     stderr, returncode = yield from _line_events(lines, _gemini_events, state)
     if cancel.cancelled:
         return
+    reply = "".join(state.parts)
+    if _gemini_should_fall_back(model, state.needs_sign_in, state.error, stderr, returncode, reply, state.calls):
+        notice = _gemini_fallback_notice(model)
+        yield {"type": "notice", "text": notice}
+        for event in _stream_gemini_cli(
+            messages, mode, space_id=space_id, note_path=note_path, model=GEMINI_CLI_FALLBACK, cancel=cancel
+        ):
+            if event["type"] == "done":
+                event["response"]["reply"] = f"_{notice}_\n\n{event['response']['reply']}"
+            yield event
+        return
     _check_gemini(state.needs_sign_in, state.error, stderr, returncode)
-    yield from _finish_cli_turn(_cli_response("".join(state.parts), state.summaries(), turn), len(state.calls))
+    yield from _finish_cli_turn(_cli_response(reply, state.summaries(), turn), len(state.calls))
 
 
 def run_chat(
@@ -1451,19 +1573,25 @@ def _litellm_turn(
     settings: Settings,
     cancel: StreamCancel,
 ) -> Generator[Event, None, ChatResponse | None]:
-    """A turn on LiteLLM's tool loop, yielding each tool call as it starts and ends; return its response (None if
-    cancelled)."""
+    """A turn on LiteLLM's tool loop, yielding each tool call as it starts and ends, then the reply as a
+    `text_delta`; return its response (None if cancelled)."""
     if settings.gemini_api_key is None:
         raise AgentNotConfiguredError("COPILOT_GEMINI_API_KEY is not set; add it to backend/.env")
 
-    write_rules = _WRITE_RULES[mode] + ("" if mode is AccessMode.READ_ONLY else _WRITE_GUIDE)
+    write_rules = (_WRITE_RULES[mode] + ("" if mode is AccessMode.READ_ONLY else _WRITE_GUIDE)).format(
+        space_id=space_id
+    )
     space_name, context = space_context(space_id, note_path)
     system = SYSTEM_PROMPT.format(
-        today=date.today().isoformat(), write_rules=write_rules, space_name=space_name, context=context
+        today=date.today().isoformat(),
+        write_rules=write_rules,
+        space_name=space_name,
+        space_id=space_id,
+        context=context,
     )
     history: list[Any] = [{"role": "system", "content": system}]
-    history += [{"role": m.role.value, "content": m.content} for m in messages]
     turn, summaries = _Turn(mode, space_id), []
+    history += [{"role": m.role.value, "content": _message_text(m, turn.root)} for m in messages]
     chosen_model = chat_model_id(model, settings)
 
     for round_ in range(MAX_TOOL_ROUNDS + 1):
@@ -1498,8 +1626,11 @@ def _litellm_turn(
         message = response.choices[0].message
         tool_calls = getattr(message, "tool_calls", None) or []
         if not tool_calls or last:
+            reply = message.content or getattr(message, "reasoning_content", None) or _fallback_reply(summaries)
+            if cancel.cancelled:
+                return None
             return ChatResponse(
-                reply=message.content or getattr(message, "reasoning_content", None) or _fallback_reply(summaries),
+                reply=reply,
                 proposed_edits=list(turn.proposed.values()),
                 written_paths=turn.written,
                 tool_calls=summaries,

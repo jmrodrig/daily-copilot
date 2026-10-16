@@ -74,6 +74,7 @@ export default function ProjectPlan() {
         (project && project.tasks.length > 0 ? (
           <GanttChart
             projects={[project]}
+            spaceId={spaceId}
             customFields={space?.custom_fields_schema}
             activeTaskId={taskId}
             onTaskClick={openTask}

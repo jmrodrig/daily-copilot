@@ -522,8 +522,8 @@ def test_list_models_lists_the_cli_models(client, monkeypatch):
     response = client.get("/api/models")
 
     assert response.status_code == 200
-    # The configured one first, then the Claude CLI models, then the Gemini CLI ones.
-    assert response.json() == ["test-model", *agent.CLAUDE_CLI_MODELS, *agent.GEMINI_CLI_MODELS]
+    # The configured one first, then the Claude CLI models, then the Gemini API ones.
+    assert response.json() == ["test-model", *agent.CLAUDE_CLI_MODELS, *agent.GEMINI_API_MODELS]
     assert response.json()[1:3] == ["claude-opus-5-5", "claude-sonnet-5-5"]
 
 
@@ -533,7 +533,7 @@ def test_list_models_without_api_key_and_a_cli_default(settings):
 
     models = agent.list_models(settings)
 
-    assert models == ["gemini-2.5-pro", *agent.CLAUDE_CLI_MODELS, *[m for m in agent.GEMINI_CLI_MODELS if m != "gemini-2.5-pro"]]
+    assert models == ["gemini-2.5-pro", *agent.CLAUDE_CLI_MODELS, *[m for m in agent.GEMINI_API_MODELS if m != "gemini-2.5-pro"]]
 
 
 def test_default_chat_model_is_claude_opus_5_5():
@@ -964,7 +964,9 @@ def gemini(monkeypatch):
 
 def test_is_gemini_cli_model():
     assert agent.is_gemini_cli_model("gemini-2.5-pro")
-    assert agent.is_gemini_cli_model("gemini/gemini-3.1-pro-preview")
+    assert agent.is_gemini_cli_model("gemini-3-pro-preview")
+    assert not agent.is_gemini_cli_model("gemini/gemini-3.1-pro-preview")
+    assert not agent.is_gemini_cli_model("gemini-3.8-flash")
     assert agent.is_gemini_cli_model("models/gemini-3.5-flash-lite")
     assert not agent.is_gemini_cli_model("gemini-2.0-flash")
     assert not agent.is_gemini_cli_model("claude-opus-5-5")
@@ -1067,13 +1069,24 @@ def test_gemini_cli_needs_no_api_key(client, settings, model, gemini, notes_dir,
 
 
 def test_gemini_cli_is_used_as_the_configured_default(client, settings, model, gemini):
-    settings.chat_model = "gemini/gemini-3.1-pro-preview"
+    settings.chat_model = "gemini/gemini-2.5-pro"
     gemini.script.append((gemini_events(["Hi"]), "", 0))
 
     assert client.post("/api/chat", json={"messages": [{"role": "user", "content": "Hi"}]}).json()["reply"] == "Hi"
     cmd = gemini.runs[0]["cmd"]
-    assert cmd[cmd.index("-m") + 1] == "gemini-3.1-pro-preview"
+    assert cmd[cmd.index("-m") + 1] == "gemini-2.5-pro"
     assert model.calls == []
+
+
+def test_gemini_cli_retired_model_is_aliased(client, settings, model, gemini):
+    settings.chat_model = "gemini/gemini-3.5-flash-lite"
+    gemini.script.append((gemini_events(["Hi"]), "", 0))
+
+    assert client.post("/api/chat", json={"messages": [{"role": "user", "content": "Hi"}]}).json()["reply"] == "Hi"
+    cmd = gemini.runs[0]["cmd"]
+    assert cmd[cmd.index("-m") + 1] == "gemini-2.5-flash-lite"
+    assert model.calls == []
+
 
 
 def test_gemini_cli_write_note_block_is_proposed_in_ask_first(client, notes_dir, gemini):

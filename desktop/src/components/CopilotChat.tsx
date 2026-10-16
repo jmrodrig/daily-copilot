@@ -1,4 +1,16 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode, type RefObject } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ClipboardEvent as ReactClipboardEvent,
+  type DragEvent as ReactDragEvent,
+  type KeyboardEvent,
+  type ReactNode,
+  type RefObject,
+} from "react";
 import Markdown, { defaultUrlTransform, type Components } from "react-markdown";
 import { Link, useLocation, type Location } from "react-router-dom";
 import rehypeKatex from "rehype-katex";
@@ -6,9 +18,11 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import "katex/dist/katex.min.css";
 
-import { errorDetail, getJson, message, PROMPTS_CHANGED, type SavedPrompt } from "../lib/api";
+import { errorDetail, getJson, message, PROMPTS_CHANGED, sendJson, uploadFile, type SavedPrompt } from "../lib/api";
 import { isLocalHref, openLocalFile } from "../lib/localFiles";
+import { notifyNoteUpdated } from "../lib/notes";
 import { notePath, useSpace } from "../lib/space";
+import MediaLightbox, { isPdfUrl } from "./MediaLightbox";
 import { cleanMathForClipboard, copyCleanSelection } from "./noteFormatting";
 import Popover from "./Popover";
 import { IconButton } from "./Sidebar";
@@ -37,6 +51,7 @@ type StreamEvent =
 
 /** What the agent is doing on the question in flight, as it streams in. */
 type LiveToolCall = { id: string; name: string; arguments: Record<string, unknown>; status: "running" | "ok" | "error" };
+type LivePhase = "thinking" | "answering" | "finished";
 type LiveProgress = {
   thoughtSubject: string | null;
   thoughtText: string | null;
@@ -44,8 +59,16 @@ type LiveProgress = {
   streamingText: string;
   // A thought or tool call came after the last text, so the next text starts a new paragraph.
   textBroken: boolean;
+  phase: LivePhase;
 };
-const NO_PROGRESS: LiveProgress = { thoughtSubject: null, thoughtText: null, tools: [], streamingText: "", textBroken: false };
+const NO_PROGRESS: LiveProgress = {
+  thoughtSubject: null,
+  thoughtText: null,
+  tools: [],
+  streamingText: "",
+  textBroken: false,
+  phase: "thinking",
+};
 
 type EditStatus =
   | { state: "pending" }
@@ -56,8 +79,11 @@ type EditStatus =
 type Edit = ProposedEdit & { status: EditStatus };
 /** A saved prompt used at the start of a message, e.g. "/prep Friday design review". */
 type UsedPrompt = { command: string; instruction: string; rest: string };
+/** A file attached to a question, stored in the space's assets (see ChatAttachment in backend/schemas.py). */
+type ChatAttachment = { name: string; url: string; size?: number | null; content_type?: string | null };
 type Entry =
-  | { role: "user"; content: string; prompt: UsedPrompt | null; context: string | null }
+  // `attachments` is missing from questions saved before files could be attached.
+  | { role: "user"; content: string; prompt: UsedPrompt | null; context: string | null; attachments?: ChatAttachment[] }
   | { role: "assistant"; content: string; edits: Edit[]; written: string[]; toolCalls: ToolCall[] };
 /** A conversation, kept in the space's chat history. */
 type ChatThread = { id: string; title: string; createdAt: number; updatedAt: number; entries: Entry[] };
@@ -96,7 +122,7 @@ const NO_ENTRIES: Entry[] = [];
 const isClaudeModel = (name: string) => name.startsWith("claude-");
 const MODEL_GROUPS: { label: string; badge: string; matches: (name: string) => boolean }[] = [
   { label: "Claude Agent", badge: "Local CLI · No API", matches: isClaudeModel },
-  { label: "Gemini Agent", badge: "Local CLI · No API", matches: (name) => !isClaudeModel(name) },
+  { label: "Gemini Agent", badge: "Gemini API", matches: (name) => !isClaudeModel(name) },
 ];
 
 /** A litellm model string without its provider (`gemini/gemini-2.5-pro` -> `gemini-2.5-pro`). */
@@ -119,6 +145,48 @@ function sortThreads(threads: ChatThread[]): ChatThread[] {
   return [...threads].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, MAX_THREADS);
 }
 
+type ChatHistoryResponse = {
+  space_id: number;
+  threads: ChatThread[];
+  active_id: string | null;
+};
+
+/** Ensure an edit left "Saving…" when the page closed is reset to "Waiting for approval". */
+function sanitizeThread(thread: ChatThread): ChatThread {
+  return {
+    ...thread,
+    entries: (thread.entries || []).map((entry) =>
+      entry.role === "assistant"
+        ? {
+            ...entry,
+            edits: (entry.edits || []).map((e) =>
+              e.status.state === "applying" ? { ...e, status: { state: "pending" } } : e,
+            ),
+          }
+        : entry,
+    ),
+  };
+}
+
+/** Merge local and remote threads by id: keep newer updatedAt, keep local-only and remote-only, sort by updatedAt desc. */
+function mergeThreads(local: ChatThread[], remote: ChatThread[]): ChatThread[] {
+  const map = new Map<string, ChatThread>();
+  for (const t of local) {
+    map.set(t.id, t);
+  }
+  for (const r of remote) {
+    const existing = map.get(r.id);
+    if (!existing) {
+      map.set(r.id, r);
+    } else {
+      if ((r.updatedAt || 0) > (existing.updatedAt || 0)) {
+        map.set(r.id, r);
+      }
+    }
+  }
+  return sortThreads(Array.from(map.values()));
+}
+
 /** The space's saved conversations; an edit left "Saving…" when the page closed is back to waiting for approval. */
 function storedHistory(spaceId: number): ChatHistory {
   let threads: ChatThread[] = [];
@@ -128,19 +196,7 @@ function storedHistory(spaceId: number): ChatHistory {
   } catch {
     // Unreadable: start a fresh history.
   }
-  threads = sortThreads(
-    threads.map((thread) => ({
-      ...thread,
-      entries: thread.entries.map((entry) =>
-        entry.role === "assistant"
-          ? {
-              ...entry,
-              edits: entry.edits.map((e) => (e.status.state === "applying" ? { ...e, status: { state: "pending" } } : e)),
-            }
-          : entry,
-      ),
-    })),
-  );
+  threads = sortThreads(threads.map(sanitizeThread));
   // The conversation open last, else the most recent one.
   const active = localStorage.getItem(activeChatKey(spaceId));
   const open = active === NEW_CHAT ? undefined : (threads.find((t) => t.id === active) ?? threads[0]);
@@ -160,7 +216,10 @@ function saveHistory({ spaceId, threads, activeId }: ChatHistory) {
 function threadTitle(entries: Entry[]): string {
   const first = entries.find((entry) => entry.role === "user");
   if (!first) return "New chat";
-  const text = (first.prompt ? `${first.prompt.command} ${first.prompt.rest}` : first.content).replace(/\s+/g, " ").trim();
+  const text =
+    (first.prompt ? `${first.prompt.command} ${first.prompt.rest}` : first.content).replace(/\s+/g, " ").trim() ||
+    first.attachments?.[0]?.name ||
+    "New chat";
   if (text.length <= TITLE_LENGTH) return text;
   const cut = text.slice(0, TITLE_LENGTH);
   const space = cut.lastIndexOf(" ");
@@ -271,10 +330,10 @@ async function readResponse(res: Response, onProgress: (event: ProgressEvent) =>
 function progressWith(progress: LiveProgress, event: ProgressEvent): LiveProgress {
   switch (event.type) {
     case "thought":
-      return { ...progress, thoughtSubject: event.subject, thoughtText: event.text || null, textBroken: true };
+      return { ...progress, thoughtSubject: event.subject, thoughtText: event.text || null, textBroken: true, phase: "thinking" };
     case "tool_start": {
       const tool: LiveToolCall = { id: event.id, name: event.name, arguments: event.arguments ?? {}, status: "running" };
-      return { ...progress, tools: [...progress.tools, tool], textBroken: true };
+      return { ...progress, tools: [...progress.tools, tool], textBroken: true, phase: "thinking" };
     }
     case "tool_end": {
       // The latest running call with this id (ids may repeat across a turn's rounds).
@@ -283,17 +342,79 @@ function progressWith(progress: LiveProgress, event: ProgressEvent): LiveProgres
         if (t.id === event.id && t.status === "running") index = i;
       });
       const status = event.ok ? "ok" : "error";
-      return { ...progress, tools: progress.tools.map((t, i) => (i === index ? { ...t, status } : t)) };
+      return { ...progress, tools: progress.tools.map((t, i) => (i === index ? { ...t, status } : t)), phase: "thinking" };
     }
     case "text_delta": {
       const text = progress.streamingText;
       // Text after a thought or tool call is a new block of the reply, not more of the same sentence: a blank line
       // between them, so a heading, list or table that starts it parses as one.
       if (progress.textBroken && text && !event.delta.startsWith("\n\n"))
-        return { ...progress, streamingText: `${text.trimEnd()}\n\n${event.delta.replace(/^\n/, "")}`, textBroken: false };
-      return { ...progress, streamingText: text + event.delta, textBroken: false };
+        return { ...progress, streamingText: `${text.trimEnd()}\n\n${event.delta.replace(/^\n/, "")}`, textBroken: false, phase: "answering" };
+      return { ...progress, streamingText: text + event.delta, textBroken: false, phase: "answering" };
     }
   }
+}
+
+/**
+ * Progressively pays out text chunk by chunk to simulate a smooth typewriter/writing delivery
+ * when the server returns a bulk reply without live token streaming deltas.
+ */
+function payoutReply(
+  fullText: string,
+  onTick: (text: string) => void,
+  signal: AbortSignal,
+  onRegisterCancel: (fn: () => void) => void,
+): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const tokens = fullText.match(/\S+\s*|\n+/g) || [fullText];
+    const totalTokens = tokens.length;
+    // Step size ensures responses under 60 words type out word by word, and longer responses
+    // finish within ~1.5-2 seconds without feeling sluggish.
+    const step = Math.max(1, Math.min(6, Math.ceil(totalTokens / 60)));
+    const delayMs = 20;
+
+    let index = 0;
+    let current = "";
+    let timer: number | null = null;
+    let finished = false;
+
+    const finishInstantly = () => {
+      if (finished) return;
+      finished = true;
+      if (timer !== null) window.clearTimeout(timer);
+      onTick(fullText);
+      resolve();
+    };
+
+    onRegisterCancel(finishInstantly);
+
+    if (signal.aborted) {
+      finishInstantly();
+      return;
+    }
+
+    const nextTick = () => {
+      if (finished || signal.aborted) {
+        finishInstantly();
+        return;
+      }
+      if (index >= tokens.length) {
+        finishInstantly();
+        return;
+      }
+      const chunk = tokens.slice(index, index + step).join("");
+      current += chunk;
+      index += step;
+      onTick(current);
+      if (index < tokens.length) {
+        timer = window.setTimeout(nextTick, delayMs);
+      } else {
+        finishInstantly();
+      }
+    };
+
+    nextTick();
+  });
 }
 
 /**
@@ -472,24 +593,144 @@ export default function CopilotChat({
   const copiedTimerRef = useRef<number | null>(null);
   // Aborts the question in flight (Stop, a space change, or unmounting).
   const abortControllerRef = useRef<AbortController | null>(null);
+  const stopPayoutRef = useRef<(() => void) | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
-  const context = withTask(pageContext(location, spaceId), location);
+  // Files attached to the question being written, the ones still uploading, and why one couldn't be.
+  const [pendingAttachments, setPendingAttachments] = useState<ChatAttachment[]>([]);
+  const [uploading, setUploading] = useState<{ id: string; name: string }[]>([]);
+  const [attachError, setAttachError] = useState<string | null>(null);
+  const [dragOver, setDragOver] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  // The attachment opened in the lightbox.
+  const [openedAttachment, setOpenedAttachment] = useState<ChatAttachment | null>(null);
+  const context =withTask(pageContext(location, spaceId), location);
+
+  // Remote sync: merge local history with backend, debounce PUT on local changes, refetch on focus.
+  const lastRemoteSnapshotRef = useRef<string>("");
+  const syncTimeoutRef = useRef<number | null>(null);
+  const sendingRef = useRef(sending);
+  sendingRef.current = sending;
+
+  const pushRemoteHistory = useCallback(async (currentHistory: ChatHistory) => {
+    try {
+      const payload = {
+        space_id: currentHistory.spaceId,
+        threads: currentHistory.threads,
+        active_id: currentHistory.activeId,
+      };
+      const snapshot = JSON.stringify(payload);
+      if (snapshot === lastRemoteSnapshotRef.current) return;
+
+      const res = await sendJson<ChatHistoryResponse>("PUT", "/api/chat/history", payload);
+      lastRemoteSnapshotRef.current = JSON.stringify({
+        space_id: res.space_id,
+        threads: sortThreads((res.threads || []).map(sanitizeThread)),
+        active_id: res.active_id ?? null,
+      });
+    } catch {
+      // Sync failed: will retry on next edit or window focus
+    }
+  }, []);
+
+  const pullRemoteHistory = useCallback(
+    async (targetSpaceId: number) => {
+      try {
+        const data = await getJson<ChatHistoryResponse>(`/api/chat/history?space_id=${targetSpaceId}`);
+        if (data.space_id !== targetSpaceId) return;
+
+        const remoteThreads = sortThreads((data.threads || []).map(sanitizeThread));
+        const remoteActiveId = data.active_id ?? null;
+
+        setHistory((prev) => {
+          if (prev.spaceId !== targetSpaceId) return prev;
+
+          const merged = mergeThreads(prev.threads, remoteThreads);
+          const activeId =
+            prev.activeId && merged.some((t) => t.id === prev.activeId)
+              ? prev.activeId
+              : remoteActiveId && merged.some((t) => t.id === remoteActiveId)
+                ? remoteActiveId
+                : null;
+
+          const nextHistory: ChatHistory = {
+            spaceId: targetSpaceId,
+            threads: merged,
+            activeId,
+          };
+
+          const remoteSnapshot = JSON.stringify({
+            space_id: targetSpaceId,
+            threads: remoteThreads,
+            active_id: remoteActiveId,
+          });
+
+          const mergedSnapshot = JSON.stringify({
+            space_id: targetSpaceId,
+            threads: merged,
+            active_id: activeId,
+          });
+
+          lastRemoteSnapshotRef.current = remoteSnapshot;
+
+          if (mergedSnapshot !== remoteSnapshot) {
+            if (syncTimeoutRef.current !== null) window.clearTimeout(syncTimeoutRef.current);
+            syncTimeoutRef.current = window.setTimeout(() => {
+              void pushRemoteHistory(nextHistory);
+            }, 1000);
+          }
+
+          saveHistory(nextHistory);
+          return nextHistory;
+        });
+      } catch {
+        // Offline or network error: carry on with local history
+      }
+    },
+    [pushRemoteHistory],
+  );
 
   // A conversation (and its proposed edits) belongs to one space: pick up that space's history when it changes.
   useEffect(() => {
+    stopPayoutRef.current?.();
     abortControllerRef.current?.abort();
+    if (syncTimeoutRef.current !== null) window.clearTimeout(syncTimeoutRef.current);
+    lastRemoteSnapshotRef.current = "";
     setHistory((prev) => (prev.spaceId === spaceId ? prev : storedHistory(spaceId)));
     setError(null);
-  }, [spaceId]);
+    void pullRemoteHistory(spaceId);
+  }, [spaceId, pullRemoteHistory]);
 
   useEffect(() => {
     saveHistory(history);
-  }, [history]);
+    const snapshot = JSON.stringify({
+      space_id: history.spaceId,
+      threads: history.threads,
+      active_id: history.activeId,
+    });
+    if (snapshot !== lastRemoteSnapshotRef.current) {
+      if (syncTimeoutRef.current !== null) window.clearTimeout(syncTimeoutRef.current);
+      syncTimeoutRef.current = window.setTimeout(() => {
+        void pushRemoteHistory(history);
+      }, 1000);
+    }
+  }, [history, pushRemoteHistory]);
+
+  useEffect(() => {
+    const handleFocus = () => {
+      if (!sendingRef.current) {
+        void pullRemoteHistory(spaceId);
+      }
+    };
+    window.addEventListener("focus", handleFocus);
+    return () => window.removeEventListener("focus", handleFocus);
+  }, [spaceId, pullRemoteHistory]);
 
   useEffect(() => {
     return () => {
+      stopPayoutRef.current?.();
       abortControllerRef.current?.abort();
+      if (syncTimeoutRef.current !== null) window.clearTimeout(syncTimeoutRef.current);
       if (copiedTimerRef.current !== null) window.clearTimeout(copiedTimerRef.current);
     };
   }, []);
@@ -499,7 +740,14 @@ export default function CopilotChat({
       .then((data) => setModel((picked) => picked ?? (data.chat_model ? bareModel(data.chat_model) : null)))
       .catch(() => {});
     getJson<string[]>("/api/models")
-      .then(setModels)
+      .then((list) => {
+        setModels(list);
+        setModel((picked) => {
+          if (!picked || list.includes(picked)) return picked;
+          localStorage.removeItem(MODEL_KEY);
+          return list[0] ?? null;
+        });
+      })
       .catch(() => {});
   }, []);
 
@@ -630,26 +878,83 @@ export default function CopilotChat({
     if (id === history.activeId) setError(null);
   }
 
+  /** Upload files to the space's assets, to go with the question being written. */
+  async function attachFiles(files: File[]) {
+    if (!files.length) return;
+    setAttachError(null);
+    await Promise.all(
+      files.map(async (file) => {
+        const id = newThreadId();
+        setUploading((all) => [...all, { id, name: file.name }]);
+        try {
+          const { url } = await uploadFile(spaceId, file);
+          const attachment = { name: file.name, url, size: file.size, content_type: file.type || null };
+          setPendingAttachments((all) => [...all, attachment]);
+        } catch (err) {
+          setAttachError(`Could not attach ${file.name} (${message(err)}).`);
+        } finally {
+          setUploading((all) => all.filter((u) => u.id !== id));
+        }
+      }),
+    );
+  }
+
+  /** Files pasted in the input are attached; pasted text is typed as usual. */
+  function handlePaste(e: ReactClipboardEvent<HTMLTextAreaElement>) {
+    const files = Array.from(e.clipboardData.files);
+    if (!files.length) return;
+    e.preventDefault();
+    void attachFiles(files);
+  }
+
+  function handleDrop(e: ReactDragEvent<HTMLDivElement>) {
+    if (!e.dataTransfer.types.includes("Files")) return;
+    e.preventDefault();
+    setDragOver(false);
+    void attachFiles(Array.from(e.dataTransfer.files));
+  }
+
+  /** A PDF or image attachment opens in the lightbox; any other file is downloaded. */
+  function openAttachment(attachment: ChatAttachment) {
+    if (isPdfUrl(attachment.url) || isImageAttachment(attachment)) {
+      setOpenedAttachment(attachment);
+      return;
+    }
+    const link = document.createElement("a");
+    link.href = attachment.url;
+    link.download = attachment.name;
+    link.click();
+  }
+
   async function send() {
     const text = input.trim();
-    if (!text || sending) return;
-    const next: Entry[] = [...entries, { role: "user", content: text, prompt: usedPrompt(text), context: context.hint }];
+    const attachments = pendingAttachments;
+    if ((!text && !attachments.length) || sending || uploading.length) return;
+    const question: Entry = { role: "user", content: text, prompt: usedPrompt(text), context: context.hint, attachments };
+    const next: Entry[] = [...entries, question];
     const threadId = activeThread?.id ?? startThread(next);
     if (activeThread) updateThread(threadId, () => next);
     setInput("");
+    setPendingAttachments([]);
+    setAttachError(null);
     setMenuDismissed(false);
     setError(null);
     setSending(true);
     setLiveProgress(NO_PROGRESS);
     const controller = new AbortController();
     abortControllerRef.current = controller;
+    stopPayoutRef.current = null;
     try {
       const res = await fetch("/api/chat/stream", {
         method: "POST",
         signal: controller.signal,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          messages: next.map((entry) => ({ role: entry.role, content: historyContent(entry) })),
+          messages: next.map((entry) => ({
+            role: entry.role,
+            content: historyContent(entry),
+            attachments: entry.role === "user" ? (entry.attachments ?? []) : [],
+          })),
           access_mode: mode,
           space_id: spaceId,
           note_path: context.notePath,
@@ -658,9 +963,62 @@ export default function CopilotChat({
         }),
       });
       if (!res.ok) throw new Error(await errorDetail(res));
-      const body = await readResponse(res, (event) =>
-        setLiveProgress((progress) => progressWith(progress ?? NO_PROGRESS, event)),
-      );
+
+      const toolArgs = new Map<string, Record<string, unknown>>();
+      let latestProgress: LiveProgress = { ...NO_PROGRESS, phase: "thinking" };
+
+      const body = await readResponse(res, (event) => {
+        if (event.type === "tool_start" && event.arguments) {
+          toolArgs.set(event.id, event.arguments);
+        } else if (event.type === "tool_end" && event.name === "write_note" && event.ok) {
+          const args = toolArgs.get(event.id);
+          const p = args?.path;
+          if (typeof p === "string") notifyNoteUpdated(spaceId, p);
+        }
+        setLiveProgress((progress) => {
+          const nextProg = progressWith(progress ?? NO_PROGRESS, event);
+          latestProgress = nextProg;
+          return nextProg;
+        });
+      });
+
+      if (body.written_paths && body.written_paths.length > 0) {
+        for (const p of body.written_paths) {
+          notifyNoteUpdated(spaceId, p);
+        }
+      }
+
+      // If the response arrived in bulk without live token streaming, pay out progressively
+      if (body.reply && latestProgress.streamingText.trim() !== body.reply.trim()) {
+        setLiveProgress((prev) => ({
+          ...(prev ?? NO_PROGRESS),
+          phase: "answering",
+        }));
+        await payoutReply(
+          body.reply,
+          (currentText) => {
+            setLiveProgress((prev) => ({
+              ...(prev ?? NO_PROGRESS),
+              phase: "answering",
+              streamingText: currentText,
+            }));
+          },
+          controller.signal,
+          (cancelFn) => {
+            stopPayoutRef.current = cancelFn;
+          },
+        );
+        stopPayoutRef.current = null;
+      }
+
+      // Finished phase: show finished indicator for 400ms before adding to transcript
+      setLiveProgress((prev) => ({
+        ...(prev ?? NO_PROGRESS),
+        phase: "finished",
+        streamingText: body.reply,
+      }));
+      await new Promise((resolve) => setTimeout(resolve, 400));
+
       updateThread(threadId, (prev) => [
         ...prev,
         {
@@ -680,8 +1038,10 @@ export default function CopilotChat({
       // Put the question back so it can be retried without two user turns in a row (a new chat's thread goes away).
       updateThread(threadId, () => entries);
       setInput(text);
+      setPendingAttachments(attachments);
       setError(message(err));
     } finally {
+      stopPayoutRef.current = null;
       setSending(false);
       setLiveProgress(null);
       if (abortControllerRef.current === controller) abortControllerRef.current = null;
@@ -689,6 +1049,11 @@ export default function CopilotChat({
   }
 
   function stop() {
+    if (stopPayoutRef.current) {
+      stopPayoutRef.current();
+      stopPayoutRef.current = null;
+      return;
+    }
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
@@ -729,6 +1094,7 @@ export default function CopilotChat({
   function editPrompt(entry: Extract<Entry, { role: "user" }>) {
     const text = entry.prompt ? `${entry.prompt.command}${entry.prompt.rest ? ` ${entry.prompt.rest}` : ""}` : entry.content;
     setInput(text);
+    setPendingAttachments(entry.attachments ?? []);
     setMenuDismissed(true);
     setTimeout(() => {
       if (inputRef.current) {
@@ -764,6 +1130,7 @@ export default function CopilotChat({
       });
       if (!res.ok) throw new Error(await errorDetail(res));
       setEditStatus(threadId, entryIndex, edit.path, { state: "applied" });
+      notifyNoteUpdated(spaceId, edit.path);
     } catch (err: unknown) {
       setEditStatus(threadId, entryIndex, edit.path, { state: "error", message: message(err) });
     }
@@ -854,18 +1221,27 @@ export default function CopilotChat({
         {activeThread?.entries.map((entry, i) =>
           entry.role === "user" ? (
             <div key={i} className="group flex max-w-[85%] flex-col items-end gap-1 self-end">
-              <div className="whitespace-pre-wrap rounded-lg bg-surface-active px-2.5 py-1.5 text-xs leading-relaxed">
-                {entry.prompt ? (
-                  <>
-                    <span className="font-mono text-accent" title={entry.prompt.instruction}>
-                      {entry.prompt.command}
-                    </span>
-                    {entry.prompt.rest && ` ${entry.prompt.rest}`}
-                  </>
-                ) : (
-                  entry.content
-                )}
-              </div>
+              {!!entry.attachments?.length && (
+                <div className="flex flex-wrap justify-end gap-1">
+                  {entry.attachments.map((attachment) => (
+                    <AttachmentPill key={attachment.url} attachment={attachment} onOpen={() => openAttachment(attachment)} />
+                  ))}
+                </div>
+              )}
+              {(entry.prompt || entry.content) && (
+                <div className="whitespace-pre-wrap rounded-lg bg-surface-active px-2.5 py-1.5 text-xs leading-relaxed">
+                  {entry.prompt ? (
+                    <>
+                      <span className="font-mono text-accent" title={entry.prompt.instruction}>
+                        {entry.prompt.command}
+                      </span>
+                      {entry.prompt.rest && ` ${entry.prompt.rest}`}
+                    </>
+                  ) : (
+                    entry.content
+                  )}
+                </div>
+              )}
               <button
                 type="button"
                 onClick={() => editPrompt(entry)}
@@ -893,7 +1269,11 @@ export default function CopilotChat({
                     ))}
                   </div>
                 )}
-                <div className="mt-2 flex justify-end">
+                <div className="mt-2 flex items-center justify-between">
+                  <span className="flex items-center gap-1 text-[11px] text-text-muted">
+                    <CheckIcon className="h-3 w-3 text-project-p5002 shrink-0" />
+                    Finished answering
+                  </span>
                   <button
                     type="button"
                     onClick={(e) =>
@@ -923,7 +1303,20 @@ export default function CopilotChat({
         <div ref={bottomRef} />
       </div>
 
-      <div className="flex flex-col gap-1.5 border-t border-border-default px-3.5 pb-3 pt-2">
+      <div
+        className={`flex flex-col gap-1.5 border-t px-3.5 pb-3 pt-2 ${dragOver ? "border-accent bg-accent/5" : "border-border-default"}`}
+        onDragOver={(e) => {
+          if (!e.dataTransfer.types.includes("Files")) return;
+          e.preventDefault();
+          e.dataTransfer.dropEffect = "copy";
+          setDragOver(true);
+        }}
+        onDragLeave={(e) => {
+          if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragOver(false);
+        }}
+        onDrop={handleDrop}
+        data-testid="chat-composer"
+      >
         <div className="flex flex-wrap items-center gap-1.5">
           <button
             ref={modelButtonRef}
@@ -950,7 +1343,7 @@ export default function CopilotChat({
             className="w-64 max-h-80 overflow-y-auto"
           >
             {MODEL_GROUPS.map((group, index) => {
-              const names = (model && !models.includes(model) ? [model, ...models] : models).filter(group.matches);
+              const names = models.filter(group.matches);
               if (!names.length) return null;
               return (
                 <div key={group.label} role="group" aria-label={group.label}>
@@ -1078,7 +1471,46 @@ export default function CopilotChat({
           <span className="chip !px-2 !py-0.5 !text-[10px]">Context: {context.label}</span>
           <span className="chip !px-2 !py-0.5 !text-[10px]">{MODE_CHIP[mode]}</span>
         </div>
+        {(pendingAttachments.length > 0 || uploading.length > 0) && (
+          <div className="flex flex-wrap gap-1" aria-label="Attached files">
+            {pendingAttachments.map((attachment) => (
+              <AttachmentPill
+                key={attachment.url}
+                attachment={attachment}
+                onOpen={() => openAttachment(attachment)}
+                onRemove={() => setPendingAttachments((all) => all.filter((a) => a.url !== attachment.url))}
+              />
+            ))}
+            {uploading.map((upload) => (
+              <span key={upload.id} role="status" className="chip !px-2 !py-0.5 !text-[11px] text-text-muted">
+                <SpinnerIcon />
+                <span className="max-w-[10rem] truncate">{upload.name}</span>
+              </span>
+            ))}
+          </div>
+        )}
+        {attachError && <p className="text-[11px] text-accent">{attachError}</p>}
         <div className="relative flex items-end gap-1.5">
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            hidden
+            aria-label="Attach files"
+            onChange={(e) => {
+              void attachFiles(Array.from(e.target.files ?? []));
+              e.target.value = "";
+            }}
+          />
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            aria-label="Attach files"
+            title="Attach files (or drop or paste them here)"
+            className="flex h-9 w-7 shrink-0 items-center justify-center rounded-md text-text-muted hover:bg-surface-raised hover:text-text-primary"
+          >
+            <PaperclipIcon />
+          </button>
           {menuItems.length > 0 && (
             <CommandMenu items={menuItems} highlighted={highlighted} onPick={pickCommand} onHover={setMenuIndex} />
           )}
@@ -1089,6 +1521,7 @@ export default function CopilotChat({
               value={input}
               onChange={(e) => changeInput(e.target.value)}
               onKeyDown={handleKeyDown}
+              onPaste={handlePaste}
               rows={multiline ? 3 : 1}
               placeholder="Ask, or type / for commands"
               className={`block min-h-9 w-full resize-none rounded-lg ${multiline ? "" : "overflow-hidden"} border border-border-light bg-surface-raised px-2.5 py-1.5 text-xs leading-5 placeholder:text-text-muted focus:border-accent/70 focus:outline-none`}
@@ -1109,7 +1542,7 @@ export default function CopilotChat({
             <button
               type="button"
               onClick={send}
-              disabled={!input.trim()}
+              disabled={(!input.trim() && !pendingAttachments.length) || uploading.length > 0}
               aria-label="Send"
               title="Send"
               className="btn-primary !min-h-9 h-9 w-9 shrink-0 !rounded-full !p-0"
@@ -1119,7 +1552,82 @@ export default function CopilotChat({
           )}
         </div>
       </div>
+      {openedAttachment && (
+        <MediaLightbox src={openedAttachment.url} title={openedAttachment.name} onClose={() => setOpenedAttachment(null)} />
+      )}
     </section>
+  );
+}
+
+const IMAGE_SUFFIX_RE = /\.(png|jpe?g|gif|webp)$/i;
+
+/** Whether an attachment is an image, which the lightbox shows. */
+function isImageAttachment(attachment: ChatAttachment): boolean {
+  return !!attachment.content_type?.startsWith("image/") || IMAGE_SUFFIX_RE.test(new URL(attachment.url, window.location.href).pathname);
+}
+
+/** A file's size, e.g. "820 B", "14 KB" or "2.3 MB". */
+function fileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/** An attached file: its icon, name and size, opened on click; with a × to remove it, in the composer. */
+function AttachmentPill({ attachment, onOpen, onRemove }: { attachment: ChatAttachment; onOpen: () => void; onRemove?: () => void }) {
+  const kind = isPdfUrl(attachment.url) ? "pdf" : isImageAttachment(attachment) ? "image" : "file";
+  return (
+    <span className="chip !gap-1 !px-1.5 !py-0.5 !text-[11px]" data-attachment={attachment.name}>
+      <button
+        type="button"
+        onClick={onOpen}
+        aria-label={`Open ${attachment.name}`}
+        title={`Open ${attachment.name}`}
+        className="flex min-w-0 items-center gap-1 hover:text-text-primary"
+      >
+        <FileIcon kind={kind} />
+        <span className="max-w-[10rem] truncate">{attachment.name}</span>
+        {attachment.size != null && <span className="shrink-0 text-text-muted">{fileSize(attachment.size)}</span>}
+      </button>
+      {onRemove && (
+        <button
+          type="button"
+          onClick={onRemove}
+          aria-label={`Remove ${attachment.name}`}
+          title="Remove"
+          className="ml-0.5 rounded px-0.5 text-text-muted hover:bg-surface-active hover:text-text-primary"
+        >
+          ×
+        </button>
+      )}
+    </span>
+  );
+}
+
+function FileIcon({ kind }: { kind: "pdf" | "image" | "file" }) {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={`shrink-0 ${kind === "pdf" ? "text-accent" : "text-text-muted"}`} aria-hidden>
+      {kind === "image" ? (
+        <>
+          <rect x="3" y="3" width="18" height="18" rx="2" />
+          <circle cx="9" cy="9" r="2" />
+          <path d="M21 15l-5-5L5 21" />
+        </>
+      ) : (
+        <>
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+          <path d="M14 2v6h6" />
+        </>
+      )}
+    </svg>
+  );
+}
+
+function PaperclipIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0" aria-hidden>
+      <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+    </svg>
   );
 }
 
@@ -1155,17 +1663,17 @@ function CopyIcon() {
   );
 }
 
-function CheckIcon() {
+function CheckIcon({ className = "shrink-0 text-project-p5002" }: { className?: string }) {
   return (
-    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 text-project-p5002" aria-hidden>
+    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className} aria-hidden>
       <path d="M3.5 8.5l3 3 6-6" />
     </svg>
   );
 }
 
-function SpinnerIcon() {
+function SpinnerIcon({ className = "h-3 w-3 shrink-0 animate-spin text-accent" }: { className?: string }) {
   return (
-    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="h-3 w-3 shrink-0 animate-spin text-accent" aria-hidden>
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className={className} aria-hidden>
       <circle cx="8" cy="8" r="6" strokeOpacity="0.25" />
       <path d="M14 8a6 6 0 0 0-6-6" />
     </svg>
@@ -1209,9 +1717,9 @@ function TrashIcon() {
   );
 }
 
-function PencilIcon() {
+function PencilIcon({ className = "shrink-0" }: { className?: string }) {
   return (
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0" aria-hidden>
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className} aria-hidden>
       <path d="M12 20h9" />
       <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z" />
     </svg>
@@ -1305,17 +1813,28 @@ function ToolStep({ name, args, status }: { name: string; args: Record<string, u
 
 /** What the agent is doing while it answers: its current step, latest thought, steps so far and reply so far. */
 function LiveActivityCard({ progress, onStop }: { progress: LiveProgress; onStop: () => void }) {
-  const { thoughtSubject, thoughtText, tools, streamingText } = progress;
+  const { thoughtSubject, thoughtText, tools, streamingText, phase } = progress;
   const running = [...tools].reverse().find((t) => t.status === "running");
-  let status = "Thinking…";
-  if (running) {
+
+  let statusText = "Thinking…";
+  let badgeLabel = "Thinking";
+  if (phase === "finished") {
+    statusText = "Finished answering";
+    badgeLabel = "Finished";
+  } else if (phase === "answering") {
+    statusText = "Answering…";
+    badgeLabel = "Writing response";
+  } else if (running) {
     const { action, target } = describeToolCall(running.name, running.arguments);
-    status = target ? `${action}: ${target}…` : `${action}…`;
+    statusText = target ? `${action}: ${target}…` : `${action}…`;
+    badgeLabel = "Researching";
   } else if (thoughtSubject) {
-    status = `${thoughtSubject}…`;
-  } else if (streamingText) {
-    status = "Writing response…";
+    statusText = `${thoughtSubject}…`;
+    badgeLabel = "Thinking";
+  } else if (tools.length > 0) {
+    badgeLabel = "Researching";
   }
+
   // Note blocks are carried out (or proposed) once the reply is done, not shown as text.
   const preview = streamingText.replace(/<write_note[\s\S]*?(?:<\/write_note>|$)/g, "").trim();
 
@@ -1325,23 +1844,52 @@ function LiveActivityCard({ progress, onStop }: { progress: LiveProgress; onStop
       aria-live="polite"
     >
       <div className="flex min-w-0 items-center gap-2">
-        <SpinnerIcon />
-        <span className="min-w-0 truncate text-xs font-medium text-text-primary">{status}</span>
-        {tools.length > 0 && (
+        {phase === "finished" ? (
+          <CheckIcon className="h-3.5 w-3.5 text-project-p5002 shrink-0" />
+        ) : phase === "answering" ? (
+          <PencilIcon className="h-3.5 w-3.5 text-accent animate-pulse shrink-0" />
+        ) : (
+          <SpinnerIcon className="h-3 w-3 shrink-0 animate-spin text-accent" />
+        )}
+        <span
+          className={`min-w-0 truncate text-xs ${
+            phase === "finished"
+              ? "font-medium text-project-p5002"
+              : phase === "answering"
+                ? "font-semibold text-text-primary"
+                : "font-medium text-text-primary"
+          }`}
+        >
+          {statusText}
+        </span>
+        <span
+          className={`chip text-[10px] ${
+            phase === "finished"
+              ? "bg-project-p5002/15 text-project-p5002"
+              : phase === "answering"
+                ? "bg-accent/15 text-accent"
+                : "bg-surface-active text-text-muted"
+          }`}
+        >
+          {badgeLabel}
+        </span>
+        {tools.length > 0 && phase === "thinking" && (
           <span className="shrink-0 text-[10px] text-text-muted">
             {tools.length} step{tools.length === 1 ? "" : "s"}
           </span>
         )}
-        <button
-          type="button"
-          onClick={onStop}
-          className="ml-auto flex shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] text-text-muted hover:bg-surface-active hover:text-text-primary"
-        >
-          <StopIcon />
-          Stop
-        </button>
+        {phase !== "finished" && (
+          <button
+            type="button"
+            onClick={onStop}
+            className="ml-auto flex shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] text-text-muted hover:bg-surface-active hover:text-text-primary"
+          >
+            <StopIcon />
+            Stop
+          </button>
+        )}
       </div>
-      {thoughtText && (
+      {thoughtText && phase === "thinking" && (
         <div className="markdown line-clamp-2 border-l-2 border-accent/40 pl-2 text-[11px] text-text-muted" onCopy={copyCleanSelection}>
           <ChatMarkdown content={thoughtText} />
         </div>
@@ -1353,10 +1901,24 @@ function LiveActivityCard({ progress, onStop }: { progress: LiveProgress; onStop
           ))}
         </ul>
       )}
-      {preview && (
+      {preview ? (
         <div className="markdown border-t border-border-default pt-2" onCopy={copyCleanSelection}>
           <ChatMarkdown content={preview} />
+          {phase === "answering" && (
+            <span className="inline-block text-accent animate-pulse ml-0.5 select-none" aria-hidden="true">
+              ●
+            </span>
+          )}
         </div>
+      ) : (
+        phase === "answering" && (
+          <div className="border-t border-border-default pt-2 text-[11px] text-text-muted italic flex items-center gap-1.5">
+            <span>Writing response…</span>
+            <span className="inline-block text-accent animate-pulse select-none" aria-hidden="true">
+              ●
+            </span>
+          </div>
+        )
       )}
     </div>
   );

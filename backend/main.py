@@ -2,6 +2,7 @@
 
 import html
 import json
+import os
 import re
 import secrets
 import urllib.request
@@ -18,7 +19,7 @@ import anyio.to_thread
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from starlette.background import BackgroundTask
 from sqlalchemy import func, or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 
 import agent
 import file_layer
@@ -26,8 +27,8 @@ import database
 import local_files
 import spaces
 from database import get_db, init_db
-from history import set_source, soft_delete, to_jsonable, utcnow
-from models import FolderMeta, HistoryRecord, Person, Project, SavedPrompt, Space, Task, TaskView, TimeLog
+from history import restore, set_source, soft_delete, to_jsonable, utcnow
+from models import FolderMeta, HistoryRecord, Link, Person, Project, SavedPrompt, Space, Task, TaskView, TimeLog
 import schemas
 from schemas import (
     AccessMode,
@@ -35,6 +36,8 @@ from schemas import (
     ApplyEditResponse,
     CaptureRequest,
     CaptureResponse,
+    ChatHistoryPayload,
+    ChatHistoryResponse,
     ChatRequest,
     ChatResponse,
     CheckInRequest,
@@ -616,6 +619,44 @@ def chat_stream(request: ChatRequest, db: Session = Depends(get_db)) -> Streamin
             cancel.cancel()
 
     return StreamingResponse(lines(), media_type="application/x-ndjson")
+
+
+@app.get("/api/chat/history")
+def get_chat_history(
+    space_id: int = Query(default=spaces.DEFAULT_SPACE_ID), db: Session = Depends(get_db)
+) -> ChatHistoryResponse:
+    """The saved conversations of a space for cross-device sync."""
+    _space_id_or_404(db, space_id)
+    history_file = spaces.space_dir(space_id) / "chat_history.json"
+    if not history_file.is_file():
+        return ChatHistoryResponse(space_id=space_id, threads=[], active_id=None)
+    try:
+        data = json.loads(history_file.read_text(encoding="utf-8"))
+        return ChatHistoryResponse(
+            space_id=space_id,
+            threads=data.get("threads", []) if isinstance(data, dict) and isinstance(data.get("threads"), list) else [],
+            active_id=data.get("active_id") if isinstance(data, dict) else None,
+        )
+    except Exception:
+        return ChatHistoryResponse(space_id=space_id, threads=[], active_id=None)
+
+
+@app.put("/api/chat/history")
+def put_chat_history(payload: ChatHistoryPayload, db: Session = Depends(get_db)) -> ChatHistoryResponse:
+    """Save conversations of a space atomically for cross-device sync."""
+    _space_id_or_404(db, payload.space_id)
+    s_dir = spaces.space_dir(payload.space_id)
+    s_dir.mkdir(parents=True, exist_ok=True)
+    history_file = s_dir / "chat_history.json"
+    tmp_file = s_dir / f"chat_history.{secrets.token_hex(4)}.tmp"
+    content = json.dumps(
+        {"space_id": payload.space_id, "threads": payload.threads, "active_id": payload.active_id},
+        ensure_ascii=False,
+        indent=2,
+    )
+    tmp_file.write_text(content, encoding="utf-8")
+    os.replace(tmp_file, history_file)
+    return ChatHistoryResponse(space_id=payload.space_id, threads=payload.threads, active_id=payload.active_id)
 
 
 PROMPTS_SOURCE = "settings"
@@ -1856,6 +1897,154 @@ def delete_task_comment(task_id: int, comment_id: str, db: Session = Depends(get
     comments = schemas.clean_comments(task.comments)
     del comments[_comment_index(comments, comment_id)]
     return _save_comments(db, task, comments)
+
+
+# --- Task dependencies ("blocks" / "blocked by") ------------------------------------
+
+
+def _link_conflict(link: Link, predecessor: Task, successor: Task) -> str | None:
+    """Why the tasks' dates contradict a finish-to-start `link`, or None if they don't (or aren't set).
+
+    With 0-day tolerance, a finish-to-start link requires the successor to start (or, without a start date,
+    be due) strictly after the predecessor finishes plus lag: the predecessor occupies its finish day.
+    """
+    if predecessor.deadline is None:
+        return None
+    earliest = predecessor.deadline + timedelta(days=link.lag_days or 0)
+    finishes = f"{predecessor.title} finishes on {predecessor.deadline.isoformat()}"
+    if successor.start_date is not None:
+        if successor.start_date < earliest:
+            return f"{finishes}, after {successor.title} starts on {successor.start_date.isoformat()}"
+        if successor.start_date == earliest:
+            return f"{finishes}, the same day {successor.title} starts on {successor.start_date.isoformat()}"
+    elif successor.deadline is not None:
+        if successor.deadline < earliest:
+            return f"{finishes}, after {successor.title} is due on {successor.deadline.isoformat()}"
+        if successor.deadline == earliest:
+            return f"{finishes}, the same day {successor.title} is due on {successor.deadline.isoformat()}"
+    return None
+
+
+def _link_out(link: Link, predecessor: Task, successor: Task) -> schemas.LinkWithDetails:
+    reason = _link_conflict(link, predecessor, successor)
+    return schemas.LinkWithDetails(
+        id=link.id,
+        predecessor_id=link.predecessor_id,
+        successor_id=link.successor_id,
+        type=link.type,
+        lag_days=link.lag_days,
+        conflict=reason is not None,
+        conflict_reason=reason,
+    )
+
+
+def _dependency_item(link: Link, other: Task, reason: str | None) -> schemas.TaskDependencyItem:
+    return schemas.TaskDependencyItem(
+        link_id=link.id,
+        task_id=other.id,
+        title=other.title,
+        status=other.status,
+        start_date=other.start_date,
+        deadline=other.deadline,
+        conflict=reason is not None,
+        conflict_reason=reason,
+    )
+
+
+def _creates_cycle(db: Session, predecessor_id: int, successor_id: int) -> bool:
+    """Whether linking `predecessor_id -> successor_id` closes a loop: the successor already leads back to it."""
+    edges: dict[int, list[int]] = {}
+    for pred, succ in db.execute(select(Link.predecessor_id, Link.successor_id).where(Link.deleted_at.is_(None))):
+        edges.setdefault(pred, []).append(succ)
+    seen, stack = set(), [successor_id]
+    while stack:
+        task_id = stack.pop()
+        if task_id == predecessor_id:
+            return True
+        if task_id not in seen:
+            seen.add(task_id)
+            stack.extend(edges.get(task_id, []))
+    return False
+
+
+@app.get("/api/links")
+def list_links(space_id: int = spaces.DEFAULT_SPACE_ID, db: Session = Depends(get_db)) -> list[schemas.LinkWithDetails]:
+    """The live dependencies between a space's tasks, with any date conflicts (for the Gantt chart)."""
+    _space_id_or_404(db, space_id)
+    predecessor, successor = aliased(Task), aliased(Task)
+    rows = db.execute(
+        select(Link, predecessor, successor)
+        .join(predecessor, Link.predecessor_id == predecessor.id)
+        .join(successor, Link.successor_id == successor.id)
+        .where(
+            func.coalesce(predecessor.space_id, spaces.DEFAULT_SPACE_ID) == space_id,
+            func.coalesce(successor.space_id, spaces.DEFAULT_SPACE_ID) == space_id,
+            predecessor.deleted_at.is_(None),
+            successor.deleted_at.is_(None),
+        )
+        .order_by(Link.id)
+    ).all()
+    return [_link_out(link, pred, succ) for link, pred, succ in rows]
+
+
+@app.get("/api/tasks/{task_id}/links")
+def task_links(task_id: int, db: Session = Depends(get_db)) -> schemas.TaskDependenciesResponse:
+    """The tasks a task waits on (`blocked_by`) and the tasks waiting on it (`blocks`)."""
+    task = _get_task(db, task_id)
+    blocked_by = [
+        _dependency_item(link, link.predecessor, _link_conflict(link, link.predecessor, task))
+        for link in sorted(task.predecessor_links, key=lambda link: link.id)
+        if link.predecessor is not None
+    ]
+    blocks = [
+        _dependency_item(link, link.successor, _link_conflict(link, task, link.successor))
+        for link in sorted(task.successor_links, key=lambda link: link.id)
+        if link.successor is not None
+    ]
+    return schemas.TaskDependenciesResponse(blocked_by=blocked_by, blocks=blocks)
+
+
+@app.post("/api/links", status_code=201)
+def create_link(request: schemas.LinkCreate, db: Session = Depends(get_db)) -> schemas.LinkWithDetails:
+    """Make `predecessor_id` block `successor_id`. Both must be live tasks of the same space, and the link
+    must not duplicate another or close a loop."""
+    if request.predecessor_id == request.successor_id:
+        raise HTTPException(status_code=400, detail="A task can't depend on itself")
+    predecessor = _get_task(db, request.predecessor_id)
+    successor = _get_task(db, request.successor_id)
+    if (predecessor.space_id or spaces.DEFAULT_SPACE_ID) != (successor.space_id or spaces.DEFAULT_SPACE_ID):
+        raise HTTPException(status_code=400, detail="Both tasks must be in the same space")
+    # A deleted link between the same tasks still holds the (predecessor, successor) unique key: revive it.
+    link = db.scalars(
+        select(Link)
+        .where(Link.predecessor_id == predecessor.id, Link.successor_id == successor.id)
+        .execution_options(include_deleted=True)
+    ).first()
+    if link is not None and link.deleted_at is None:
+        raise HTTPException(status_code=400, detail="This dependency already exists")
+    if _creates_cycle(db, predecessor.id, successor.id):
+        raise HTTPException(status_code=400, detail="Creating this dependency would cause a circular dependency")
+    set_source(db, TASK_UPDATE_SOURCE)
+    if link is None:
+        link = Link(predecessor_id=predecessor.id, successor_id=successor.id)
+        db.add(link)
+    else:
+        restore(link)
+    link.type = request.type
+    link.lag_days = request.lag_days
+    db.commit()
+    return _link_out(link, predecessor, successor)
+
+
+@app.delete("/api/links/{link_id}", status_code=204)
+def delete_link(link_id: int, db: Session = Depends(get_db)) -> None:
+    """Soft-delete a dependency (it stays in `history`)."""
+    link = db.get(Link, link_id)
+    if link is None or link.deleted_at is not None:
+        raise HTTPException(status_code=404, detail=f"Unknown link id: {link_id}")
+    set_source(db, TASK_UPDATE_SOURCE)
+    soft_delete(db, link)
+    db.commit()
 
 
 # --- Saved task views (Phase 9.1) -------------------------------------------------

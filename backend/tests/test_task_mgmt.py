@@ -282,6 +282,7 @@ def test_people_crud(client):
         "is_external": False,
         "avatar_url": None,
         "is_me": False,
+        "color": None,
         "created_at": None,
     }
     client.post("/api/people", json={"space_id": 1, "name": "alan Client", "company": "Acme", "is_external": True})
@@ -312,6 +313,8 @@ def test_people_crud(client):
         ({"space_id": 1, "name": "x" * 65}, 422),  # longer than a task's assignee
         ({"space_id": 1, "name": "X", "email": "not-an-email"}, 422),
         ({"space_id": 1, "name": "X", "avatar_url": "javascript:alert(1)"}, 422),
+        ({"space_id": 1, "name": "X", "color": "red"}, 422),
+        ({"space_id": 1, "name": "X", "color": "#12345g"}, 422),
         ({"space_id": 99, "name": "X"}, 404),
     ],
 )
@@ -629,3 +632,13 @@ def test_saved_view_keeps_advanced_filters(client):
     assert (saved["is_gantt_task"], saved["is_milestone"], saved["has_note"]) == (True, False, True)
     assert (saved["start_after"], saved["start_before"]) == ("2026-09-01", "2026-09-30")
     assert saved["gantt_color_by"] == "yard"
+
+
+def test_person_avatar_color(client):
+    person = client.post("/api/people", json={"space_id": 1, "name": "Zoe", "color": "#3B82F6"}).json()
+    assert person["color"] == "#3b82f6"
+    updated = client.put(f"/api/people/{person['id']}", json={"space_id": 1, "name": "Zoe", "color": "#f0a"}).json()
+    assert updated["color"] == "#ff00aa"
+    cleared = client.put(f"/api/people/{person['id']}", json={"space_id": 1, "name": "Zoe", "color": ""}).json()
+    assert cleared["color"] is None
+    assert client.get(f"/api/people/{person['id']}").json()["color"] is None

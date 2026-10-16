@@ -16,8 +16,11 @@ import {
 } from "../lib/tasks";
 import type { ViewFilters } from "../lib/views";
 import { Dropdown, Row } from "./MultiSelect";
-import Popover from "./Popover";
-import { formatDay, ProjectTag } from "./TriageBoard";
+import { ProjectPicker } from "./ProjectPicker";
+import { formatDay } from "./TriageBoard";
+
+// Re-exported for the pages that took it from here.
+export { ProjectPicker };
 
 // --- Columns ----------------------------------------------------------------------
 
@@ -202,7 +205,7 @@ export function NewTaskRow({
       );
     }
     if (id === "project") {
-      return <ProjectPicker value={draft.project_id} projects={projects} onChange={(project_id) => set({ project_id })} />;
+      return <ProjectPicker value={draft.project_id} projects={projects} onChange={(project_id) => set({ project_id })} ariaLabel="New task project" />;
     }
     if (id === "status") {
       return (
@@ -376,69 +379,6 @@ export function CustomFieldInput({
       {field.name}
       {input}
     </label>
-  );
-}
-
-/** A new task's project as its coloured pill; clicking it lists the space's projects to pick another (or none). */
-export function ProjectPicker({ value, projects, onChange }: { value: number | null; projects: ProjectOption[]; onChange: (projectId: number | null) => void }) {
-  const [open, setOpen] = useState(false);
-  const button = useRef<HTMLButtonElement>(null);
-  const project = projects.find((p) => p.id === value);
-  const label = project ? (project.name !== project.code ? `${project.code} · ${project.name}` : project.code) : "No project";
-
-  function pick(projectId: number | null) {
-    setOpen(false);
-    button.current?.focus();
-    if (projectId !== value) onChange(projectId);
-  }
-
-  return (
-    <>
-      <button
-        ref={button}
-        type="button"
-        aria-label={`New task project: ${label}`}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        title={`${label} · click to change`}
-        onClick={() => setOpen((o) => !o)}
-        className="flex items-center gap-1 rounded hover:opacity-80 focus:outline-none focus-visible:ring-1 focus-visible:ring-accent/70"
-      >
-        <ProjectTag code={project?.code ?? null} color={project?.color} />
-        <svg aria-hidden viewBox="0 0 12 12" className="h-2.5 w-2.5 text-text-muted">
-          <path d="M2.5 4.5 6 8l3.5-3.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
-      </button>
-      <Popover anchor={button} open={open} onClose={() => setOpen(false)} label="Projects" role="menu">
-        <div
-          onKeyDown={(e) => {
-            if (e.key === "Escape") {
-              e.stopPropagation();
-              pick(value);
-            }
-          }}
-        >
-          {[null, ...projects].map((p) => {
-            const id = p?.id ?? null;
-            return (
-              <button
-                key={id ?? "none"}
-                type="button"
-                role="menuitemradio"
-                aria-checked={id === value}
-                onClick={() => pick(id)}
-                className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-surface-raised focus:bg-surface-raised focus:outline-none ${
-                  id === value ? "text-text-primary" : "text-text-secondary"
-                }`}
-              >
-                <ProjectTag code={p?.code ?? null} color={p?.color} />
-                {p && p.name !== p.code && <span className="truncate">{p.name}</span>}
-              </button>
-            );
-          })}
-        </div>
-      </Popover>
-    </>
   );
 }
 

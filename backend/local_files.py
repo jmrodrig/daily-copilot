@@ -494,8 +494,8 @@ def _truncate(text: str) -> str:
 
 
 def read_local_file(path: str) -> dict[str, Any]:
-    """A local file's text: plain text files as they are, PDFs' extracted text, and for other formats
-    (Word, Excel, CAD, Maxsurf, ...) only their metadata."""
+    """A local file's text: plain text files as they are, PDFs' extracted text, Outlook emails (`.msg`) as their
+    headers, attachment list and body, and for other formats (Word, Excel, CAD, Maxsurf, ...) only their metadata."""
     file = _existing(path)
     if file.is_dir():
         raise LocalFileError(f"{file} is a folder; use list_local_directory to list it")
@@ -513,4 +513,18 @@ def read_local_file(path: str) -> dict[str, Any]:
         except Exception as exc:  # pymupdf raises its own types for damaged or encrypted files
             raise LocalFileError(f"Could not read the PDF {file}: {exc}") from exc
         return {**meta, "pages": len(pages), "content": _truncate("\n".join(pages))}
+    if suffix == ".msg":
+        from read_msg import MsgReadError, format_summary, read_msg
+
+        try:
+            data = read_msg(file)
+        except MsgReadError as exc:
+            raise LocalFileError(f"Could not read the Outlook message {file}: {exc}") from exc
+        return {
+            **meta,
+            "subject": data["subject"],
+            "from": data["sender"],
+            "attachments": len(data["attachments"]),
+            "content": _truncate(format_summary(data)),
+        }
     return {**meta, "message": f"Text extraction for {suffix or 'files without an extension'} is not supported yet; only the metadata is available."}

@@ -1,7 +1,7 @@
 import { mergeAttributes, Node, type JSONContent } from "@tiptap/core";
 import { NodeViewWrapper, ReactNodeViewRenderer, type NodeViewProps } from "@tiptap/react";
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 
 import { getJson } from "../lib/api";
 import { isLocalHref, openLocalFile } from "../lib/localFiles";
@@ -32,12 +32,23 @@ export type RefPillAttrs = { kind: RefKind; href: string; label: string };
 
 export const REF_KINDS: RefKind[] = ["task", "note", "url"];
 const REF_TITLE = /^ref:(task|note|url)$/;
-const PILL = /^\[((?:\\.|[^\\\]\n])*)\]\(([^\s()"<>]+) "ref:(task|note|url)"\)/;
+const PILL = /^\[((?:\\.|[^\\\]\n])*)\]\(<?([^\n"()]+?)>?(?:\s+"ref:(task|note|url)")?\s*\)/;
 
-/** The kind of a link saved as a pill (by its title), or null for an ordinary link. */
-export function refKind(title: string | null | undefined): RefKind | null {
+/** The kind of a link saved as a pill (by its title), or inferred from its href, or null for an ordinary link. */
+export function refKind(title?: string | null, href?: string | null): RefKind | null {
   const match = title ? REF_TITLE.exec(title) : null;
-  return match ? (match[1] as RefKind) : null;
+  if (match) return match[1] as RefKind;
+  if (!href) return null;
+  if (taskIdFromHref(href) !== null || /taskId=\d+/.test(href) || /^\/tasks\/\d+/.test(href)) {
+    return "task";
+  }
+  if (href.startsWith("/note?") || href.startsWith("/notes?") || /\.md($|[?#])/i.test(href)) {
+    return "note";
+  }
+  if (isLocalHref(href)) {
+    return "url";
+  }
+  return null;
 }
 
 // Outside the app (or opened in a new tab) a task pill goes to the backlog with the task open in the side panel.
@@ -57,6 +68,136 @@ const encodeHref = (href: string) => href.replace(/[\s()"<>]/g, (c) => `%${c.cha
 // A local path (`C:\My Files`) is read back as it was: unlike a URL, nothing on the backend decodes it.
 const decodeHref = (href: string) =>
   isLocalHref(href) && !/^file:/i.test(href) ? href.replace(/%(09|0A|0D|20|22|28|29|3C|3E)/gi, (_, hex: string) => String.fromCharCode(parseInt(hex, 16))) : href;
+
+/** A pill as saved in markdown: `[label](href "ref:kind")`. */
+export function pillMarkdown({ kind, href, label }: RefPillAttrs): string {
+  return `[${escapeLabel(label || href)}](${encodeHref(href)} "ref:${REF_KINDS.includes(kind) ? kind : "url"}")`;
+}
+
+/**
+ * Pasted text that is a link on its own, to become a pill: a web or `file:` URL, a drive or UNC path, or a link to a
+ * note or task in the app. Returns the link trimmed, or null.
+ */
+export function pastedLink(text: string): string | null {
+  const link = text.trim();
+  if (/^(?:https?|file):\/\/\S+$/i.test(link) || /^\/(?:notes?\?|tasks\/)\S*$/.test(link)) return link;
+  // A path may hold spaces, but not run over lines.
+  return /^(?:[a-z]:\\|\\\\[^\\\s]+\\)[^\r\n]*$/i.test(link) ? link : null;
+}
+
+/** The pill for a link: a task or note in the app shown as one, anything else as a URL; labelled by its href. */
+export function linkPill(href: string, label?: string): RefPillAttrs {
+  return { kind: refKind(null, href) ?? "url", href, label: label?.replace(/\s+/g, " ").trim() || href };
+}
+
+/** Web URLs in running text. Matches take the trailing punctuation of a sentence too: see `trimUrl`. */
+export const BARE_URL = /https?:\/\/[^\s<>"'`]+/g;
+
+/** A URL found in text without the punctuation that ends the sentence around it, or an unmatched `)`. */
+export function trimUrl(url: string): string {
+  let trimmed = url.replace(/[.,;:!?'"\]]+$/, "");
+  while (trimmed.endsWith(")") && (trimmed.match(/\(/g)?.length ?? 0) < (trimmed.match(/\)/g)?.length ?? 0)) {
+    trimmed = trimmed.slice(0, -1).replace(/[.,;:!?'"\]]+$/, "");
+  }
+  return trimmed;
+}
+
+/** Plain text with its bare web URLs written as pills, leaving those already in markdown links and code alone. */
+export function pillBareUrlsInMarkdown(markdown: string): string {
+  let fenced = false;
+  return markdown
+    .split("\n")
+    .map((line) => {
+      if (/^\s*(```|~~~)/.test(line)) fenced = !fenced;
+      if (fenced || /^\s*(```|~~~)/.test(line)) return line;
+      // Only URLs starting a line or after a space: not one in `](…)`, `<…>`, quotes or backticks.
+      return line.replace(/(^|\s)(https?:\/\/[^\s<>"'`]+)/g, (_match, before: string, url: string) => {
+        const href = trimUrl(url);
+        return `${before}${pillMarkdown(linkPill(href))}${url.slice(href.length)}`;
+      });
+    })
+    .join("\n");
+}
+
+const LINKS_IN_TEXT = new RegExp(`${PILL.source.slice(1)}|(${BARE_URL.source})`, "g");
+
+/** Plain text (a comment, say) split into its text and its links, pills or markdown links and bare web URLs alike. */
+export function linkSegments(text: string): (string | RefPillAttrs)[] {
+  const segments: (string | RefPillAttrs)[] = [];
+  let last = 0;
+  for (const match of text.matchAll(LINKS_IN_TEXT)) {
+    const start = match.index ?? 0;
+    let pill: RefPillAttrs;
+    let end = start + match[0].length;
+    if (match[4]) {
+      const url = trimUrl(match[4]);
+      pill = linkPill(url);
+      end = start + url.length;
+    } else {
+      const href = decodeHref(match[2].trim());
+      pill = { kind: (match[3] as RefKind | undefined) ?? refKind(null, href) ?? "url", href, label: unescapeLabel(match[1]) || href };
+    }
+    if (start > last) segments.push(text.slice(last, start));
+    segments.push(pill);
+    last = end;
+  }
+  if (last < text.length) segments.push(text.slice(last));
+  return segments;
+}
+
+/** A pill outside the editor (in a comment, say): opens what it points to on click, as the editor's on double-click. */
+export function StaticPill({ kind, href, label }: RefPillAttrs) {
+  const { openTask } = useTaskPanel();
+  const { spaceId } = useSpace();
+  const taskId = kind === "task" ? taskIdFromHref(href) : null;
+  const body = (
+    <>
+      <PillIcon kind={kind} href={href} />
+      <span className="reference-pill-label">{label || href}</span>
+    </>
+  );
+  if (kind === "url")
+    return (
+      <a
+        href={href}
+        title={href}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="reference-pill url"
+        onClick={(e) => {
+          // The browser won't open a local path from a web page: the backend does.
+          if (!isLocalHref(href)) return;
+          e.preventDefault();
+          void openLocalFile(href);
+        }}
+      >
+        {body}
+      </a>
+    );
+  let target = href;
+  if (kind === "note" && !href.startsWith("/note?")) {
+    try {
+      target = notePath(spaceId, decodeURIComponent(href));
+    } catch {
+      target = notePath(spaceId, href);
+    }
+  }
+  return (
+    <Link
+      to={target}
+      title={`${PILL_NAMES[kind]}: ${label}`}
+      className={`reference-pill ${kind}`}
+      onClick={(e) => {
+        // Ctrl/Cmd-click still opens it in a new tab.
+        if (taskId === null || e.ctrlKey || e.metaKey || e.shiftKey) return;
+        e.preventDefault();
+        openTask(taskId);
+      }}
+    >
+      {body}
+    </Link>
+  );
+}
 
 export const ReferencePill = Node.create({
   name: "referencePill",
@@ -97,14 +238,15 @@ export const ReferencePill = Node.create({
     tokenize(src) {
       const match = PILL.exec(src);
       if (!match) return undefined;
-      return { type: "referencePill", raw: match[0], label: unescapeLabel(match[1]), href: decodeHref(match[2]), kind: match[3] };
+      const rawTitle = match[3] ? `ref:${match[3]}` : null;
+      const href = decodeHref(match[2].trim());
+      const kind = refKind(rawTitle, href);
+      if (!kind) return undefined;
+      return { type: "referencePill", raw: match[0], label: unescapeLabel(match[1]), href, kind };
     },
   },
   parseMarkdown: (token, h) => h.createNode("referencePill", { kind: token.kind, href: token.href, label: token.label }),
-  renderMarkdown: (node) => {
-    const { kind, href, label } = (node.attrs ?? {}) as RefPillAttrs;
-    return `[${escapeLabel(label || href)}](${encodeHref(href)} "ref:${REF_KINDS.includes(kind) ? kind : "url"}")`;
-  },
+  renderMarkdown: (node) => pillMarkdown((node.attrs ?? {}) as RefPillAttrs),
 
   addNodeView() {
     return ReactNodeViewRenderer(PillView, { as: "span" });
@@ -119,9 +261,12 @@ function PillView({ node, selected, updateAttributes }: NodeViewProps) {
   const { kind, href, label } = node.attrs as RefPillAttrs;
   const navigate = useNavigate();
   const { openTask } = useTaskPanel();
+  const { spaceId } = useSpace();
 
   const taskId = kind === "task" ? taskIdFromHref(href) : null;
-  const status = useTaskStatus(taskId);
+  const taskInfo = useTaskInfo(taskId);
+  const status = taskInfo?.status ?? null;
+  const assignee = taskInfo?.assignee ?? null;
 
   useEffect(() => {
     if (taskId === null) return;
@@ -140,7 +285,16 @@ function PillView({ node, selected, updateAttributes }: NodeViewProps) {
     else if (kind === "url") {
       if (isLocalHref(href)) void openLocalFile(href);
       else window.open(href, "_blank", "noopener,noreferrer");
-    } else navigate(href);
+    } else {
+      let noteRelPath = href;
+      try {
+        noteRelPath = decodeURIComponent(href);
+      } catch {
+        // ignore
+      }
+      const target = kind === "note" && !href.startsWith("/note?") ? notePath(spaceId, noteRelPath) : href;
+      navigate(target);
+    }
   }
 
   return (
@@ -150,7 +304,7 @@ function PillView({ node, selected, updateAttributes }: NodeViewProps) {
       data-reference-pill=""
       data-kind={kind}
       data-href={href}
-      title={`${kind === "url" ? href : `${PILL_NAMES[kind]}: ${label}`} (double-click to open)`}
+      title={`${kind === "url" ? href : `${PILL_NAMES[kind]}: ${label}`}${assignee ? ` · 👤 ${assignee}` : ""} (double-click to open)`}
       onDoubleClick={open}
       className={`reference-pill ${kind} ${selected ? "selected" : ""}`}
     >
@@ -158,29 +312,35 @@ function PillView({ node, selected, updateAttributes }: NodeViewProps) {
       <span className="reference-pill-label">
         {status && <StatusTag status={status} />}
         {label || href}
+        {assignee && <AssigneeTag assignee={assignee} />}
       </span>
     </NodeViewWrapper>
   );
 }
 
+export type TaskPillInfo = {
+  status: TaskStatus;
+  assignee: string | null;
+};
+
 /**
- * The current status of the task a pill points to: fetched on mount and kept in step with `TASK_CHANGED` from any
- * view. Null until it's known, and for a task that's gone.
+ * The current status and assignee of the task a pill points to: fetched on mount and kept in step with `TASK_CHANGED`
+ * from any view. Null until it's known, and for a task that's gone.
  */
-export function useTaskStatus(taskId: number | null): TaskStatus | null {
-  const [status, setStatus] = useState<TaskStatus | null>(null);
+export function useTaskInfo(taskId: number | null): TaskPillInfo | null {
+  const [info, setInfo] = useState<TaskPillInfo | null>(null);
   useEffect(() => {
-    setStatus(null);
+    setInfo(null);
     if (taskId === null) return;
     const controller = new AbortController();
     getJson<TaskItem>(`/api/tasks/${taskId}`, controller.signal)
-      .then((task) => setStatus(task.status))
+      .then((task) => setInfo(pillInfo(task)))
       .catch(() => {});
     const handle = (event: Event) => {
       const change = (event as CustomEvent<TaskChange>).detail;
       if (change.id !== taskId) return;
-      if (change.deleted) setStatus(null);
-      else if (change.task) setStatus(change.task.status);
+      if (change.deleted) setInfo(null);
+      else if (change.task) setInfo(pillInfo(change.task));
     };
     window.addEventListener(TASK_CHANGED, handle);
     return () => {
@@ -188,7 +348,14 @@ export function useTaskStatus(taskId: number | null): TaskStatus | null {
       window.removeEventListener(TASK_CHANGED, handle);
     };
   }, [taskId]);
-  return status;
+  return info;
+}
+
+const pillInfo = (task: TaskItem): TaskPillInfo => ({ status: task.status, assignee: task.assignee?.trim() || null });
+
+/** The current status of the task a pill points to (see useTaskInfo). */
+export function useTaskStatus(taskId: number | null): TaskStatus | null {
+  return useTaskInfo(taskId)?.status ?? null;
 }
 
 /** The status as a bold `[IN_PROGRESS]` tag in its colour (the space's pick, else the default), in front of a task pill's name. */
@@ -201,6 +368,15 @@ export function StatusTag({ status }: { status: TaskStatus }) {
       style={{ color: statusColor(space?.status_colors, status) }}
     >
       [{status.toUpperCase()}]
+    </span>
+  );
+}
+
+/** The assignee as a subtle `· 👤 <name>` tag after a task pill's name. */
+export function AssigneeTag({ assignee }: { assignee: string }) {
+  return (
+    <span title={`Assigned to ${assignee}`} className="ml-1.5 font-normal text-text-muted">
+      · 👤 {assignee}
     </span>
   );
 }
