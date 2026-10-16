@@ -8,6 +8,7 @@ import {
   type FormEvent,
   type KeyboardEvent,
 } from "react";
+import { flushSync } from "react-dom";
 import { Link } from "react-router-dom";
 
 import { getJson, message, sendJson } from "../lib/api";
@@ -41,7 +42,7 @@ import Popover from "./Popover";
 import { postStatusComment, useStatusChangePrompt } from "./StatusChangeDialog";
 import { OptionPill } from "./ColorPicker";
 import { ProjectPicker } from "./ProjectPicker";
-import { linkPill, linkSegments, pastedLink, pillMarkdown, StaticPill } from "./referencePill";
+import { fetchUrlTitle, isWebUrl, linkPill, linkSegments, pastedLink, pillMarkdown, StaticPill } from "./referencePill";
 import { ME, NEUTRAL_TAG, ProjectTag, Tag, TagPills } from "./TriageBoard";
 
 type State = { state: "loading" } | { state: "ok"; task: TaskItem } | { state: "error"; message: string };
@@ -1068,7 +1069,7 @@ function CommentText({ text }: { text: string }) {
 
 /**
  * A link pasted into a comment goes in as a pill's markdown: over the selected text, labelled by it, or at the caret,
- * labelled by the link. Anything else pastes as usual.
+ * labelled by the link until the web page's title comes back to label it. Anything else pastes as usual.
  */
 function pasteLink(event: ClipboardEvent<HTMLTextAreaElement>, setValue: (value: string) => void) {
   const href = pastedLink(event.clipboardData.getData("text/plain"));
@@ -1080,6 +1081,23 @@ function pasteLink(event: ClipboardEvent<HTMLTextAreaElement>, setValue: (value:
   setValue(value.slice(0, start) + pill + value.slice(end));
   // After React has put the new value in, the caret goes after the pill.
   requestAnimationFrame(() => el.setSelectionRange(start + pill.length, start + pill.length));
+  if (start === end && isWebUrl(href)) {
+    void fetchUrlTitle(href).then((title) => {
+      // After the caret above has been placed, so the two don't race.
+      requestAnimationFrame(() => {
+        // Only while the pill is still there as pasted: not once it's been posted, edited or deleted.
+        const at = el.value.indexOf(pill);
+        if (!title || at < 0) return;
+        const titled = pillMarkdown(linkPill(href, title));
+        const { selectionStart: caret, selectionEnd: caretEnd } = el;
+        // The caret stays where it was in the text around the pill.
+        const shift = (pos: number) => (pos >= at + pill.length ? pos + titled.length - pill.length : Math.min(pos, at + titled.length));
+        // Put in at once, so the caret can be put back before anything else is typed.
+        flushSync(() => setValue(el.value.slice(0, at) + titled + el.value.slice(at + pill.length)));
+        if (document.activeElement === el) el.setSelectionRange(shift(caret), shift(caretEnd));
+      });
+    });
+  }
 }
 
 /** The backend stores naive UTC (see `utcnow`): read a time without a zone as UTC. */

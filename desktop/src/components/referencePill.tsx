@@ -90,6 +90,39 @@ export function linkPill(href: string, label?: string): RefPillAttrs {
   return { kind: refKind(null, href) ?? "url", href, label: label?.replace(/\s+/g, " ").trim() || href };
 }
 
+// Titles already fetched (or being fetched), by URL. A failed fetch is dropped, so it's tried again next time.
+const URL_TITLE_CACHE = new Map<string, Promise<string | null>>();
+
+/**
+ * The title of the web page at `url`, as the backend reads it (see `/api/url-metadata`), or null if it has none or
+ * couldn't be fetched. Each URL is fetched once; `signal` stops waiting for it, not the shared fetch.
+ */
+export function fetchUrlTitle(url: string, signal?: AbortSignal): Promise<string | null> {
+  let title = URL_TITLE_CACHE.get(url);
+  if (!title) {
+    title = getJson<{ title: string | null }>(`/api/url-metadata?url=${encodeURIComponent(url)}`)
+      .then((metadata) => metadata.title?.replace(/\s+/g, " ").trim() || null)
+      .catch(() => {
+        URL_TITLE_CACHE.delete(url);
+        return null;
+      });
+    URL_TITLE_CACHE.set(url, title);
+  }
+  if (!signal) return title;
+  return new Promise((resolve, reject) => {
+    const abort = () => reject(new DOMException("Aborted", "AbortError"));
+    if (signal.aborted) return abort();
+    signal.addEventListener("abort", abort, { once: true });
+    void title.then((value) => {
+      signal.removeEventListener("abort", abort);
+      resolve(value);
+    });
+  });
+}
+
+/** Whether `url` is a web page's, whose title can be fetched. */
+export const isWebUrl = (url: string) => /^https?:\/\//i.test(url);
+
 /** Web URLs in running text. Matches take the trailing punctuation of a sentence too: see `trimUrl`. */
 export const BARE_URL = /https?:\/\/[^\s<>"'`]+/g;
 

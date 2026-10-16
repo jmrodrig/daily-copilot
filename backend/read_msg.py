@@ -9,6 +9,7 @@ Uses `extract_msg` (imported when a file is read, so the backend runs without it
 """
 
 import argparse
+import html
 import json
 import re
 import sys
@@ -38,6 +39,63 @@ def _html(value: Any) -> str | None:
     if not value:
         return None
     return value.decode("utf-8", errors="replace") if isinstance(value, bytes) else str(value)
+
+
+_SKIPPED_TAGS = ("script", "style", "head", "meta", "title")
+_BLOCK_TAGS = (
+    "p", "div", "tr", "li", "ul", "ol", "table", "blockquote", "pre", "hr",
+    "h1", "h2", "h3", "h4", "h5", "h6", "dt", "dd", "section", "article", "header", "footer",
+)
+
+
+def _normalize_text(text: str) -> str:
+    """Trim each line, drop non-breaking spaces and keep at most one blank line between paragraphs."""
+    lines = [re.sub(r"[ \t\f\v\u00a0]+", " ", line).strip() for line in text.replace("\r\n", "\n").split("\n")]
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
+
+
+def _html_to_text_bs4(html_str: str) -> str:
+    from bs4 import BeautifulSoup, Comment
+
+    soup = BeautifulSoup(html_str, "html.parser")
+    for tag in soup.find_all(_SKIPPED_TAGS):
+        tag.decompose()
+    for comment in soup.find_all(string=lambda s: isinstance(s, Comment)):
+        comment.extract()
+    # Line breaks in the HTML source are just spaces; only the markup decides where lines end.
+    for string in soup.find_all(string=True):
+        if not string.find_parent("pre"):
+            string.replace_with(re.sub(r"\s+", " ", str(string)))
+    for br in soup.find_all("br"):
+        br.replace_with("\n")
+    for tag in soup.find_all(_BLOCK_TAGS):
+        tag.append("\n")
+    for cell in soup.find_all(("td", "th")):
+        cell.append("\t")
+    return soup.get_text()
+
+
+def _html_to_text_re(html_str: str) -> str:
+    skipped, blocks = "|".join(_SKIPPED_TAGS), "|".join(_BLOCK_TAGS)
+    text = re.sub(r"<!--.*?-->", "", html_str, flags=re.S)
+    text = re.sub(rf"<({skipped})\b[^>]*>.*?</\1\s*>", "", text, flags=re.S | re.I)
+    text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"<br\b[^>]*>", "\n", text, flags=re.I)
+    text = re.sub(rf"</({blocks})\s*>|<hr\b[^>]*>", "\n", text, flags=re.I)
+    text = re.sub(r"</t[dh]\s*>", "\t", text, flags=re.I)
+    return html.unescape(re.sub(r"<[^>]+>", "", text))
+
+
+def html_to_plain_text(html_str: str) -> str:
+    """Readable plain text from an HTML email body: no scripts, styles or tags, entities decoded, one line per
+    paragraph. Uses BeautifulSoup when it's installed, a regular-expression fallback otherwise."""
+    if not html_str:
+        return ""
+    try:
+        text = _html_to_text_bs4(html_str)
+    except ImportError:
+        text = _html_to_text_re(html_str)
+    return _normalize_text(text)
 
 
 def _safe_filename(name: str, taken: set[str]) -> str:
@@ -100,6 +158,10 @@ def read_msg(file_path: str | Path, extract_attachments_dir: str | Path | None =
                 item["extracted_path"] = None
             attachments.append(item)
 
+        html_body = _html(msg.htmlBody)
+        body = msg.body or ""
+        if not body.strip() and html_body:
+            body = html_to_plain_text(html_body)
         return {
             "subject": msg.subject or "",
             "sender": msg.sender or "",
@@ -107,8 +169,8 @@ def read_msg(file_path: str | Path, extract_attachments_dir: str | Path | None =
             "cc": _recipients(msg.cc),
             "bcc": _recipients(msg.bcc),
             "date": _date(msg.date),
-            "body": msg.body or "",
-            "html_body": _html(msg.htmlBody),
+            "body": body,
+            "html_body": html_body,
             "attachments": attachments,
         }
     except MsgReadError:
@@ -148,7 +210,7 @@ def format_msg_for_display(data: dict[str, Any]) -> str:
             lines.append(f"  - {item['filename']} ({_size(item.get('size'))}){saved}")
     body = (data.get("body") or "").strip()
     if not body and data.get("html_body"):
-        body = "(no plain text body; HTML body available with --json)"
+        body = html_to_plain_text(data["html_body"])
     lines += ["", "-" * 60, body or "(empty body)"]
     return "\n".join(lines)
 

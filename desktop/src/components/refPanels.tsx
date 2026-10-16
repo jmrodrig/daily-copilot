@@ -5,7 +5,7 @@ import { checkLocalFile, isLocalHref, type LocalFileCheck } from "../lib/localFi
 import { AssigneeSelect, usePeople } from "../lib/people";
 import { announceTaskChange, STATUS_LABELS, type ProjectOption, type TaskCreate, type TaskItem } from "../lib/tasks";
 import { ProjectPicker } from "./ProjectPicker";
-import { noteHref, PillIcon, PILL_NAMES, taskHref, type RefPillAttrs } from "./referencePill";
+import { fetchUrlTitle, isWebUrl, noteHref, PillIcon, PILL_NAMES, taskHref, type RefPillAttrs } from "./referencePill";
 
 /**
  * Where a panel's task or link goes, and where to show the panel (viewport px): the selected text (`from`..`to`,
@@ -331,12 +331,12 @@ export function LinkPanel({
   // The last title filled in for the user, so a newer page's title can replace it but never their own text.
   const fetchedTitle = useRef("");
   useEffect(() => {
-    if (!url || !/^https?:/i.test(url)) return;
+    if (!url || !isWebUrl(url)) return;
     const controller = new AbortController();
     // Wait for a pause in the typing; a pasted URL is fetched almost at once.
     const timer = setTimeout(() => {
-      getJson<{ title: string | null }>(`/api/url-metadata?url=${encodeURIComponent(url)}`, controller.signal)
-        .then(({ title }) => {
+      fetchUrlTitle(url, controller.signal)
+        .then((title) => {
           if (!title) return;
           setDisplayText((text) => {
             if (text.trim() && text !== fetchedTitle.current) return text;

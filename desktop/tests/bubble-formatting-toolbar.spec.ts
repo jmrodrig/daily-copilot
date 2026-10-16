@@ -39,7 +39,7 @@ test('selected text gets a formatting bar: heading, bold, color and lists, keepi
 
   const bar = page.getByRole('toolbar', { name: 'Format selection' });
   await expect(bar).toBeVisible();
-  await expect(bar.getByRole('button', { name: 'Heading 2' })).toBeVisible();
+  await expect(bar.getByRole('button', { name: /Text format/ })).toBeVisible();
 
   await bar.getByRole('button', { name: /Bold/ }).click();
   await expect(page.locator('.note-body strong')).toHaveText('Hull');
@@ -53,7 +53,8 @@ test('selected text gets a formatting bar: heading, bold, color and lists, keepi
   await bar.getByRole('button', { name: 'Blue' }).click();
   await expect(page.locator('.note-body span[style*="color"]')).toHaveText('Hull');
 
-  await bar.getByRole('button', { name: 'Heading 2' }).click();
+  await bar.getByRole('button', { name: /Text format/ }).click();
+  await bar.getByRole('option', { name: /Heading 2/ }).click();
   await expect(page.locator('.note-body h2')).toContainText('Hull lines review');
 
   await bar.getByRole('button', { name: 'Bullet list' }).click();

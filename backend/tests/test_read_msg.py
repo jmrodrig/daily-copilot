@@ -1,6 +1,7 @@
 """The Outlook .msg reader (`read_msg`), with `extract_msg` faked so no real .msg file is needed."""
 
 import json
+import sys
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -103,7 +104,45 @@ def test_format_msg_for_display(msg_file):
 
     empty = read_msg.format_msg_for_display({"subject": "", "body": "", "html_body": "<p>x</p>"})
     assert "Subject: (no subject)" in empty
-    assert "HTML body available" in empty
+    assert empty.rstrip().endswith("x")
+    assert "HTML body available" not in empty
+
+    assert read_msg.format_msg_for_display({"body": " ", "html_body": None}).rstrip().endswith("(empty body)")
+
+
+HTML_ONLY = b"<p>Inspected <b>keel</b> &amp; <i>rudder</i>.</p>"
+
+
+def test_html_only_message_body_is_extracted(tmp_path, monkeypatch):
+    path = tmp_path / "html.msg"
+    path.write_bytes(b"not really OLE")
+    monkeypatch.setattr(extract_msg, "openMsg", lambda _path: fake_message(body="", htmlBody=HTML_ONLY))
+
+    data = read_msg.read_msg(path)
+
+    assert data["body"] == "Inspected keel & rudder."
+    assert data["html_body"] == HTML_ONLY.decode()
+    assert read_msg.format_msg_for_display(data).rstrip().endswith("Inspected keel & rudder.")
+
+
+def test_plain_text_body_is_kept_over_html(msg_file):
+    assert read_msg.read_msg(msg_file)["body"] == "Hi Sam,\n\nDrawings attached.\n"
+
+
+@pytest.mark.parametrize("use_bs4", [True, False])
+def test_html_to_plain_text(monkeypatch, use_bs4):
+    if not use_bs4:
+        monkeypatch.setitem(sys.modules, "bs4", None)  # importing it now raises ImportError
+    html = (
+        "<html><head><title>t</title><style>p {color: red}</style></head><body>"
+        "<!--[if mso]>hidden<![endif]--><script>alert(1)</script>"
+        "<p class=MsoNormal>Hi&nbsp;Sam,\r\n  the hull</p><p></p><p></p><p>is <b>dry</b>.<br>Thanks</p>"
+        "<table><tr><td>Keel</td><td>OK</td></tr></table></body></html>"
+    )
+
+    assert read_msg.html_to_plain_text(html) == "Hi Sam, the hull\n\nis dry.\nThanks\nKeel OK"
+    assert read_msg.html_to_plain_text("") == ""
+    assert read_msg.html_to_plain_text("<p>a</p><br><br><br><br><p>b</p>") == "a\n\nb"
 
 
 def test_cli(msg_file, tmp_path, capsys):
@@ -148,6 +187,19 @@ def test_read_local_file_reads_outlook_messages(msg_file):
     assert result["path"] == str(msg_file) and result["size"] == len(b"not really OLE")
     assert "Subject: Keel drawings" in result["content"]
     assert "Drawings attached." in result["content"]
+
+
+def test_read_local_file_reads_html_only_outlook_messages(tmp_path, monkeypatch):
+    import local_files
+
+    path = tmp_path / "html.msg"
+    path.write_bytes(b"not really OLE")
+    monkeypatch.setattr(extract_msg, "openMsg", lambda _path: fake_message(body=None, htmlBody=HTML_ONLY))
+
+    result = local_files.read_local_file(str(path))
+
+    assert "Inspected keel & rudder." in result["content"]
+    assert "HTML body available" not in result["content"]
 
 
 def test_read_local_file_reports_unreadable_outlook_messages(tmp_path):

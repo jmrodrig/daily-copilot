@@ -22,6 +22,8 @@ async function setupNote(page: Page, content: string) {
   await page.route('**/api/tasks*', (route) => route.fulfill({ json: [] }));
   await page.route('**/api/projects*', (route) => route.fulfill({ json: [] }));
   await page.route('**/api/notes/recent*', (route) => route.fulfill({ json: [] }));
+  // Pages without a title: a pasted URL stays the pill's label.
+  await page.route('**/api/url-metadata*', (route) => route.fulfill({ json: { title: null } }));
   await page.goto('http://localhost:5173/note?space=1&path=C7801/test.md');
   return { saved };
 }
@@ -88,6 +90,7 @@ test('a URL pasted into a comment goes in as a pill and shows as one', async ({ 
   await page.route('**/api/spaces', (route) => route.fulfill({ json: [{ id: 1, name: 'Default', status_flow: null, custom_fields_schema: [] }] }));
   await page.route('**/api/people?*', (route) => route.fulfill({ json: [] }));
   await page.route('**/api/notes?*', (route) => route.fulfill({ json: [] }));
+  await page.route('**/api/url-metadata*', (route) => route.fulfill({ json: { title: null } }));
   await page.goto('http://localhost:5173/tasks/kanban?taskId=7');
 
   const panel = page.getByRole('region', { name: 'Task details' });

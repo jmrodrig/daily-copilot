@@ -31,6 +31,8 @@ import MediaLightbox, { ExpandButton, isPdfUrl, MarkupOverlay } from "./MediaLig
 import { LinkPanel, panelPosition, TaskPanel, type PanelDraft } from "./refPanels";
 import {
   BARE_URL,
+  fetchUrlTitle,
+  isWebUrl,
   linkPill,
   pastedLink,
   pillBareUrlsInMarkdown,
@@ -183,10 +185,14 @@ export default function NoteEditor({
       // A pasted screenshot or a dropped file is uploaded to the space rather than inlined as base64, a pasted link
       // becomes a link pill (over the selected text, which labels it), and markdown pasted as plain text (with no HTML
       // beside it) is read as markdown rather than taken literally. Local paths pasted as inline code or links become
-      // pills once the paste has landed (see pillLocalPathsRef).
+      // pills once the paste has landed (see pillLocalPathsRef), and web-page pills labelled by their URL get the
+      // page's title (see pillUrlTitlesRef).
       handlePaste: (view, event) => {
         if (!view.editable) return false;
-        setTimeout(() => void pillLocalPathsRef.current());
+        setTimeout(() => {
+          void pillLocalPathsRef.current();
+          void pillUrlTitlesRef.current();
+        });
         const files = extractFiles(event.clipboardData);
         if (files.length) {
           event.preventDefault();
@@ -257,6 +263,27 @@ export default function NoteEditor({
     for (const { from, to, path, label } of localPathRanges(state.doc).reverse()) {
       const name = found.get(path);
       if (name) tr.replaceWith(from, to, state.schema.nodes.referencePill.create({ kind: "url", href: path, label: label ?? name }));
+    }
+    if (tr.docChanged) editor.view.dispatch(tr.setMeta("addToHistory", false));
+  };
+
+  /**
+   * Label web-page pills that show their bare URL (a pasted link, say) with the page's title, as the link panel does.
+   * Like pillLocalPathsRef, not an edit of its own to undo. A page without a title keeps its URL.
+   */
+  const pillUrlTitlesRef = useRef<() => Promise<void>>(async () => {});
+  pillUrlTitlesRef.current = async () => {
+    if (!editor || editor.isDestroyed) return;
+    const urls = [...new Set(untitledUrlPills(editor.state.doc).map((pill) => pill.href))];
+    if (!urls.length) return;
+    const titles = await Promise.all(urls.map((url) => fetchUrlTitle(url)));
+    if (editor.isDestroyed) return;
+    const found = new Map(urls.flatMap((url, i) => (titles[i] ? [[url, titles[i]] as const] : [])));
+    // Found afresh: the doc may have changed meanwhile. A node's markup changes in place, so positions hold.
+    const tr = editor.state.tr;
+    for (const { pos, node, href } of untitledUrlPills(editor.state.doc)) {
+      const title = found.get(href);
+      if (title) tr.setNodeMarkup(pos, undefined, { ...node.attrs, label: title });
     }
     if (tr.docChanged) editor.view.dispatch(tr.setMeta("addToHistory", false));
   };
@@ -452,7 +479,7 @@ function SelectionMenu({ editor, onOpen }: { editor: Editor; onOpen: (type: "tas
       bulletList: e.isActive("bulletList"),
       orderedList: e.isActive("orderedList"),
       taskList: e.isActive("taskList"),
-      heading: HEADING_LEVELS.find((level) => e.isActive("heading", { level })) ?? 0,
+      heading: (HEADING_LEVELS.find((level) => e.isActive("heading", { level })) ?? 0) as HeadingLevel,
       color: (e.getAttributes("textStyle").color as string | undefined) ?? null,
     }),
   });
@@ -470,20 +497,10 @@ function SelectionMenu({ editor, onOpen }: { editor: Editor; onOpen: (type: "tas
     >
       {/* Each keeps the editor's selection until the click lands (see ToolButton). */}
       <div role="toolbar" aria-label="Format selection" className="flex items-center gap-0.5">
-        <ToolButton label="Normal text" on={active.heading === 0} disabled={false} onClick={() => chain().setParagraph().run()}>
-          <span className="text-[13px]">T</span>
-        </ToolButton>
-        {HEADING_LEVELS.map((level) => (
-          <ToolButton
-            key={level}
-            label={`Heading ${level}`}
-            on={active.heading === level}
-            disabled={false}
-            onClick={() => chain().toggleHeading({ level }).run()}
-          >
-            <span className="text-[13px] font-semibold">H{level}</span>
-          </ToolButton>
-        ))}
+        <HeadingDropdown
+          heading={active.heading}
+          onSelect={(level) => (level === 0 ? chain().setParagraph().run() : chain().setHeading({ level }).run())}
+        />
         <Divider />
         <ToolButton label="Bold (Ctrl+B)" on={active.bold} disabled={false} onClick={() => chain().toggleBold().run()}>
           <span className="font-bold">B</span>
@@ -1082,6 +1099,18 @@ function basename(path: string): string {
   return path.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || path;
 }
 
+/** The web-page pills in `doc` labelled by nothing but their URL, with where each is. */
+function untitledUrlPills(doc: ProseMirrorNode): { pos: number; node: ProseMirrorNode; href: string }[] {
+  const pills: { pos: number; node: ProseMirrorNode; href: string }[] = [];
+  doc.descendants((node, pos) => {
+    if (node.type.name !== "referencePill") return true;
+    const { kind, href, label } = node.attrs as RefPillAttrs;
+    if (kind === "url" && isWebUrl(href) && (!label.trim() || label === href)) pills.push({ pos, node, href });
+    return false;
+  });
+  return pills;
+}
+
 /**
  * A transaction repairing a doc the schema doesn't allow, or `null` if it's valid: runs of inline nodes (an image
  * or text) sitting loose in the doc are gathered into paragraphs.
@@ -1466,6 +1495,94 @@ function ToolButton({
     >
       {children}
     </button>
+  );
+}
+
+type HeadingLevel = 0 | (typeof HEADING_LEVELS)[number];
+
+const HEADING_OPTIONS: { level: HeadingLevel; name: string; tag: string }[] = [
+  { level: 0, name: "Normal text", tag: "T" },
+  ...HEADING_LEVELS.map((level) => ({ level, name: `Heading ${level}`, tag: `H${level}` })),
+];
+
+/**
+ * The block type as one compact control, for the selection menu: the current type's tag (`T`, `H1`…) opening a list
+ * of them all. Like ToolButton, it keeps the editor's selection while it's clicked.
+ */
+function HeadingDropdown({
+  heading,
+  disabled = false,
+  onSelect,
+}: {
+  heading: HeadingLevel;
+  disabled?: boolean;
+  onSelect: (level: HeadingLevel) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: MouseEvent) => {
+      if (!ref.current?.contains(e.target as Node)) setOpen(false);
+    };
+    const escape = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", escape);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("keydown", escape);
+    };
+  }, [open]);
+  const current = HEADING_OPTIONS.find((option) => option.level === heading) ?? HEADING_OPTIONS[0];
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        title="Text format"
+        aria-label={`Text format: ${current.name}`}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        disabled={disabled}
+        onMouseDown={(e) => e.preventDefault()} // keep the editor's selection
+        onClick={() => setOpen((o) => !o)}
+        className={`flex h-8 min-w-8 items-center justify-center gap-0.5 rounded px-1.5 text-[13px] font-semibold disabled:cursor-not-allowed disabled:opacity-40 ${
+          open ? "bg-accent/[0.16] text-accent-soft" : "text-text-secondary hover:bg-surface-raised hover:text-text-primary"
+        }`}
+      >
+        {current.tag}
+        <span aria-hidden className="text-[10px] opacity-70">
+          ▾
+        </span>
+      </button>
+      {open && (
+        <div
+          role="listbox"
+          aria-label="Text format"
+          className="absolute left-0 top-full z-20 mt-1 flex w-40 flex-col rounded-md border border-border-default bg-surface-raised p-1 shadow-lg"
+        >
+          {HEADING_OPTIONS.map((option) => (
+            <button
+              key={option.level}
+              type="button"
+              role="option"
+              aria-selected={option.level === heading}
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => {
+                onSelect(option.level);
+                setOpen(false);
+              }}
+              className={`flex h-8 items-center gap-2 rounded px-2 text-left text-[14px] ${
+                option.level === heading ? "bg-accent/[0.16] text-accent-soft" : "text-text-secondary hover:bg-surface-hover hover:text-text-primary"
+              }`}
+            >
+              <span className="w-6 text-[12px] font-semibold text-text-muted">{option.tag}</span>
+              {option.name}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
