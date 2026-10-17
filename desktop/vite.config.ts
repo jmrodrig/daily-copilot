@@ -13,6 +13,8 @@ export default defineConfig({
         enabled: true
       },
       includeAssets: ["favicon.ico", "favicon.svg", "apple-touch-icon.png"],
+      // The app's one bundle has outgrown workbox's 2 MiB default; past it the bundle isn't precached and the build fails.
+      workbox: { maximumFileSizeToCacheInBytes: 4 * 1024 * 1024 },
       manifest: {
         name: "Daily Copilot",
         short_name: "Copilot",

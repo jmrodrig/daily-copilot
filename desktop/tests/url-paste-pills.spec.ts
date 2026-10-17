@@ -29,14 +29,15 @@ async function setupNote(page: Page, content: string) {
 }
 
 test('a URL pasted at the caret goes in as a link pill', async ({ page }) => {
+  // No page title: the pill gets one made from the URL (here, the site's name).
   const { saved } = await setupNote(page, 'See ');
   const editor = page.locator('.note-body');
   await editor.click();
   await page.keyboard.press('End');
   await paste(editor, 'https://github.com');
 
-  await expect(editor.locator('.reference-pill.url')).toHaveText('https://github.com');
-  await expect.poll(() => saved.at(-1) ?? '', { timeout: 6000 }).toContain('[https://github.com](https://github.com "ref:url")');
+  await expect(editor.locator('.reference-pill.url')).toHaveText('GitHub');
+  await expect.poll(() => saved.at(-1) ?? '', { timeout: 6000 }).toContain('[GitHub](https://github.com "ref:url")');
 });
 
 test('a URL pasted over selected text links that text as a pill', async ({ page }) => {
@@ -64,7 +65,7 @@ test('bare URLs in pasted text become pills', async ({ page }) => {
   await editor.click();
   await paste(editor, 'Specs at https://example.com/specs, and more\nsecond line');
 
-  await expect(editor.locator('.reference-pill.url')).toHaveText('https://example.com/specs');
+  await expect(editor.locator('.reference-pill.url')).toHaveText('Specs · example.com');
   await expect(editor).toContainText(', and more');
 });
 
@@ -98,11 +99,11 @@ test('a URL pasted into a comment goes in as a pill and shows as one', async ({ 
   await box.fill('Quote: ');
   await box.press('End');
   await paste(box, 'https://supplier.example/quote');
-  await expect(box).toHaveValue('Quote: [https://supplier.example/quote](https://supplier.example/quote "ref:url")');
+  await expect(box).toHaveValue('Quote: [Quote · supplier.example](https://supplier.example/quote "ref:url")');
 
   await panel.getByRole('button', { name: 'Comment' }).click();
   await expect.poll(() => comments.length).toBe(1);
   const pill = panel.locator('li .reference-pill.url');
-  await expect(pill).toHaveText('https://supplier.example/quote');
+  await expect(pill).toHaveText('Quote · supplier.example');
   await expect(pill).toHaveAttribute('href', 'https://supplier.example/quote');
 });

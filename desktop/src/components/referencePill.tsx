@@ -90,21 +90,86 @@ export function linkPill(href: string, label?: string): RefPillAttrs {
   return { kind: refKind(null, href) ?? "url", href, label: label?.replace(/\s+/g, " ").trim() || href };
 }
 
+// Sites whose domain doesn't read as their name (a subdomain, `pt.wikipedia.org`, counts as its site). As the
+// backend's `_SITE_NAMES`.
+const SITE_NAMES: Record<string, string> = {
+  "publico.pt": "Público",
+  "expresso.pt": "Expresso",
+  "observador.pt": "Observador",
+  "rtp.pt": "RTP",
+  "github.com": "GitHub",
+  "wikipedia.org": "Wikipedia",
+  "theverge.com": "The Verge",
+  "medium.com": "Medium",
+  "nytimes.com": "The New York Times",
+  "theguardian.com": "The Guardian",
+  "bbc.co.uk": "BBC",
+  "bbc.com": "BBC",
+  "youtube.com": "YouTube",
+  "reddit.com": "Reddit",
+  "stackoverflow.com": "Stack Overflow",
+  "linkedin.com": "LinkedIn",
+};
+// Path parts that say nothing of the page.
+const BLAND_SLUGS = new Set(["index", "default", "home", "amp"]);
+
+/**
+ * A readable title from a URL alone, for a page that can't be fetched: its article slug and site, as in
+ * `.../2026/10/17/sociedade/noticia/quase-metade-vagas-2191629` -> `Quase metade vagas · Público`, or just the site's
+ * name when the path says nothing. As the backend's `title_from_url_slug`.
+ */
+export function titleFromUrlSlug(url: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return url;
+  }
+  const host = parsed.hostname.toLowerCase().replace(/^www\./, "");
+  const domain = Object.keys(SITE_NAMES).find((d) => host === d || host.endsWith(`.${d}`));
+  const site = (domain ? SITE_NAMES[domain] : host) || url;
+  const unquote = (part: string) => {
+    try {
+      return decodeURIComponent(part);
+    } catch {
+      return part;
+    }
+  };
+  // Dates (/2026/10/17/) and ids are no title.
+  const segments = parsed.pathname
+    .split("/")
+    .map((part) => unquote(part).trim())
+    .filter((part) => part && !/^\d+$/.test(part));
+  for (const segment of segments.reverse()) {
+    const slug = segment
+      .replace(/\.(?:s?html?|php\d?|aspx?|jsp|cfm)$/i, "")
+      // A trailing article id or hash: `...-preencher-2191629`, `...-title-1a2b3c4d5e6f`.
+      .replace(/[-_](?:[0-9]+|[a-f0-9]{8,})$/i, "");
+    const words = slug.replace(/[-_+]+/g, " ").replace(/\s+/g, " ").trim();
+    if (words.length >= 3 && /\p{L}/u.test(words) && !BLAND_SLUGS.has(words.toLowerCase())) {
+      return `${words[0].toUpperCase()}${words.slice(1)} · ${site}`;
+    }
+  }
+  return site;
+}
+
 // Titles already fetched (or being fetched), by URL. A failed fetch is dropped, so it's tried again next time.
 const URL_TITLE_CACHE = new Map<string, Promise<string | null>>();
 
 /**
- * The title of the web page at `url`, as the backend reads it (see `/api/url-metadata`), or null if it has none or
- * couldn't be fetched. Each URL is fetched once; `signal` stops waiting for it, not the shared fetch.
+ * The title of the web page at `url`, as the backend reads it (see `/api/url-metadata`); if it has none or the backend
+ * can't be reached, one made from the URL itself (see titleFromUrlSlug). Null only for a URL that isn't a web page's.
+ * Each URL is fetched once; `signal` stops waiting for it, not the shared fetch.
  */
 export function fetchUrlTitle(url: string, signal?: AbortSignal): Promise<string | null> {
   let title = URL_TITLE_CACHE.get(url);
   if (!title) {
+    const fallback = () => (isWebUrl(url) ? titleFromUrlSlug(url) : null);
     title = getJson<{ title: string | null }>(`/api/url-metadata?url=${encodeURIComponent(url)}`)
-      .then((metadata) => metadata.title?.replace(/\s+/g, " ").trim() || null)
+      .then((metadata) => metadata.title?.replace(/\s+/g, " ").trim() || fallback())
       .catch(() => {
         URL_TITLE_CACHE.delete(url);
-        return null;
+        return fallback();
       });
     URL_TITLE_CACHE.set(url, title);
   }

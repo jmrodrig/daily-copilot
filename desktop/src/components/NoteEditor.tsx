@@ -39,6 +39,7 @@ import {
   pillContent,
   ReferencePill,
   taskHref,
+  titleFromUrlSlug,
   trimUrl,
   type RefPillAttrs,
 } from "./referencePill";
@@ -283,7 +284,7 @@ export default function NoteEditor({
     const tr = editor.state.tr;
     for (const { pos, node, href } of untitledUrlPills(editor.state.doc)) {
       const title = found.get(href);
-      if (title) tr.setNodeMarkup(pos, undefined, { ...node.attrs, label: title });
+      if (title && title !== node.attrs.label) tr.setNodeMarkup(pos, undefined, { ...node.attrs, label: title });
     }
     if (tr.docChanged) editor.view.dispatch(tr.setMeta("addToHistory", false));
   };
@@ -1099,13 +1100,16 @@ function basename(path: string): string {
   return path.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || path;
 }
 
-/** The web-page pills in `doc` labelled by nothing but their URL, with where each is. */
+/**
+ * The web-page pills in `doc` labelled by nothing but their URL (or the title made from it, which the page's own title
+ * may yet replace), with where each is.
+ */
 function untitledUrlPills(doc: ProseMirrorNode): { pos: number; node: ProseMirrorNode; href: string }[] {
   const pills: { pos: number; node: ProseMirrorNode; href: string }[] = [];
   doc.descendants((node, pos) => {
     if (node.type.name !== "referencePill") return true;
     const { kind, href, label } = node.attrs as RefPillAttrs;
-    if (kind === "url" && isWebUrl(href) && (!label.trim() || label === href)) pills.push({ pos, node, href });
+    if (kind === "url" && isWebUrl(href) && (!label.trim() || label === href || label === titleFromUrlSlug(href))) pills.push({ pos, node, href });
     return false;
   });
   return pills;

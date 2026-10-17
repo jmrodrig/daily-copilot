@@ -5,6 +5,7 @@ import json
 import os
 import re
 import secrets
+import urllib.parse
 import urllib.request
 from urllib.parse import quote
 from collections.abc import AsyncIterator
@@ -129,24 +130,112 @@ def models() -> list[str]:
 _URL_TIMEOUT_SECONDS = 5
 # Enough for the <head> of any page; the title is never further in.
 _URL_MAX_BYTES = 512 * 1024
+# A browser's headers: news sites behind a WAF turn away a bare `Mozilla/5.0` with a 403 or a JavaScript challenge.
+_URL_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9,pt-PT;q=0.8,pt;q=0.7",
+    "Sec-Ch-Ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"Windows"',
+    "Upgrade-Insecure-Requests": "1",
+}
 _TITLE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
+_META_TAG = re.compile(r"<meta\b[^>]*>", re.IGNORECASE)
+_TAG_ATTR = re.compile(r"""([\w:-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')""")
+# The <meta> titles a page may have, best first (OpenGraph and Twitter cards name the article, not the site's page).
+_META_TITLE_KEYS = ("og:title", "twitter:title", "title")
+# What a WAF, CDN or server says in place of the page's title.
+_NOT_A_TITLE = re.compile(
+    r"^(?:40[134]\b|50[023]\b|just a moment|attention required|access denied|security check"
+    r"|error: the request could not be satisfied|blocked|shieldsquare)",
+    re.IGNORECASE,
+)
+# Sites whose domain doesn't read as their name (a subdomain, `pt.wikipedia.org`, counts as its site).
+_SITE_NAMES = {
+    "publico.pt": "Público",
+    "expresso.pt": "Expresso",
+    "observador.pt": "Observador",
+    "rtp.pt": "RTP",
+    "github.com": "GitHub",
+    "wikipedia.org": "Wikipedia",
+    "theverge.com": "The Verge",
+    "medium.com": "Medium",
+    "nytimes.com": "The New York Times",
+    "theguardian.com": "The Guardian",
+    "bbc.co.uk": "BBC",
+    "bbc.com": "BBC",
+    "youtube.com": "YouTube",
+    "reddit.com": "Reddit",
+    "stackoverflow.com": "Stack Overflow",
+    "linkedin.com": "LinkedIn",
+}
+# Path parts that say nothing of the page.
+_BLAND_SLUGS = {"index", "default", "home", "amp"}
+
+
+def _site_name(host: str) -> str:
+    """A site's name from its host: `www.publico.pt` -> `Público`, `example.com` -> `example.com`."""
+    host = host.lower().removeprefix("www.")
+    for domain, name in _SITE_NAMES.items():
+        if host == domain or host.endswith(f".{domain}"):
+            return name
+    return host
+
+
+def title_from_url_slug(url: str) -> str:
+    """A readable title from a URL alone, for a page that can't be fetched: its article slug and site, as in
+    `.../2026/10/17/sociedade/noticia/quase-metade-vagas-2191629` -> `Quase metade vagas · Público`, or just the site's
+    name when the path says nothing."""
+    parsed = urllib.parse.urlparse(url)
+    site = _site_name(parsed.hostname or "") or url
+    segments = [urllib.parse.unquote(part) for part in parsed.path.split("/")]
+    # Dates (/2026/10/17/) and ids are no title.
+    segments = [part for part in segments if part.strip() and not part.strip().isdigit()]
+    for segment in reversed(segments):
+        slug = re.sub(r"\.(?:s?html?|php\d?|aspx?|jsp|cfm)$", "", segment.strip(), flags=re.IGNORECASE)
+        # A trailing article id or hash: `...-preencher-2191629`, `...-title-1a2b3c4d5e6f`.
+        slug = re.sub(r"[-_](?:[0-9]+|[a-f0-9]{8,})$", "", slug, flags=re.IGNORECASE)
+        words = " ".join(re.sub(r"[-_+]+", " ", slug).split())
+        if len(words) >= 3 and re.search(r"[^\W\d_]", words) and words.lower() not in _BLAND_SLUGS:
+            return f"{words[0].upper()}{words[1:]} · {site}"
+    return site
+
+
+def _page_title(page: str) -> str:
+    """The page's own title, from its OpenGraph, Twitter or HTML title, or "" if it has none (or the page is a bot
+    challenge or an error page standing in for it)."""
+    metas: dict[str, str] = {}
+    for tag in _META_TAG.findall(page):
+        attrs = {m.group(1).lower(): m.group(2) if m.group(2) is not None else m.group(3) for m in _TAG_ATTR.finditer(tag)}
+        key = (attrs.get("property") or attrs.get("name") or "").lower()
+        if key in _META_TITLE_KEYS and attrs.get("content") and key not in metas:
+            metas[key] = attrs["content"]
+    match = _TITLE.search(page)
+    candidates = [metas.get(key, "") for key in _META_TITLE_KEYS] + [match.group(1) if match else ""]
+    for raw in candidates:
+        title = " ".join(html.unescape(raw).split())
+        if title and not _NOT_A_TITLE.search(title):
+            return title
+    return ""
 
 
 @app.get("/api/url-metadata")
 def url_metadata(url: str) -> UrlMetadata:
-    """The `<title>` of a web page, for a new link pill's display text; `title` is None if it can't be had."""
+    """A web page's title, for a new link pill's display text: its OpenGraph, Twitter or HTML title, or when the page
+    can't be had (a 403, a WAF challenge, no title) one made from the URL itself. `title` is None for a non-web URL."""
     if not re.match(r"https?://", url, re.IGNORECASE):
         return UrlMetadata()
-    request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    request = urllib.request.Request(url, headers=_URL_HEADERS)
     try:
         with urllib.request.urlopen(request, timeout=_URL_TIMEOUT_SECONDS) as response:
             charset = response.headers.get_content_charset() or "utf-8"
             page = response.read(_URL_MAX_BYTES).decode(charset, errors="replace")
-    except Exception:  # noqa: BLE001 - any failure (network, HTTP error, bad charset) just means no title
-        return UrlMetadata()
-    match = _TITLE.search(page)
-    title = " ".join(html.unescape(match.group(1)).split()) if match else ""
-    return UrlMetadata(title=title or None)
+    except Exception:  # noqa: BLE001 - any failure (network, HTTP error, bad charset) just means no page title
+        page = ""
+    return UrlMetadata(title=_page_title(page) or title_from_url_slug(url))
 
 
 def _capture_path(project: str, now: datetime, root: Path) -> str:

@@ -1296,7 +1296,7 @@ class Person(PersonIn):
 
 
 class UrlMetadata(BaseModel):
-    """A web page's metadata for a link pill: its `<title>`, or None when it can't be fetched or has none."""
+    """A web page's metadata for a link pill: its title (from the page, or else from its URL), or None for a non-web URL."""
 
     title: str | None = None
 

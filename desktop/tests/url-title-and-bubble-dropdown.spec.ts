@@ -94,6 +94,32 @@ test('a URL pasted into a note is labelled with its page title once it comes bac
   await expect(editor.locator('.reference-pill.url')).toHaveCount(0);
 });
 
+const PUBLICO = 'https://www.publico.pt/2026/10/17/sociedade/noticia/2025-quase-metade-vagas-incentivos-medicos-ficou-preencher-2191629';
+const PUBLICO_TITLE = '2025 quase metade vagas incentivos medicos ficou preencher · Público';
+
+test('a URL whose page has no title is labelled from its slug', async ({ page }) => {
+  // As when the site's WAF turns the backend away and it has nothing to say: the URL itself makes the title.
+  const { saved } = await setupNote(page, 'Read ');
+  const editor = page.locator('.note-body');
+  await editor.click();
+  await page.keyboard.press('End');
+  await paste(editor, PUBLICO);
+
+  await expect(editor.locator('.reference-pill.url')).toHaveText(PUBLICO_TITLE);
+  await expect.poll(() => saved.at(-1) ?? '', { timeout: 6000 }).toContain(`[${PUBLICO_TITLE}](${PUBLICO} "ref:url")`);
+});
+
+test('a URL is labelled from its slug when the backend cannot be reached', async ({ page }) => {
+  await setupNote(page, 'Read ');
+  await page.route('**/api/url-metadata*', (route) => route.abort());
+  const editor = page.locator('.note-body');
+  await editor.click();
+  await page.keyboard.press('End');
+  await paste(editor, 'https://www.theverge.com/2024/3/15/24101234/apple-antitrust-lawsuit-doj-iphone');
+
+  await expect(editor.locator('.reference-pill.url')).toHaveText('Apple antitrust lawsuit doj iphone · The Verge');
+});
+
 test('a URL pasted over selected text keeps that text as its label', async ({ page }) => {
   await setupNote(page, 'Search on Google today', { 'https://google.com': 'Google Search' });
   await select(page, 10, 16); // "Google"
