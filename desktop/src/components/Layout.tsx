@@ -18,9 +18,9 @@ type Widths = Record<Pane, number>;
 const PANES: Record<Pane, { initial: number; min: number; max: number }> = {
   left: { initial: 264, min: 240, max: 480 },
   task: { initial: 400, min: 360, max: 1200 },
-  chat: { initial: 400, min: 400, max: 1200 },
+  chat: { initial: 400, min: 320, max: 1200 },
 };
-const MAIN_MIN = 400;
+const MAIN_MIN = 320;
 const RAIL = 64; // a collapsed pane
 const KEY_STEP = 16;
 
@@ -134,11 +134,26 @@ export default function Layout() {
     };
   }
 
+  // Prevent text selection across the document and keep the resize cursor stable during drag.
+  useEffect(() => {
+    if (!resizing) return;
+    const prevCursor = document.body.style.cursor;
+    const prevUserSelect = document.body.style.userSelect;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    return () => {
+      document.body.style.cursor = prevCursor;
+      document.body.style.userSelect = prevUserSelect;
+    };
+  }, [resizing]);
+
   /** Grows `pane` by `grow` pixels from its width at the start of the drag, taking the room from the main view. */
   function resizeAgainstMain(pane: Pane, grow: number) {
     const s = start.current;
+    // When shrinking (grow < 0), room in main is not a blocker; when expanding (grow > 0), do not crush main below MAIN_MIN.
     const room = Math.max(0, s.main - MAIN_MIN);
-    setWidths((prev) => ({ ...prev, [pane]: clamp(pane, s[pane] + Math.min(grow, room)) }));
+    const delta = grow > 0 ? Math.min(grow, room) : grow;
+    setWidths((prev) => ({ ...prev, [pane]: clamp(pane, s[pane] + delta) }));
   }
 
   /** Moves the task/chat border by `dx` pixels, trading width between the two. */
@@ -187,7 +202,7 @@ export default function Layout() {
           onReset={() => reset("left")}
         />
       )}
-      <main ref={mainRef} className="min-w-[400px] flex-1 overflow-auto print:overflow-visible">
+      <main ref={mainRef} className="min-w-[320px] flex-1 overflow-auto print:overflow-visible">
         <Outlet />
       </main>
       {rightOfMain && (
@@ -272,6 +287,13 @@ function Divider({
     if (event.currentTarget.hasPointerCapture(event.pointerId)) onMove(event.clientX - startX.current);
   }
 
+  function up(event: PointerEvent<HTMLDivElement>) {
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    onResizingChange(false);
+  }
+
   function nudge(event: KeyboardEvent<HTMLDivElement>) {
     const step = event.key === "ArrowLeft" ? -KEY_STEP : event.key === "ArrowRight" ? KEY_STEP : 0;
     if (step === 0) return;
@@ -289,13 +311,15 @@ function Divider({
       tabIndex={0}
       onPointerDown={down}
       onPointerMove={drag}
+      onPointerUp={up}
+      onPointerCancel={up}
       onLostPointerCapture={() => onResizingChange(false)}
       onDoubleClick={onReset}
       onKeyDown={nudge}
       title="Drag to resize · double-click to reset"
       className="group relative z-10 w-px shrink-0 cursor-col-resize touch-none bg-border-default print:hidden focus:outline-none"
     >
-      <div className="absolute inset-y-0 left-0 -right-1.5" />
+      <div className="absolute inset-y-0 -left-1.5 -right-1.5" />
       <div className="absolute inset-y-0 left-1/2 w-0.5 -translate-x-1/2 opacity-0 group-hover:bg-accent/60 group-hover:opacity-100 group-focus-visible:bg-accent group-focus-visible:opacity-100" />
     </div>
   );

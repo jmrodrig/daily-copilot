@@ -2,8 +2,10 @@
 
 import html
 import json
+import os
 import re
 import secrets
+import urllib.parse
 import urllib.request
 from urllib.parse import quote
 from collections.abc import AsyncIterator
@@ -18,7 +20,7 @@ import anyio.to_thread
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from starlette.background import BackgroundTask
 from sqlalchemy import func, or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 
 import agent
 import file_layer
@@ -26,8 +28,8 @@ import database
 import local_files
 import spaces
 from database import get_db, init_db
-from history import set_source, soft_delete, to_jsonable, utcnow
-from models import FolderMeta, HistoryRecord, Person, Project, SavedPrompt, Space, Task, TaskView, TimeLog
+from history import restore, set_source, soft_delete, to_jsonable, utcnow
+from models import FolderMeta, HistoryRecord, Link, Person, Project, SavedPrompt, Space, Task, TaskView, TimeLog
 import schemas
 from schemas import (
     AccessMode,
@@ -35,6 +37,8 @@ from schemas import (
     ApplyEditResponse,
     CaptureRequest,
     CaptureResponse,
+    ChatHistoryPayload,
+    ChatHistoryResponse,
     ChatRequest,
     ChatResponse,
     CheckInRequest,
@@ -126,24 +130,112 @@ def models() -> list[str]:
 _URL_TIMEOUT_SECONDS = 5
 # Enough for the <head> of any page; the title is never further in.
 _URL_MAX_BYTES = 512 * 1024
+# A browser's headers: news sites behind a WAF turn away a bare `Mozilla/5.0` with a 403 or a JavaScript challenge.
+_URL_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9,pt-PT;q=0.8,pt;q=0.7",
+    "Sec-Ch-Ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"Windows"',
+    "Upgrade-Insecure-Requests": "1",
+}
 _TITLE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
+_META_TAG = re.compile(r"<meta\b[^>]*>", re.IGNORECASE)
+_TAG_ATTR = re.compile(r"""([\w:-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')""")
+# The <meta> titles a page may have, best first (OpenGraph and Twitter cards name the article, not the site's page).
+_META_TITLE_KEYS = ("og:title", "twitter:title", "title")
+# What a WAF, CDN or server says in place of the page's title.
+_NOT_A_TITLE = re.compile(
+    r"^(?:40[134]\b|50[023]\b|just a moment|attention required|access denied|security check"
+    r"|error: the request could not be satisfied|blocked|shieldsquare)",
+    re.IGNORECASE,
+)
+# Sites whose domain doesn't read as their name (a subdomain, `pt.wikipedia.org`, counts as its site).
+_SITE_NAMES = {
+    "publico.pt": "Público",
+    "expresso.pt": "Expresso",
+    "observador.pt": "Observador",
+    "rtp.pt": "RTP",
+    "github.com": "GitHub",
+    "wikipedia.org": "Wikipedia",
+    "theverge.com": "The Verge",
+    "medium.com": "Medium",
+    "nytimes.com": "The New York Times",
+    "theguardian.com": "The Guardian",
+    "bbc.co.uk": "BBC",
+    "bbc.com": "BBC",
+    "youtube.com": "YouTube",
+    "reddit.com": "Reddit",
+    "stackoverflow.com": "Stack Overflow",
+    "linkedin.com": "LinkedIn",
+}
+# Path parts that say nothing of the page.
+_BLAND_SLUGS = {"index", "default", "home", "amp"}
+
+
+def _site_name(host: str) -> str:
+    """A site's name from its host: `www.publico.pt` -> `Público`, `example.com` -> `example.com`."""
+    host = host.lower().removeprefix("www.")
+    for domain, name in _SITE_NAMES.items():
+        if host == domain or host.endswith(f".{domain}"):
+            return name
+    return host
+
+
+def title_from_url_slug(url: str) -> str:
+    """A readable title from a URL alone, for a page that can't be fetched: its article slug and site, as in
+    `.../2026/10/17/sociedade/noticia/quase-metade-vagas-2191629` -> `Quase metade vagas · Público`, or just the site's
+    name when the path says nothing."""
+    parsed = urllib.parse.urlparse(url)
+    site = _site_name(parsed.hostname or "") or url
+    segments = [urllib.parse.unquote(part) for part in parsed.path.split("/")]
+    # Dates (/2026/10/17/) and ids are no title.
+    segments = [part for part in segments if part.strip() and not part.strip().isdigit()]
+    for segment in reversed(segments):
+        slug = re.sub(r"\.(?:s?html?|php\d?|aspx?|jsp|cfm)$", "", segment.strip(), flags=re.IGNORECASE)
+        # A trailing article id or hash: `...-preencher-2191629`, `...-title-1a2b3c4d5e6f`.
+        slug = re.sub(r"[-_](?:[0-9]+|[a-f0-9]{8,})$", "", slug, flags=re.IGNORECASE)
+        words = " ".join(re.sub(r"[-_+]+", " ", slug).split())
+        if len(words) >= 3 and re.search(r"[^\W\d_]", words) and words.lower() not in _BLAND_SLUGS:
+            return f"{words[0].upper()}{words[1:]} · {site}"
+    return site
+
+
+def _page_title(page: str) -> str:
+    """The page's own title, from its OpenGraph, Twitter or HTML title, or "" if it has none (or the page is a bot
+    challenge or an error page standing in for it)."""
+    metas: dict[str, str] = {}
+    for tag in _META_TAG.findall(page):
+        attrs = {m.group(1).lower(): m.group(2) if m.group(2) is not None else m.group(3) for m in _TAG_ATTR.finditer(tag)}
+        key = (attrs.get("property") or attrs.get("name") or "").lower()
+        if key in _META_TITLE_KEYS and attrs.get("content") and key not in metas:
+            metas[key] = attrs["content"]
+    match = _TITLE.search(page)
+    candidates = [metas.get(key, "") for key in _META_TITLE_KEYS] + [match.group(1) if match else ""]
+    for raw in candidates:
+        title = " ".join(html.unescape(raw).split())
+        if title and not _NOT_A_TITLE.search(title):
+            return title
+    return ""
 
 
 @app.get("/api/url-metadata")
 def url_metadata(url: str) -> UrlMetadata:
-    """The `<title>` of a web page, for a new link pill's display text; `title` is None if it can't be had."""
+    """A web page's title, for a new link pill's display text: its OpenGraph, Twitter or HTML title, or when the page
+    can't be had (a 403, a WAF challenge, no title) one made from the URL itself. `title` is None for a non-web URL."""
     if not re.match(r"https?://", url, re.IGNORECASE):
         return UrlMetadata()
-    request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    request = urllib.request.Request(url, headers=_URL_HEADERS)
     try:
         with urllib.request.urlopen(request, timeout=_URL_TIMEOUT_SECONDS) as response:
             charset = response.headers.get_content_charset() or "utf-8"
             page = response.read(_URL_MAX_BYTES).decode(charset, errors="replace")
-    except Exception:  # noqa: BLE001 - any failure (network, HTTP error, bad charset) just means no title
-        return UrlMetadata()
-    match = _TITLE.search(page)
-    title = " ".join(html.unescape(match.group(1)).split()) if match else ""
-    return UrlMetadata(title=title or None)
+    except Exception:  # noqa: BLE001 - any failure (network, HTTP error, bad charset) just means no page title
+        page = ""
+    return UrlMetadata(title=_page_title(page) or title_from_url_slug(url))
 
 
 def _capture_path(project: str, now: datetime, root: Path) -> str:
@@ -616,6 +708,44 @@ def chat_stream(request: ChatRequest, db: Session = Depends(get_db)) -> Streamin
             cancel.cancel()
 
     return StreamingResponse(lines(), media_type="application/x-ndjson")
+
+
+@app.get("/api/chat/history")
+def get_chat_history(
+    space_id: int = Query(default=spaces.DEFAULT_SPACE_ID), db: Session = Depends(get_db)
+) -> ChatHistoryResponse:
+    """The saved conversations of a space for cross-device sync."""
+    _space_id_or_404(db, space_id)
+    history_file = spaces.space_dir(space_id) / "chat_history.json"
+    if not history_file.is_file():
+        return ChatHistoryResponse(space_id=space_id, threads=[], active_id=None)
+    try:
+        data = json.loads(history_file.read_text(encoding="utf-8"))
+        return ChatHistoryResponse(
+            space_id=space_id,
+            threads=data.get("threads", []) if isinstance(data, dict) and isinstance(data.get("threads"), list) else [],
+            active_id=data.get("active_id") if isinstance(data, dict) else None,
+        )
+    except Exception:
+        return ChatHistoryResponse(space_id=space_id, threads=[], active_id=None)
+
+
+@app.put("/api/chat/history")
+def put_chat_history(payload: ChatHistoryPayload, db: Session = Depends(get_db)) -> ChatHistoryResponse:
+    """Save conversations of a space atomically for cross-device sync."""
+    _space_id_or_404(db, payload.space_id)
+    s_dir = spaces.space_dir(payload.space_id)
+    s_dir.mkdir(parents=True, exist_ok=True)
+    history_file = s_dir / "chat_history.json"
+    tmp_file = s_dir / f"chat_history.{secrets.token_hex(4)}.tmp"
+    content = json.dumps(
+        {"space_id": payload.space_id, "threads": payload.threads, "active_id": payload.active_id},
+        ensure_ascii=False,
+        indent=2,
+    )
+    tmp_file.write_text(content, encoding="utf-8")
+    os.replace(tmp_file, history_file)
+    return ChatHistoryResponse(space_id=payload.space_id, threads=payload.threads, active_id=payload.active_id)
 
 
 PROMPTS_SOURCE = "settings"
@@ -1856,6 +1986,154 @@ def delete_task_comment(task_id: int, comment_id: str, db: Session = Depends(get
     comments = schemas.clean_comments(task.comments)
     del comments[_comment_index(comments, comment_id)]
     return _save_comments(db, task, comments)
+
+
+# --- Task dependencies ("blocks" / "blocked by") ------------------------------------
+
+
+def _link_conflict(link: Link, predecessor: Task, successor: Task) -> str | None:
+    """Why the tasks' dates contradict a finish-to-start `link`, or None if they don't (or aren't set).
+
+    With 0-day tolerance, a finish-to-start link requires the successor to start (or, without a start date,
+    be due) strictly after the predecessor finishes plus lag: the predecessor occupies its finish day.
+    """
+    if predecessor.deadline is None:
+        return None
+    earliest = predecessor.deadline + timedelta(days=link.lag_days or 0)
+    finishes = f"{predecessor.title} finishes on {predecessor.deadline.isoformat()}"
+    if successor.start_date is not None:
+        if successor.start_date < earliest:
+            return f"{finishes}, after {successor.title} starts on {successor.start_date.isoformat()}"
+        if successor.start_date == earliest:
+            return f"{finishes}, the same day {successor.title} starts on {successor.start_date.isoformat()}"
+    elif successor.deadline is not None:
+        if successor.deadline < earliest:
+            return f"{finishes}, after {successor.title} is due on {successor.deadline.isoformat()}"
+        if successor.deadline == earliest:
+            return f"{finishes}, the same day {successor.title} is due on {successor.deadline.isoformat()}"
+    return None
+
+
+def _link_out(link: Link, predecessor: Task, successor: Task) -> schemas.LinkWithDetails:
+    reason = _link_conflict(link, predecessor, successor)
+    return schemas.LinkWithDetails(
+        id=link.id,
+        predecessor_id=link.predecessor_id,
+        successor_id=link.successor_id,
+        type=link.type,
+        lag_days=link.lag_days,
+        conflict=reason is not None,
+        conflict_reason=reason,
+    )
+
+
+def _dependency_item(link: Link, other: Task, reason: str | None) -> schemas.TaskDependencyItem:
+    return schemas.TaskDependencyItem(
+        link_id=link.id,
+        task_id=other.id,
+        title=other.title,
+        status=other.status,
+        start_date=other.start_date,
+        deadline=other.deadline,
+        conflict=reason is not None,
+        conflict_reason=reason,
+    )
+
+
+def _creates_cycle(db: Session, predecessor_id: int, successor_id: int) -> bool:
+    """Whether linking `predecessor_id -> successor_id` closes a loop: the successor already leads back to it."""
+    edges: dict[int, list[int]] = {}
+    for pred, succ in db.execute(select(Link.predecessor_id, Link.successor_id).where(Link.deleted_at.is_(None))):
+        edges.setdefault(pred, []).append(succ)
+    seen, stack = set(), [successor_id]
+    while stack:
+        task_id = stack.pop()
+        if task_id == predecessor_id:
+            return True
+        if task_id not in seen:
+            seen.add(task_id)
+            stack.extend(edges.get(task_id, []))
+    return False
+
+
+@app.get("/api/links")
+def list_links(space_id: int = spaces.DEFAULT_SPACE_ID, db: Session = Depends(get_db)) -> list[schemas.LinkWithDetails]:
+    """The live dependencies between a space's tasks, with any date conflicts (for the Gantt chart)."""
+    _space_id_or_404(db, space_id)
+    predecessor, successor = aliased(Task), aliased(Task)
+    rows = db.execute(
+        select(Link, predecessor, successor)
+        .join(predecessor, Link.predecessor_id == predecessor.id)
+        .join(successor, Link.successor_id == successor.id)
+        .where(
+            func.coalesce(predecessor.space_id, spaces.DEFAULT_SPACE_ID) == space_id,
+            func.coalesce(successor.space_id, spaces.DEFAULT_SPACE_ID) == space_id,
+            predecessor.deleted_at.is_(None),
+            successor.deleted_at.is_(None),
+        )
+        .order_by(Link.id)
+    ).all()
+    return [_link_out(link, pred, succ) for link, pred, succ in rows]
+
+
+@app.get("/api/tasks/{task_id}/links")
+def task_links(task_id: int, db: Session = Depends(get_db)) -> schemas.TaskDependenciesResponse:
+    """The tasks a task waits on (`blocked_by`) and the tasks waiting on it (`blocks`)."""
+    task = _get_task(db, task_id)
+    blocked_by = [
+        _dependency_item(link, link.predecessor, _link_conflict(link, link.predecessor, task))
+        for link in sorted(task.predecessor_links, key=lambda link: link.id)
+        if link.predecessor is not None
+    ]
+    blocks = [
+        _dependency_item(link, link.successor, _link_conflict(link, task, link.successor))
+        for link in sorted(task.successor_links, key=lambda link: link.id)
+        if link.successor is not None
+    ]
+    return schemas.TaskDependenciesResponse(blocked_by=blocked_by, blocks=blocks)
+
+
+@app.post("/api/links", status_code=201)
+def create_link(request: schemas.LinkCreate, db: Session = Depends(get_db)) -> schemas.LinkWithDetails:
+    """Make `predecessor_id` block `successor_id`. Both must be live tasks of the same space, and the link
+    must not duplicate another or close a loop."""
+    if request.predecessor_id == request.successor_id:
+        raise HTTPException(status_code=400, detail="A task can't depend on itself")
+    predecessor = _get_task(db, request.predecessor_id)
+    successor = _get_task(db, request.successor_id)
+    if (predecessor.space_id or spaces.DEFAULT_SPACE_ID) != (successor.space_id or spaces.DEFAULT_SPACE_ID):
+        raise HTTPException(status_code=400, detail="Both tasks must be in the same space")
+    # A deleted link between the same tasks still holds the (predecessor, successor) unique key: revive it.
+    link = db.scalars(
+        select(Link)
+        .where(Link.predecessor_id == predecessor.id, Link.successor_id == successor.id)
+        .execution_options(include_deleted=True)
+    ).first()
+    if link is not None and link.deleted_at is None:
+        raise HTTPException(status_code=400, detail="This dependency already exists")
+    if _creates_cycle(db, predecessor.id, successor.id):
+        raise HTTPException(status_code=400, detail="Creating this dependency would cause a circular dependency")
+    set_source(db, TASK_UPDATE_SOURCE)
+    if link is None:
+        link = Link(predecessor_id=predecessor.id, successor_id=successor.id)
+        db.add(link)
+    else:
+        restore(link)
+    link.type = request.type
+    link.lag_days = request.lag_days
+    db.commit()
+    return _link_out(link, predecessor, successor)
+
+
+@app.delete("/api/links/{link_id}", status_code=204)
+def delete_link(link_id: int, db: Session = Depends(get_db)) -> None:
+    """Soft-delete a dependency (it stays in `history`)."""
+    link = db.get(Link, link_id)
+    if link is None or link.deleted_at is not None:
+        raise HTTPException(status_code=404, detail=f"Unknown link id: {link_id}")
+    set_source(db, TASK_UPDATE_SOURCE)
+    soft_delete(db, link)
+    db.commit()
 
 
 # --- Saved task views (Phase 9.1) -------------------------------------------------

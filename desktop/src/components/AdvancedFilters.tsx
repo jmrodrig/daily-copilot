@@ -29,7 +29,7 @@ export default function AdvancedFilters({
   onFilters: (filters: ViewFilters) => void;
 }) {
   const count = advancedFilterCount(filters);
-  const [open, setOpen] = useState(count > 0);
+  const [open, setOpen] = useState(false);
   const set = (change: Partial<ViewFilters>) => onFilters({ ...filters, ...change });
 
   function setCustom(id: string, value: string | null) {

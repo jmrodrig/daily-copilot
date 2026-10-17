@@ -849,19 +849,67 @@ def test_url_metadata_returns_the_page_title(client, monkeypatch):
     assert response.json() == {"title": "Steel & Glass Supplier"}
     request, timeout = requests[0]
     assert request.full_url == "https://example.com/a?b=1"
-    assert request.get_header("User-agent") == "Mozilla/5.0"
+    assert request.get_header("User-agent").startswith("Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+    assert request.get_header("Accept-language").startswith("en-US")
     assert timeout == 5
 
 
-def test_url_metadata_title_is_null_when_the_page_has_none_or_fails(client, monkeypatch):
+def test_url_metadata_prefers_the_opengraph_then_twitter_then_meta_title(client, monkeypatch):
+    pages = {
+        "og": b"<head><title>Site</title><meta name='twitter:title' content='Tw'>"
+        b'<meta content="It&#39;s the  article" property="og:title"></head>',
+        "twitter": b"<head><title>Site</title><meta name='title' content='Meta'><meta name='twitter:title' content='Tw'>",
+        "meta": b"<head><title>Site</title><meta name='title' content='Meta'><meta property='og:title' content=''>",
+    }
+    monkeypatch.setattr(main.urllib.request, "urlopen", lambda request, timeout: _FakePage(pages[request.full_url.rsplit("/", 1)[1]]))
+    titles = {key: client.get("/api/url-metadata", params={"url": f"https://example.com/{key}"}).json() for key in pages}
+    assert titles == {"og": {"title": "It's the article"}, "twitter": {"title": "Tw"}, "meta": {"title": "Meta"}}
+
+
+PUBLICO = "https://www.publico.pt/2026/10/17/sociedade/noticia/2025-quase-metade-vagas-incentivos-medicos-ficou-preencher-2191629"
+PUBLICO_TITLE = "2025 quase metade vagas incentivos medicos ficou preencher · Público"
+
+
+@pytest.mark.parametrize(
+    ("url", "title"),
+    [
+        (PUBLICO, PUBLICO_TITLE),
+        ("https://www.theverge.com/2024/3/15/24101234/apple-antitrust-lawsuit-doj-iphone", "Apple antitrust lawsuit doj iphone · The Verge"),
+        ("https://github.com", "GitHub"),
+        ("https://github.com/", "GitHub"),
+        ("https://pt.wikipedia.org/wiki/Lisboa", "Lisboa · Wikipedia"),
+        ("https://example.com/blog/caf%C3%A9_menu.html?x=1#top", "Café menu · example.com"),
+        ("https://medium.com/@someone/my-first-post-1a2b3c4d5e6f", "My first post · Medium"),
+        ("https://example.com/2024/05/index.php", "example.com"),
+    ],
+)
+def test_title_from_url_slug(url, title):
+    assert main.title_from_url_slug(url) == title
+
+
+def test_url_metadata_falls_back_to_the_url_slug_when_the_page_has_no_title_or_fails(client, monkeypatch):
     monkeypatch.setattr(main.urllib.request, "urlopen", lambda request, timeout: _FakePage(b"<html><title> </title></html>"))
-    assert client.get("/api/url-metadata", params={"url": "https://example.com"}).json() == {"title": None}
+    assert client.get("/api/url-metadata", params={"url": "https://example.com"}).json() == {"title": "example.com"}
+
+    # An AWS WAF challenge (a 202 with an empty title) or a bot wall's own title is not the page's.
+    waf = b"<html><head><title></title><script>window.awsWafCookieDomainList = [];</script></head></html>"
+    monkeypatch.setattr(main.urllib.request, "urlopen", lambda request, timeout: _FakePage(waf))
+    assert client.get("/api/url-metadata", params={"url": PUBLICO}).json() == {"title": PUBLICO_TITLE}
+    for wall in (b"<title>Just a moment...</title>", b"<title>403 Forbidden</title>", b"<title>Access Denied</title>"):
+        monkeypatch.setattr(main.urllib.request, "urlopen", lambda request, timeout, wall=wall: _FakePage(wall))
+        assert client.get("/api/url-metadata", params={"url": PUBLICO}).json() == {"title": PUBLICO_TITLE}
+
+    def forbidden(request, timeout):
+        raise main.urllib.error.HTTPError(request.full_url, 403, "Forbidden", None, None)
+
+    monkeypatch.setattr(main.urllib.request, "urlopen", forbidden)
+    assert client.get("/api/url-metadata", params={"url": PUBLICO}).json() == {"title": PUBLICO_TITLE}
 
     def fail(request, timeout):
         raise OSError("unreachable")
 
     monkeypatch.setattr(main.urllib.request, "urlopen", fail)
-    assert client.get("/api/url-metadata", params={"url": "https://example.com"}).json() == {"title": None}
+    assert client.get("/api/url-metadata", params={"url": "https://github.com"}).json() == {"title": "GitHub"}
 
 
 def test_url_metadata_only_fetches_web_pages(client, monkeypatch):

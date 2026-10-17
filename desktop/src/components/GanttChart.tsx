@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -12,9 +13,11 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 
+import { message } from "../lib/api";
 import { tint, type HexColor } from "../lib/colors";
 import { formatDay, formatDelta, fromDay, isWeekend, toDay, todayDay } from "../lib/days";
 import type { CustomFieldDef } from "../lib/space";
+import { createTaskLink, deleteTaskLink, fetchSpaceLinks, useLinksChanged, type LinkWithDetails } from "../lib/tasks";
 import GanttShiftDialog, { type ShiftedTask } from "./GanttShiftDialog";
 
 // Shapes returned by GET /api/gantt (see backend/schemas.py).
@@ -24,7 +27,7 @@ export type GanttTask = {
   start_date: string | null;
   end_date: string | null;
   completion_percent: number;
-  status: "backlog" | "todo" | "in_progress" | "blocked" | "done" | "archived";
+  status: "backlog" | "todo" | "in_progress" | "in_review" | "blocked" | "done" | "archived";
   is_milestone: boolean;
   /** The task's custom field values, for colouring its bar by a dropdown field. */
   custom_fields?: Record<string, unknown>;
@@ -43,6 +46,9 @@ export type GanttProject = {
 export type GanttDateChange = { id: number; start_date?: string | null; end_date?: string | null };
 
 const DAY_PX = 20;
+// Heights of the header and of each row (`h-10`, `h-9`): the dependency arrows are placed from them.
+const HEADER_H = 40;
+const ROW_H = 36;
 // The task labels column: its default width, and how narrow or wide it can be dragged.
 const LABEL_DEFAULT_W = 240;
 const LABEL_MIN_W = 150;
@@ -54,6 +60,7 @@ const HANDLE_PX = 6;
 // A press that moves less than this is a click, not a drag.
 const DRAG_THRESHOLD_PX = 3;
 const UNDO_MS = 8000;
+const LINK_ERROR_MS = 6000;
 
 /** A class and/or inline style: built-in swatches are Tailwind classes, colours set by the user are inline. */
 type Paint = { className: string; style?: CSSProperties };
@@ -168,6 +175,11 @@ type Toast = { label: string; inverse: GanttDateChange[] | null; saving: boolean
  * With `onReschedule` the chart is editable: tasks can be selected (checkboxes, Ctrl/⌘-click, Shift-click), dragged
  * to new dates or resized by their edges (all selected tasks move together), and the whole plan can be shifted from
  * a date picked with the grid cursor. `onReschedule` should show the new dates at once and reject if saving fails.
+ *
+ * With `spaceId` the chart draws the space's task dependencies as arrows (amber, with a caution triangle, where the
+ * dates contradict them); clicking one shows it and, when editable, offers to delete it. An editable chart also gets a
+ * connector on each bar's right end: drag it onto another task, or click it and then the task, to make that task wait
+ * on this one.
  */
 export default function GanttChart({
   projects,
@@ -177,8 +189,10 @@ export default function GanttChart({
   onTaskClick,
   activeTaskId = null,
   onReschedule,
+  spaceId,
 }: {
   projects: GanttProject[];
+  spaceId?: number;
   customFields?: CustomFieldDef[];
   colorBy?: string | null;
   onColorBy?: (fieldId: string | null) => void;
@@ -223,8 +237,111 @@ export default function GanttChart({
       return next;
     });
 
-  /** A click on a task's row, label or bar: select with Ctrl/⌘ or Shift, else open it. */
+  const chartRef = useRef<HTMLDivElement>(null);
+
+  // --- Dependencies ---
+  const linkable = editable && spaceId !== undefined;
+  const [links, setLinks] = useState<LinkWithDetails[]>([]);
+  const [linksVersion, setLinksVersion] = useState(0);
+  useLinksChanged(() => setLinksVersion((v) => v + 1));
+  useEffect(() => {
+    if (spaceId === undefined) return setLinks([]);
+    const controller = new AbortController();
+    fetchSpaceLinks(spaceId, controller.signal)
+      .then(setLinks)
+      .catch(() => {});
+    return () => controller.abort();
+  }, [spaceId, linksVersion]);
+  // Linking: the task the new dependency starts from, and the pointer (in the arrows' coordinates) for the rubber band.
+  const [linking, setLinking] = useState<{ from: number; pointer: { x: number; y: number } | null } | null>(null);
+  const [linkError, setLinkError] = useState<string | null>(null);
+  const [openLink, setOpenLink] = useState<{ id: number; x: number; y: number } | null>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!linkError) return;
+    const timer = window.setTimeout(() => setLinkError(null), LINK_ERROR_MS);
+    return () => window.clearTimeout(timer);
+  }, [linkError]);
+
+  /** Makes `to` wait on `from` (the arrows reload when the link is saved). */
+  async function link(from: number, to: number) {
+    setLinking(null);
+    if (from === to) return;
+    setLinkError(null);
+    try {
+      await createTaskLink(from, to);
+    } catch (err: unknown) {
+      setLinkError(`Could not link the tasks: ${message(err)}`);
+    }
+  }
+
+  /** A client point in the arrows' coordinates (the timeline, under the labels column). */
+  const linkPoint = (clientX: number, clientY: number) => {
+    const rect = contentRef.current?.getBoundingClientRect();
+    return rect ? { x: clientX - rect.left - labelW, y: clientY - rect.top } : null;
+  };
+
+  /** The task whose bar, milestone or row is under a client point. */
+  const taskAt = (clientX: number, clientY: number): number | null => {
+    const el = document.elementFromPoint(clientX, clientY)?.closest<HTMLElement>("[data-gantt-task], [data-task-row]");
+    const id = Number(el?.dataset.ganttTask ?? el?.dataset.taskRow);
+    return Number.isFinite(id) && id > 0 ? id : null;
+  };
+
+  /** Pressing a bar's connector: drag it onto another task to link them, or let go to pick the task with a click. */
+  function beginLink(e: ReactPointerEvent, task: GanttTask) {
+    if (!linkable || e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const [startX, startY] = [e.clientX, e.clientY];
+    let moved = false;
+    setOpenLink(null);
+    setHoverDay(null);
+    setLinking({ from: task.id, pointer: linkPoint(e.clientX, e.clientY) });
+    const onMove = (ev: PointerEvent) => {
+      if (ev.pointerId !== e.pointerId) return;
+      moved ||= Math.hypot(ev.clientX - startX, ev.clientY - startY) > DRAG_THRESHOLD_PX;
+      const pointer = linkPoint(ev.clientX, ev.clientY);
+      setLinking((current) => current && { ...current, pointer });
+    };
+    const onUp = (ev: PointerEvent) => {
+      if (ev.pointerId !== e.pointerId) return;
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+      // A click on the connector stays in linking mode, waiting for the task to be clicked.
+      if (!moved || ev.type === "pointercancel") {
+        if (ev.type === "pointercancel") setLinking(null);
+        return;
+      }
+      suppressClick.current = true;
+      window.setTimeout(() => (suppressClick.current = false), 0);
+      const target = taskAt(ev.clientX, ev.clientY);
+      if (target !== null && target !== task.id) void link(task.id, target);
+      else setLinking(null);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+  }
+
+  // While linking, a press outside the chart gives up.
+  useEffect(() => {
+    if (!linking) return;
+    const onDown = (e: PointerEvent) => {
+      if (!chartRef.current?.contains(e.target as Node)) setLinking(null);
+    };
+    window.addEventListener("pointerdown", onDown, true);
+    return () => window.removeEventListener("pointerdown", onDown, true);
+  }, [linking !== null]);
+
+  /** A click on a task's row, label or bar: select with Ctrl/⌘ or Shift, else open it (or, while linking, link it). */
   function clickTask(id: number, { toggle, range }: Modifiers) {
+    if (linking) {
+      void link(linking.from, id);
+      return;
+    }
     if (editable && range && anchor.current !== null && order.includes(anchor.current) && order.includes(id)) {
       const [a, b] = [order.indexOf(anchor.current), order.indexOf(id)].sort((x, y) => x - y);
       const ids = order.slice(a, b + 1);
@@ -382,7 +499,6 @@ export default function GanttChart({
   // --- Resizing the labels column ---
   // While the column is dragged its width goes straight into the --gantt-label-w CSS variable, once a frame, so the
   // chart isn't re-rendered on every pointer move; the final width is set in state when the drag ends.
-  const chartRef = useRef<HTMLDivElement>(null);
   const [resizing, setResizing] = useState(false);
 
   const clampLabelW = (w: number) => {
@@ -466,7 +582,8 @@ export default function GanttChart({
       const target = e.target as HTMLElement | null;
       if (shiftAnchor !== null || e.defaultPrevented || target?.closest("input:not([type=checkbox]):not([type=radio]), textarea, select, [contenteditable=true], [role=dialog]")) return;
       if (e.key === "Escape") {
-        if (selected.size > 0) setSelected(new Set());
+        if (linking) setLinking(null);
+        else if (selected.size > 0) setSelected(new Set());
       } else if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === "z" && toast?.inverse && !toast.saving) {
         e.preventDefault();
         undo();
@@ -474,7 +591,7 @@ export default function GanttChart({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [editable, shiftAnchor, selected, toast, undo]);
+  }, [editable, shiftAnchor, selected, toast, undo, linking]);
 
   if (projects.length === 0) {
     return <p className="text-sm text-text-secondary">No projects yet. Import a Gantt with cli_import.py.</p>;
@@ -509,6 +626,11 @@ export default function GanttChart({
   };
 
   const onGridMove = (e: ReactPointerEvent) => {
+    if (linking) {
+      const pointer = linkPoint(e.clientX, e.clientY);
+      setLinking((current) => current && { ...current, pointer });
+      return;
+    }
     if (!editable || drag || resizing || e.pointerType === "touch") return;
     // Keep the cursor where it is while the pointer is on its own shift button.
     if ((e.target as HTMLElement).closest("[data-gantt-cursor]")) return;
@@ -519,6 +641,13 @@ export default function GanttChart({
   const onGridClick = (e: ReactMouseEvent) => {
     if (!editable || suppressClick.current) return;
     const target = e.target as HTMLElement;
+    // While linking, a click on a task's row links it; anywhere else gives up.
+    if (linking && !target.closest("[data-gantt-bar], [data-gantt-control], button, input, a, label")) {
+      const row = target.closest<HTMLElement>("[data-task-row]");
+      if (row) void link(linking.from, Number(row.dataset.taskRow));
+      else setLinking(null);
+      return;
+    }
     if (target.closest("[data-gantt-bar], [data-gantt-control], button, input, a, label")) return;
     const day = dayAt(e.clientX);
     if (day === null) return;
@@ -531,6 +660,56 @@ export default function GanttChart({
     }
     if (selected.size > 0) setSelected(new Set());
   };
+
+  // Each dated task's row middle (y), as the rows are laid out below: the header, then per project its milestones'
+  // row and a row per bar (or one "No dated tasks" row), and a 1px border between projects.
+  const rowMiddle = new Map<number, number>();
+  let rowTop = HEADER_H;
+  for (const project of projects) {
+    const dated = project.tasks.filter((t) => span(t) !== null);
+    dated.filter((t) => t.is_milestone).forEach((t) => rowMiddle.set(t.id, rowTop + ROW_H / 2));
+    rowTop += ROW_H;
+    for (const t of dated.filter((t) => !t.is_milestone)) {
+      rowMiddle.set(t.id, rowTop + ROW_H / 2);
+      rowTop += ROW_H;
+    }
+    if (dated.length === 0) rowTop += ROW_H;
+    rowTop += 1;
+  }
+
+  /** A task with the drag in progress applied, so the arrows and their warnings follow the bars. */
+  const live = (task: GanttTask): GanttTask => {
+    const change = drag?.moved && drag.ids.includes(task.id) ? dragChange(task, drag.mode, drag.delta) : null;
+    return change ? { ...task, ...change } : task;
+  };
+  /** Where an arrow leaves (`end`) or meets (`start`) a task's bar or milestone. */
+  const linkEnd = (task: GanttTask, side: "start" | "end"): number => {
+    const s = shown(task);
+    if (task.is_milestone) return x(s.start) + DAY_PX / 2 + (side === "end" ? 7 : -7);
+    return side === "end" ? x(s.end + 1) : x(s.start);
+  };
+  const linkShapes: LinkShape[] = links.flatMap((link) => {
+    const [from, to] = [taskById.get(link.predecessor_id), taskById.get(link.successor_id)];
+    if (!from || !to || !rowMiddle.has(from.id) || !rowMiddle.has(to.id)) return [];
+    return [
+      {
+        link,
+        from: live(from),
+        to: live(to),
+        x1: linkEnd(from, "end"),
+        y1: rowMiddle.get(from.id)!,
+        x2: linkEnd(to, "start") - 1,
+        y2: rowMiddle.get(to.id)!,
+        conflict: linkConflict(live(from), live(to), link.lag_days),
+      },
+    ];
+  });
+  const openShape = openLink ? linkShapes.find((shape) => shape.link.id === openLink.id) : undefined;
+  const linkingFrom = linking ? taskById.get(linking.from) : undefined;
+  const rubberBand =
+    linking?.pointer && linkingFrom && rowMiddle.has(linkingFrom.id)
+      ? { x1: linkEnd(linkingFrom, "end"), y1: rowMiddle.get(linkingFrom.id)!, x2: linking.pointer.x, y2: linking.pointer.y }
+      : null;
 
   const datedOrder = order.length;
   const selectedCount = selected.size;
@@ -560,7 +739,21 @@ export default function GanttChart({
           )}
           {editable && (
             <div className="flex flex-wrap items-center gap-2" role="toolbar" aria-label="Gantt selection">
-              {selectedCount > 0 ? (
+              {linkError && (
+                <span role="alert" className="text-accent">
+                  {linkError}
+                </span>
+              )}
+              {linkingFrom ? (
+                <>
+                  <span role="status" className="rounded-full bg-accent/[0.16] px-2.5 py-0.5 font-semibold text-accent-soft">
+                    Click the task that waits on “{linkingFrom.name}”
+                  </span>
+                  <button type="button" className="btn min-h-0 px-2.5 py-1 text-xs" onClick={() => setLinking(null)}>
+                    Cancel
+                  </button>
+                </>
+              ) : selectedCount > 0 ? (
                 <>
                   <span className="rounded-full bg-accent/[0.16] px-2.5 py-0.5 font-semibold text-accent-soft">
                     {plural(selectedCount, "task")} selected
@@ -573,6 +766,7 @@ export default function GanttChart({
               ) : (
                 <span className="hidden text-text-muted md:inline">
                   Drag bars to reschedule · <Kbd>Ctrl</Kbd>/<Kbd>Shift</Kbd>+click to select · use the cursor's shift button to shift the timeline
+                  {linkable && " · drag a bar's end dot onto a task to link them"}
                 </span>
               )}
             </div>
@@ -582,7 +776,8 @@ export default function GanttChart({
       <div ref={chartRef} className="relative" style={{ "--gantt-label-w": `${labelW}px` } as CSSProperties}>
         <div ref={scrollerRef} className="overflow-x-auto rounded-lg border border-border-default bg-surface-raised">
           <div
-            className={`relative ${editable && !drag && !resizing ? "[&_[data-grid]]:cursor-crosshair" : ""}`}
+            ref={contentRef}
+            className={`relative ${linking ? "[&_[data-grid]]:cursor-alias [&_[data-gantt-bar]]:cursor-alias" : editable && !drag && !resizing ? "[&_[data-grid]]:cursor-crosshair" : ""}`}
             style={{ width: `calc(var(--gantt-label-w) + ${width}px)` }}
             onPointerMove={onGridMove}
             onPointerLeave={() => setHoverDay(null)}
@@ -661,7 +856,7 @@ export default function GanttChart({
                         clickable={!!onTaskClick || editable}
                         dragging={!!dragged?.ids.includes(m.id)}
                         ghostDay={dragged?.ids.includes(m.id) ? span(m)!.start : null}
-                        onPointerDown={editable ? (e) => beginDrag(e, m, "move") : undefined}
+                        onPointerDown={editable && !linking ? (e) => beginDrag(e, m, "move") : undefined}
                         onClick={(e) => !suppressClick.current && clickTask(m.id, modifiers(e))}
                       />
                     ))}
@@ -696,7 +891,9 @@ export default function GanttChart({
                         editable={editable}
                         drag={dragged?.ids.includes(task.id) ? dragged : null}
                         dragCount={dragged?.ids.length ?? 0}
-                        onPointerDown={(e, mode) => beginDrag(e, task, mode)}
+                        onPointerDown={(e, mode) => !linking && beginDrag(e, task, mode)}
+                        onLinkStart={linkable && !linking ? (e) => beginLink(e, task) : undefined}
+                        onLinkKey={() => setLinking({ from: task.id, pointer: null })}
                         onClick={
                           onTaskClick || editable ? (e) => !suppressClick.current && clickTask(task.id, modifiers(e)) : undefined
                         }
@@ -709,6 +906,17 @@ export default function GanttChart({
                 </div>
               );
             })}
+
+            {/* Dependency arrows, over the bars but under the sticky labels. */}
+            {(linkShapes.length > 0 || rubberBand) && (
+              <LinkLayer
+                shapes={linkShapes}
+                width={width}
+                activeLinkId={openShape?.link.id ?? null}
+                rubberBand={rubberBand}
+                onOpen={(id, cx, cy) => !linking && setOpenLink({ id, x: cx, y: cy })}
+              />
+            )}
 
             {/* The grid cursor, over the bars but under the sticky labels. */}
             {editable && (
@@ -758,6 +966,23 @@ export default function GanttChart({
       )}
 
       {toast && <UndoToast toast={toast} onUndo={undo} onClose={() => setToast(null)} />}
+
+      {openShape && openLink && (
+        <LinkPopover
+          key={openShape.link.id}
+          shape={openShape}
+          at={openLink}
+          onDelete={
+            linkable
+              ? async () => {
+                  await deleteTaskLink(openShape.link.id);
+                  setOpenLink(null);
+                }
+              : undefined
+          }
+          onClose={() => setOpenLink(null)}
+        />
+      )}
     </div>
   );
 }
@@ -974,6 +1199,7 @@ function Milestone({
       )}
       <div
         data-gantt-bar
+        data-gantt-task={task.id}
         className={`absolute top-1/2 flex -translate-y-1/2 select-none items-center gap-1.5 whitespace-nowrap ${
           onPointerDown ? (dragging ? "z-20 cursor-grabbing" : "cursor-grab") : clickable ? "cursor-pointer" : ""
         } ${clickable && !dragging ? "hover:underline" : ""} ${active ? "underline" : ""}`}
@@ -1006,6 +1232,8 @@ function TaskBar({
   drag,
   dragCount,
   onPointerDown,
+  onLinkStart,
+  onLinkKey,
   onClick,
 }: {
   task: GanttTask;
@@ -1020,6 +1248,10 @@ function TaskBar({
   drag: Drag | null;
   dragCount: number;
   onPointerDown: (e: ReactPointerEvent, mode: DragMode) => void;
+  /** Pressing the connector on the bar's right end, to link the task to one that waits on it. */
+  onLinkStart?: (e: ReactPointerEvent) => void;
+  /** Enter or Space on the connector: pick the waiting task with a click. */
+  onLinkKey?: () => void;
   onClick?: (e: ReactMouseEvent) => void;
 }) {
   const percent = Math.round(task.completion_percent);
@@ -1038,6 +1270,7 @@ function TaskBar({
       )}
       <div
         data-gantt-bar
+        data-gantt-task={task.id}
         className={`group/bar absolute top-1/2 flex -translate-y-1/2 select-none items-center gap-2 whitespace-nowrap ${
           drag ? "z-20" : ""
         } ${onClick && !editable ? "cursor-pointer" : ""}`}
@@ -1062,7 +1295,26 @@ function TaskBar({
             </>
           )}
         </div>
-        <span className="font-mono text-xs text-text-muted">{percent}%</span>
+        {onLinkStart && !drag && (
+          <span
+            data-gantt-control
+            role="button"
+            tabIndex={0}
+            aria-label={`Link ${task.name} to a task that waits on it`}
+            title="Drag onto a task (or click, then click the task) to make it wait on this one"
+            className="absolute top-1/2 z-[7] h-3 w-3 -translate-x-1/2 -translate-y-1/2 cursor-crosshair rounded-full border-2 border-accent bg-surface-raised opacity-0 transition-opacity hover:bg-accent focus-visible:opacity-100 group-hover/bar:opacity-100"
+            style={{ left: width + LINK_HANDLE_OFFSET }}
+            onPointerDown={onLinkStart}
+            onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => {
+              if (e.key !== "Enter" && e.key !== " ") return;
+              e.preventDefault();
+              e.stopPropagation();
+              onLinkKey?.();
+            }}
+          />
+        )}
+        <span className={`font-mono text-xs text-text-muted ${onLinkStart ? "pl-3" : ""}`}>{percent}%</span>
         {/* While dragging, the new dates float above the bar's start, where the timeline is sure to show them. */}
         {drag && isOrigin && (
           <span
@@ -1096,6 +1348,241 @@ function ResizeHandle({ side, active, onPointerDown }: { side: "start" | "end"; 
         }`}
       />
     </div>
+  );
+}
+
+/** A dependency as drawn on the chart: from the predecessor's right end to the successor's left end. */
+type LinkShape = { link: LinkWithDetails; from: GanttTask; to: GanttTask; x1: number; y1: number; x2: number; y2: number; conflict: string | null };
+
+/** Room an arrow leaves past the predecessor before turning. */
+const LINK_STUB_OUT = 12;
+/** Room an arrow takes before the successor, so a doubled-back arrow still gets a clean horizontal approach. */
+const LINK_STUB_IN = 24;
+/** How far the drag-to-link handle sits off a bar's right end. */
+const LINK_HANDLE_OFFSET = 8;
+const CONFLICT_COLOR = "#f59e0b";
+
+/**
+ * Why `from`'s and `to`'s dates contradict a finish-to-start link (`to` starts, or without a start is due, on or
+ * before the day `from` finishes plus the lag — 0-day tolerance, as `from` occupies its finish day), or null. The same rule as `_link_conflict` in backend/main.py, worked out here so the
+ * warning follows bars as they're dragged.
+ */
+function linkConflict(from: GanttTask, to: GanttTask, lagDays: number): string | null {
+  if (!from.end_date) return null;
+  const finish = toDay(from.end_date);
+  const earliest = finish + Math.round(lagDays);
+  const finishes = `${from.name} finishes on ${formatDay(finish)}`;
+  if (to.start_date) {
+    const start = toDay(to.start_date);
+    if (start < earliest) return `${finishes}, after ${to.name} starts on ${formatDay(start)}`;
+    if (start === earliest) return `${finishes}, the same day ${to.name} starts on ${formatDay(start)}`;
+    return null;
+  }
+  if (to.end_date) {
+    const due = toDay(to.end_date);
+    if (due < earliest) return `${finishes}, after ${to.name} is due on ${formatDay(due)}`;
+    if (due === earliest) return `${finishes}, the same day ${to.name} is due on ${formatDay(due)}`;
+  }
+  return null;
+}
+
+/** An elbowed path from (x1, y1) to (x2, y2): out, down, in; doubling back along a row boundary when `to` starts first. */
+function linkPath({ x1, y1, x2, y2 }: Pick<LinkShape, "x1" | "y1" | "x2" | "y2">): { d: string; mid: { x: number; y: number } } {
+  if (x2 - x1 >= LINK_STUB_OUT + LINK_STUB_IN) {
+    const turn = x1 + LINK_STUB_OUT;
+    return { d: `M${x1},${y1} H${turn} V${y2} H${x2}`, mid: { x: turn, y: (y1 + y2) / 2 } };
+  }
+  const boundary = y1 + (y2 >= y1 ? 1 : -1) * (ROW_H / 2);
+  const out = x1 + LINK_STUB_OUT;
+  const back = Math.max(4, x2 - LINK_STUB_IN);
+  return { d: `M${x1},${y1} H${out} V${boundary} H${back} V${y2} H${x2}`, mid: { x: (out + back) / 2, y: boundary } };
+}
+
+/**
+ * The dependency arrows over the bars (under the sticky labels). Arrows ignore the pointer except along their own
+ * stroke, so bars underneath can still be dragged; clicking one (or its caution triangle) opens it.
+ */
+function LinkLayer({
+  shapes,
+  width,
+  activeLinkId,
+  rubberBand,
+  onOpen,
+}: {
+  shapes: LinkShape[];
+  width: number;
+  activeLinkId: number | null;
+  rubberBand: { x1: number; y1: number; x2: number; y2: number } | null;
+  onOpen: (linkId: number, clientX: number, clientY: number) => void;
+}) {
+  const ids = useId().replace(/:/g, "");
+  const arrow = `gantt-arrow-${ids}`;
+  const warnArrow = `gantt-arrow-warn-${ids}`;
+  const activeArrow = `gantt-arrow-active-${ids}`;
+  const marker = (id: string, className: string, fill?: string) => (
+    <marker id={id} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse" className={className}>
+      <path d="M0,0.5 L7.5,4 L0,7.5 z" fill={fill ?? "currentColor"} />
+    </marker>
+  );
+  return (
+    <svg
+      aria-hidden={shapes.length === 0 && !rubberBand}
+      className="pointer-events-none absolute z-[6] overflow-visible text-text-muted"
+      style={{ left: "var(--gantt-label-w)", top: 0, width, height: "100%" }}
+    >
+      <defs>
+        {marker(arrow, "text-text-muted")}
+        {marker(warnArrow, "", CONFLICT_COLOR)}
+        {marker(activeArrow, "text-accent")}
+      </defs>
+      {shapes.map((shape) => {
+        const { d, mid } = linkPath(shape);
+        const active = shape.link.id === activeLinkId;
+        const color = active ? "var(--dc-accent)" : shape.conflict ? CONFLICT_COLOR : "currentColor";
+        const open = (e: ReactMouseEvent) => {
+          e.stopPropagation();
+          onOpen(shape.link.id, e.clientX, e.clientY);
+        };
+        const label = `${shape.from.name} → ${shape.to.name}${shape.conflict ? ` · ⚠ ${shape.conflict}` : ""}`;
+        return (
+          <g key={shape.link.id} data-gantt-control className="group/link cursor-pointer" onClick={open}>
+            <title>{label}</title>
+            {/* A wide, invisible stroke makes the thin arrow easy to hover and click. */}
+            <path d={d} fill="none" stroke="transparent" strokeWidth={10} style={{ pointerEvents: "stroke" }} />
+            <path
+              d={d}
+              fill="none"
+              stroke={color}
+              strokeWidth={active ? 2 : 1.5}
+              strokeLinejoin="round"
+              strokeDasharray={shape.conflict && !active ? "4 3" : undefined}
+              markerEnd={`url(#${active ? activeArrow : shape.conflict ? warnArrow : arrow})`}
+              className="opacity-70 transition-opacity group-hover/link:opacity-100"
+            />
+            {shape.conflict && (
+              <g transform={`translate(${mid.x}, ${mid.y})`} style={{ pointerEvents: "all" }}>
+                <path d="M0,-7 L7,5.5 L-7,5.5 Z" fill={CONFLICT_COLOR} stroke="var(--dc-surface, #fff)" strokeWidth={1} strokeLinejoin="round" />
+                <path d="M0,-2.5 V1.5 M0,3.4 V3.6" stroke="#1f1300" strokeWidth={1.4} strokeLinecap="round" />
+              </g>
+            )}
+          </g>
+        );
+      })}
+      {rubberBand && (
+        <path
+          d={`M${rubberBand.x1},${rubberBand.y1} L${rubberBand.x2},${rubberBand.y2}`}
+          fill="none"
+          stroke="var(--dc-accent)"
+          strokeWidth={1.5}
+          strokeDasharray="4 3"
+          markerEnd={`url(#${activeArrow})`}
+        />
+      )}
+    </svg>
+  );
+}
+
+/** A dependency's details, opened by clicking its arrow: the two tasks and their dates, any conflict, and Delete. */
+function LinkPopover({
+  shape,
+  at,
+  onDelete,
+  onClose,
+}: {
+  shape: LinkShape;
+  at: { x: number; y: number };
+  onDelete?: () => Promise<void>;
+  onClose: () => void;
+}) {
+  const panel = useRef<HTMLDivElement>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const close = useRef(onClose);
+  close.current = onClose;
+
+  useEffect(() => {
+    const onDown = (e: PointerEvent) => {
+      if (!panel.current?.contains(e.target as Node)) close.current();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.stopPropagation();
+      close.current();
+    };
+    window.addEventListener("pointerdown", onDown, true);
+    window.addEventListener("keydown", onKey, true);
+    return () => {
+      window.removeEventListener("pointerdown", onDown, true);
+      window.removeEventListener("keydown", onKey, true);
+    };
+  }, []);
+
+  const dates = (task: GanttTask) => {
+    const s = span(task);
+    if (!s) return "no dates";
+    return s.start === s.end ? formatDay(s.start) : `${formatDay(s.start)} – ${formatDay(s.end)}`;
+  };
+  const left = Math.min(at.x, window.innerWidth - 300);
+  const top = Math.min(at.y + 10, window.innerHeight - 180);
+
+  return createPortal(
+    <div
+      ref={panel}
+      role="dialog"
+      aria-label="Dependency"
+      className="fixed z-50 flex w-[280px] flex-col gap-2 rounded-lg border border-border-default bg-surface-raised p-3 text-[13px] shadow-xl"
+      style={{ left, top }}
+    >
+      <div className="flex flex-col gap-1">
+        <span className="font-mono text-[11px] uppercase tracking-wide text-text-muted">Dependency</span>
+        <span className="flex min-w-0 items-baseline gap-1.5 text-text-primary">
+          <span className="truncate font-semibold" title={shape.from.name}>
+            {shape.from.name}
+          </span>
+          <span className="shrink-0 text-text-muted">→</span>
+          <span className="truncate font-semibold" title={shape.to.name}>
+            {shape.to.name}
+          </span>
+        </span>
+        <span className="text-xs text-text-muted">
+          {dates(shape.from)} → {dates(shape.to)}
+        </span>
+      </div>
+      {shape.conflict ? (
+        <p className="flex gap-1.5 rounded-md border px-2 py-1.5 text-xs" style={{ borderColor: `${CONFLICT_COLOR}99`, color: CONFLICT_COLOR }}>
+          <span aria-hidden>⚠</span>
+          <span>{shape.conflict}</span>
+        </p>
+      ) : (
+        <p className="text-xs text-text-muted">The dates fit: {shape.to.name} waits until {shape.from.name} is done.</p>
+      )}
+      {error && <p className="text-xs text-accent">{error}</p>}
+      <div className="flex justify-end gap-2">
+        <button type="button" className="btn min-h-0 px-2.5 py-1 text-xs" onClick={onClose}>
+          Close
+        </button>
+        {onDelete && (
+          <button
+            type="button"
+            disabled={deleting}
+            className="btn min-h-0 px-2.5 py-1 text-xs hover:text-accent"
+            onClick={async () => {
+              setDeleting(true);
+              setError(null);
+              try {
+                await onDelete();
+              } catch (err: unknown) {
+                setError(`Could not delete the link: ${message(err)}`);
+                setDeleting(false);
+              }
+            }}
+          >
+            {deleting ? "Deleting…" : "Delete link"}
+          </button>
+        )}
+      </div>
+    </div>,
+    document.body,
   );
 }
 

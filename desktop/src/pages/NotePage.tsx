@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ComponentProps, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ComponentProps, type ReactNode } from "react";
 import Markdown, { defaultUrlTransform, type Components } from "react-markdown";
 import { createPortal } from "react-dom";
 import { Link, useSearchParams } from "react-router-dom";
@@ -12,14 +12,15 @@ import "katex/dist/katex.min.css";
 import { formatDay, LABEL_TAG, NEUTRAL_TAG, ProjectTag, Tag, TagPills } from "../components/TriageBoard";
 import { getJson, message, sendJson } from "../lib/api";
 import { isLocalHref, openLocalFile } from "../lib/localFiles";
-import { useSpace } from "../lib/space";
+import { useNoteUpdates } from "../lib/notes";
+import { notePath, openNoteInNewWindow, useSpace } from "../lib/space";
 import { useTitle } from "../lib/title";
 import { isOverdue, STATUS_LABELS, taskIdFromHref, useTaskChanges, useTaskPanel, type TaskItem } from "../lib/tasks";
 import MediaLightbox, { ExpandButton, isPdfUrl, MarkupOverlay } from "../components/MediaLightbox";
 import NoteHistoryModal, { type RestoredNote } from "../components/NoteHistoryModal";
 import { isTyping } from "../components/markupCore";
 import NoteEditor from "../components/NoteEditor";
-import { PillIcon, refKind, StatusTag, useTaskStatus } from "../components/referencePill";
+import { AssigneeTag, PillIcon, refKind, StatusTag, useTaskInfo } from "../components/referencePill";
 import { NOTE_COLUMN, NOTE_HTML_SCHEMA, copyCleanSelection, layoutMedia, liftCellColors } from "../components/noteFormatting";
 import WhiteboardView from "../components/WhiteboardView";
 import { COLLAPSE_ICON, EXPAND_ICON, WhiteboardFrame } from "../components/WhiteboardWidget";
@@ -99,6 +100,11 @@ export default function NotePage() {
   // The draft's unsaved changes, saved when the page moves to another note (or closes) before auto-save has.
   const unsavedRef = useRef<{ space_id: number; path: string; content: string; title?: string } | null>(null);
 
+  const [externalChange, setExternalChange] = useState(false);
+  useEffect(() => {
+    setExternalChange(false);
+  }, [path, spaceId, isTemplate]);
+
   const parts = path.split("/");
   const fm = note.state === "ok" ? note.note.frontmatter : {};
   const title = noteTitle(fm, path);
@@ -115,12 +121,53 @@ export default function NotePage() {
   );
   const state = isTemplate || note.state !== "ok" ? null : noteState(fm);
   const dirty = note.state === "ok" && (body !== note.note.content || newTitle !== null);
+  const dirtyRef = useRef(dirty);
+  dirtyRef.current = dirty;
   const draftKey = `${titleDraft}\n${body}`;
 
   // Declared before the loading effect, which clears it for the next note.
   useEffect(() => {
     unsavedRef.current =
       state === "draft" && dirty ? { space_id: spaceId, path, content: body, ...(newTitle !== null && { title: newTitle }) } : null;
+  });
+
+  const reloadTasks = useCallback(async () => {
+    if (isTemplate || !path) return;
+    try {
+      const query = new URLSearchParams({ space_id: String(spaceId), note_path: path });
+      const loaded = await getJson<TaskItem[]>(`/api/tasks?${query}`);
+      setTasks(loaded);
+    } catch {
+      // ignore
+    }
+  }, [spaceId, path, isTemplate]);
+
+  const reload = useCallback(async () => {
+    if (!path) return;
+    const query = new URLSearchParams({ space_id: String(spaceId), path, root: isTemplate ? "templates" : "content" });
+    try {
+      const loaded = await getJson<NoteFile>(`/api/notes/file?${query}`);
+      unsavedRef.current = null;
+      failedRef.current = null;
+      setSaveError(null);
+      setNote({ state: "ok", note: loaded });
+      setBody(loaded.content);
+      setTitleDraft(noteTitle(loaded.frontmatter, path));
+      setRestores((n) => n + 1);
+      setExternalChange(false);
+      refreshTree();
+    } catch {
+      // ignore
+    }
+    void reloadTasks();
+  }, [spaceId, path, isTemplate, refreshTree, reloadTasks]);
+
+  useNoteUpdates(spaceId, path, () => {
+    if (!dirtyRef.current) {
+      void reload();
+    } else {
+      setExternalChange(true);
+    }
   });
 
   useEffect(() => {
@@ -207,6 +254,7 @@ export default function NotePage() {
         ...(next && { state: next }),
       });
       setNote({ state: "ok", note: saved });
+      setExternalChange(false);
       // Edits made while it saved are kept, for the next save.
       setBody((current) => (current === content ? saved.content : current));
       setTitleDraft((current) => (current === draft ? noteTitle(saved.frontmatter, path) : current));
@@ -295,6 +343,16 @@ export default function NotePage() {
         <ClockIcon />
         History
       </button>
+      <button
+        type="button"
+        className="btn inline-flex items-center gap-1.5"
+        onClick={() => openNoteInNewWindow(spaceId, path, isTemplate ? "templates" : "content")}
+        disabled={note.state !== "ok"}
+        title="Open this note in a new window"
+      >
+        <ExternalWindowIcon />
+        New window
+      </button>
       {!whiteboard && (
         <button type="button" className="btn" onClick={() => window.print()} disabled={note.state !== "ok"}>
           Print / PDF
@@ -378,6 +436,28 @@ export default function NotePage() {
           {breadcrumb}
           {actions}
         </div>
+        {externalChange && (
+          <div className="flex items-center justify-between rounded-lg border border-amber-500/40 bg-amber-500/10 px-3.5 py-2 text-xs text-amber-200 print:hidden">
+            <span>Co-pilot updated this note on disk.</span>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => void reload()}
+                className="rounded bg-amber-500/20 px-2 py-0.5 text-xs font-medium text-amber-100 hover:bg-amber-500/30"
+              >
+                Reload to view changes
+              </button>
+              <button
+                type="button"
+                onClick={() => setExternalChange(false)}
+                className="text-amber-300 hover:text-white"
+                title="Dismiss"
+              >
+                ✕
+              </button>
+            </div>
+          </div>
+        )}
         {saveError && <p className="text-[15px] text-accent">Could not save {path} ({saveError}).</p>}
         {state === "draft" ? (
           <input
@@ -438,6 +518,28 @@ export default function NotePage() {
         {breadcrumb}
         {actions}
       </div>
+      {externalChange && (
+        <div className={`${NOTE_COLUMN} flex items-center justify-between rounded-lg border border-amber-500/40 bg-amber-500/10 px-3.5 py-2 text-xs text-amber-200 print:hidden`}>
+          <span>Co-pilot updated this note on disk.</span>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => void reload()}
+              className="rounded bg-amber-500/20 px-2 py-0.5 text-xs font-medium text-amber-100 hover:bg-amber-500/30"
+            >
+              Reload to view changes
+            </button>
+            <button
+              type="button"
+              onClick={() => setExternalChange(false)}
+              className="text-amber-300 hover:text-white"
+              title="Dismiss"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+      )}
       {saveError && <p className={`${NOTE_COLUMN} text-[15px] print:hidden text-accent`}>Could not save {path} ({saveError}).</p>}
       {state === "draft" && note.state === "ok" ? (
         // The editor's toolbar sits above the title, which is edited in place, and the properties.
@@ -495,6 +597,16 @@ function ClockIcon() {
     <svg aria-hidden width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
       <circle cx="8" cy="8" r="6.25" />
       <path d="M8 4.5V8l2.5 1.5" />
+    </svg>
+  );
+}
+
+function ExternalWindowIcon() {
+  return (
+    <svg aria-hidden width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M9.5 2.5h4v4" />
+      <path d="M13.5 2.5 8 8" />
+      <path d="M12 9.5v3a1 1 0 0 1-1 1H3.5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h3" />
     </svg>
   );
 }
@@ -766,9 +878,27 @@ const NOTE_COMPONENTS: Components = {
   a: ({ node: _node, ref, ...props }) => {
     // A task or note pill opens in the app, a URL pill in a new tab (see referencePill), and a link to a local file or
     // folder, pill or plain, through the backend: the browser won't open a local path from a web page.
-    const kind = refKind(props.title);
+    const [params] = useSearchParams();
+    const { spaceId: activeSpaceId } = useSpace();
+    const spaceId = Number(params.get("space") ?? activeSpaceId);
+    const kind = refKind(props.title, props.href);
     if (isLocalHref(props.href) && (!kind || kind === "url")) return <LocalFileLink href={props.href}>{props.children}</LocalFileLink>;
     if (kind === "task" && props.href) return <TaskPillLink href={props.href}>{props.children}</TaskPillLink>;
+    if (kind === "note" && props.href) {
+      let noteRelPath = props.href;
+      try {
+        noteRelPath = decodeURIComponent(props.href);
+      } catch {
+        // ignore
+      }
+      const target = props.href.startsWith("/note?") ? props.href : notePath(spaceId, noteRelPath);
+      return (
+        <Link to={target} className="reference-pill note">
+          <PillIcon kind="note" />
+          <span className="reference-pill-label">{props.children}</span>
+        </Link>
+      );
+    }
     if (kind && kind !== "url" && props.href)
       return (
         <Link to={props.href} className={`reference-pill ${kind}`}>
@@ -835,7 +965,9 @@ function PdfLink({ href, children }: { href: string; children: ReactNode }) {
 function TaskPillLink({ href, children }: { href: string; children: ReactNode }) {
   const { openTask } = useTaskPanel();
   const taskId = taskIdFromHref(href);
-  const status = useTaskStatus(taskId);
+  const taskInfo = useTaskInfo(taskId);
+  const status = taskInfo?.status ?? null;
+  const assignee = taskInfo?.assignee ?? null;
   return (
     <Link
       to={href}
@@ -851,6 +983,7 @@ function TaskPillLink({ href, children }: { href: string; children: ReactNode })
       <span className="reference-pill-label">
         {status && <StatusTag status={status} />}
         {children}
+        {assignee && <AssigneeTag assignee={assignee} />}
       </span>
     </Link>
   );

@@ -12,7 +12,7 @@ import { NavLink, useLocation, useNavigate } from "react-router-dom";
 
 import { getJson, message, sendJson } from "../lib/api";
 import { tint } from "../lib/colors";
-import { notePath, useSpace } from "../lib/space";
+import { notePath, openNoteInNewWindow, useSpace } from "../lib/space";
 import { VIEW_TYPES, VIEWS_CHANGED, viewPath, type TaskView, type ViewType } from "../lib/views";
 import { WhiteboardIcon } from "./markupUi";
 
@@ -336,6 +336,16 @@ export default function Sidebar({ onCollapse }: { onCollapse: () => void }) {
       { label: "Duplicate", onClick: () => duplicateItem(item) },
       { label: "Delete", onClick: () => deleteItem(item) },
     ];
+    if (item.kind === "note") {
+      const { path } = item.note;
+      items.unshift({
+        label: "Open in new window",
+        onClick: () => {
+          setMenu(null);
+          openNoteInNewWindow(spaceId, path);
+        },
+      });
+    }
     if (item.kind === "folder") {
       const { folder } = item;
       // Only top-level folders can be marked; a sub-folder can still drop a flag it kept from being moved.

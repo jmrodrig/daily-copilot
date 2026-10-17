@@ -2,8 +2,10 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, 
 
 import { getJson, message, sendJson } from "../lib/api";
 import { checkLocalFile, isLocalHref, type LocalFileCheck } from "../lib/localFiles";
-import { STATUS_LABELS, type ProjectOption, type TaskCreate, type TaskItem } from "../lib/tasks";
-import { noteHref, PillIcon, PILL_NAMES, taskHref, type RefPillAttrs } from "./referencePill";
+import { AssigneeSelect, usePeople } from "../lib/people";
+import { announceTaskChange, STATUS_LABELS, type ProjectOption, type TaskCreate, type TaskItem } from "../lib/tasks";
+import { ProjectPicker } from "./ProjectPicker";
+import { fetchUrlTitle, isWebUrl, noteHref, PillIcon, PILL_NAMES, taskHref, type RefPillAttrs } from "./referencePill";
 
 /**
  * Where a panel's task or link goes, and where to show the panel (viewport px): the selected text (`from`..`to`,
@@ -12,7 +14,6 @@ import { noteHref, PillIcon, PILL_NAMES, taskHref, type RefPillAttrs } from "./r
 export type PanelDraft = { text: string; from: number; to: number; top: number; left: number };
 
 export const TASK_TITLE_MAX = 500; // `TaskCreate.title` in backend/schemas.py
-const ASSIGNEE_MAX = 64; // `TaskCreate.assignee`
 const PANEL_WIDTH = 340;
 
 /** Where to open a panel under the text at `from`..`to` (viewport coordinates of both ends). */
@@ -46,6 +47,9 @@ function usePanel(draft: PanelDraft, onClose: (refocus: boolean) => void) {
 
   useEffect(() => {
     const close = (e: MouseEvent) => {
+      // A dropdown of the panel's opens in a portal, outside the panel.
+      const target = e.target as HTMLElement | null;
+      if (target?.closest?.("[data-popover]")) return;
       if (!ref.current?.contains(e.target as Node)) onCloseRef.current(false);
     };
     const escape = (e: KeyboardEvent) => e.key === "Escape" && onCloseRef.current(true);
@@ -111,6 +115,7 @@ export function TaskPanel({
   const [linked, setLinked] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const people = usePeople(spaceId);
   const panel = usePanel(draft, onClose);
 
   useEffect(() => {
@@ -143,7 +148,9 @@ export function TaskPanel({
         status: inProgress ? "in_progress" : "backlog",
         ...(linked && notePath && { note_path: notePath }),
       };
-      onCreated(await sendJson<TaskItem>("POST", "/api/tasks", body));
+      const created = await sendJson<TaskItem>("POST", "/api/tasks", body);
+      announceTaskChange({ id: created.id, task: created, source: "board" });
+      onCreated(created);
     } catch (err) {
       setError(message(err));
       setSaving(false);
@@ -166,26 +173,19 @@ export function TaskPanel({
       </Field>
       <div className="grid grid-cols-2 gap-2">
         <Field label="Project">
-          <select
-            value={projectId ?? ""}
-            onChange={(e) => setProjectId(e.target.value ? Number(e.target.value) : null)}
-            className="field py-1 text-[15px]"
-          >
-            <option value="">No project</option>
-            {projects.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.code} · {p.name}
-              </option>
-            ))}
-          </select>
+          <ProjectPicker
+            value={projectId}
+            projects={projects}
+            onChange={setProjectId}
+            className="field flex h-[34px] w-full items-center justify-between py-1 text-[15px]"
+          />
         </Field>
         <Field label="Assignee">
-          <input
-            value={assignee}
-            maxLength={ASSIGNEE_MAX}
-            placeholder="Unassigned"
-            onChange={(e) => setAssignee(e.target.value)}
-            className="field py-1 text-[15px]"
+          <AssigneeSelect
+            value={assignee || null}
+            people={people}
+            onChange={(name) => setAssignee(name ?? "")}
+            className="field w-full py-1 text-[15px]"
           />
         </Field>
       </div>
@@ -331,12 +331,12 @@ export function LinkPanel({
   // The last title filled in for the user, so a newer page's title can replace it but never their own text.
   const fetchedTitle = useRef("");
   useEffect(() => {
-    if (!url || !/^https?:/i.test(url)) return;
+    if (!url || !isWebUrl(url)) return;
     const controller = new AbortController();
     // Wait for a pause in the typing; a pasted URL is fetched almost at once.
     const timer = setTimeout(() => {
-      getJson<{ title: string | null }>(`/api/url-metadata?url=${encodeURIComponent(url)}`, controller.signal)
-        .then(({ title }) => {
+      fetchUrlTitle(url, controller.signal)
+        .then((title) => {
           if (!title) return;
           setDisplayText((text) => {
             if (text.trim() && text !== fetchedTitle.current) return text;

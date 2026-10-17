@@ -1,5 +1,5 @@
 import type { PDFDocumentLoadingTask, PDFDocumentProxy, RenderTask } from "pdfjs-dist";
-import { useEffect, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { createPortal } from "react-dom";
 
 import { getJson, message, sendJson } from "../lib/api";
@@ -48,13 +48,46 @@ export type { MediaMarkup } from "./markupCore";
 export { drawStrokes, isTyping, strokesByPage } from "./markupCore";
 export { CommentPin } from "./markupUi";
 
-/** The view: the image's scale (1 is its natural size) and its center's offset from the stage's, in screen pixels. */
+/** The view: the image's (or the PDF's column of pages') scale (1 is its natural size) and its center's offset from
+ * the stage's, in screen pixels. */
 type View = { zoom: number; x: number; y: number };
+/** A page's size, and its top in the column of pages, in its pixels. An image is a single page. */
+type PageBox = { width: number; height: number; y: number };
 
 const MIN_ZOOM = 0.05;
 const MAX_ZOOM = 8;
 const ZOOM_STEP = 1.25;
 const clampZoom = (zoom: number) => Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoom));
+// The gap between a PDF's pages, in its pixels.
+const PAGE_GAP = 16;
+// Pixels a wheel's line (Firefox's unit) scrolls.
+const WHEEL_LINE = 16;
+// How long the footer's ‹ and › take to scroll to a page, in ms.
+const SCROLL_DURATION = 250;
+// The margin above a page scrolled to that's taller than the stage, in screen pixels.
+const PAGE_MARGIN = 24;
+
+/** The column of pages' size, in their pixels. */
+function stackSize(boxes: PageBox[]): { width: number; height: number } {
+  const last = boxes[boxes.length - 1];
+  return { width: Math.max(0, ...boxes.map((b) => b.width)), height: last ? last.y + last.height : 0 };
+}
+
+/** The view at `zoom` with page `index` centered on the stage. */
+function viewOn(boxes: PageBox[], index: number, zoom: number): View {
+  const box = boxes[index];
+  return { zoom, x: 0, y: box ? -(box.y + box.height / 2 - stackSize(boxes).height / 2) * zoom : 0 };
+}
+
+/** Device pixels per page pixel for a canvas over a page shown at `zoom`: enough for the screen, so it stays sharp
+ * when zoomed in, within the canvas's limits. */
+function renderScaleFor(width: number, height: number, zoom: number): number {
+  return Math.min(
+    window.devicePixelRatio * Math.max(1, zoom),
+    MAX_CANVAS_SIDE / Math.max(width, height),
+    Math.sqrt(MAX_CANVAS_AREA / (width * height)),
+  );
+}
 
 /** Whether a URL is a PDF's, by its name. */
 export const isPdfUrl = (url: string) => /\.pdf$/i.test(new URL(url, window.location.href).pathname);
@@ -76,9 +109,11 @@ function snapshot(byPage: Map<number, Stroke[]>, comments: Comment[]): MediaMark
 }
 
 /**
- * A note's image or PDF, fullscreen: dragged to pan and zoomed with the wheel, a pinch or the footer's controls; a
- * PDF is rendered with pdf.js, a page at a time. A stored file's markup, the strokes and comments drawn over it, is
- * kept beside it in a JSON sidecar, never in the file, and shown over it. While `editable`, it can be marked up: a
+ * A note's image or PDF, fullscreen: dragged to pan and zoomed with the wheel, a pinch or the footer's controls. A
+ * PDF is rendered with pdf.js as a column of pages, scrolled with the wheel (Ctrl + wheel zooms), only the pages near
+ * the screen drawn; the page nearest the stage's center is the one shown (and marked up). A stored file's markup, the
+ * strokes and comments drawn over it, is kept beside it in a JSON sidecar, never in the file, and shown over it.
+ * While `editable`, it can be marked up: a
  * canvas over the file takes a stylus's (or, with the pen tool, the mouse's) strokes, while touch still pans and
  * pinch-zooms, and the comment tool pins a sticky note where it's clicked. Saving, or closing or leaving markup, puts
  * the sidecar, and Cancel goes back to it as it was.
@@ -98,7 +133,6 @@ export default function MediaLightbox({
 }) {
   const stageRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const pdfCanvasRef = useRef<HTMLCanvasElement>(null);
   const isPdf = isPdfUrl(src);
   const markupUrl = markupUrlOf(src);
   // The PDF, once it's loaded, its page shown (counted from 0) and how many it has.
@@ -106,11 +140,25 @@ export default function MediaLightbox({
   const [page, setPage] = useState(0);
   const pageRef = useRef(page);
   pageRef.current = page;
-  // The size of the image, or the PDF's page, in its pixels.
-  const [size, setSize] = useState<{ width: number; height: number } | null>(null);
+  // The image's size, in its pixels; and the PDF's pages', laid out in a column, once they're measured.
+  const [imageSize, setImageSize] = useState<{ width: number; height: number } | null>(null);
+  const [pdfPages, setPdfPages] = useState<PageBox[]>([]);
+  const boxes = useMemo<PageBox[]>(
+    () => (isPdf ? pdfPages : imageSize ? [{ ...imageSize, y: 0 }] : []),
+    [isPdf, pdfPages, imageSize],
+  );
+  const stack = stackSize(boxes);
+  const stackRef = useRef(stack);
+  stackRef.current = stack;
+  // The size of the page shown (the image's), in its pixels.
+  const size: PageBox | null = boxes[page] ?? null;
   const [view, setView] = useState<View>({ zoom: 1, x: 0, y: 0 });
   const viewRef = useRef(view);
   viewRef.current = view;
+  // The stage's height, for which of a PDF's pages are near enough the screen to draw.
+  const [stageHeight, setStageHeight] = useState(0);
+  // The footer's scroll to a page, while it runs.
+  const scrollFrame = useRef<number | null>(null);
   const [markup, setMarkup] = useState(false);
   const [tool, setTool] = useState<Tool>("draw");
   const toolRef = useRef(tool);
@@ -155,15 +203,8 @@ export default function MediaLightbox({
   const transforming = useRef<Transform | null>(null);
   const [hover, setHover] = useState<Handle | null>(null);
 
-  // The markup canvas's device pixels per image pixel: enough for the screen at the current zoom, so strokes stay
-  // sharp when zoomed in, within the canvas's limits.
-  const renderScale = size
-    ? Math.min(
-        window.devicePixelRatio * Math.max(1, view.zoom),
-        MAX_CANVAS_SIDE / Math.max(size.width, size.height),
-        Math.sqrt(MAX_CANVAS_AREA / (size.width * size.height)),
-      )
-    : 1;
+  // The markup canvas's device pixels per image pixel (see renderScaleFor).
+  const renderScale = size ? renderScaleFor(size.width, size.height, view.zoom) : 1;
   const canvasWidth = size ? Math.max(1, Math.round(size.width * renderScale)) : 0;
   const canvasHeight = size ? Math.max(1, Math.round(size.height * renderScale)) : 0;
 
@@ -176,8 +217,58 @@ export default function MediaLightbox({
     return clampZoom(Math.min(1, (stage.width - 48) / width, (stage.height - 48) / height));
   }
 
+  /** Fit the page shown on the stage, centered. */
   function fit() {
-    if (size) setView({ zoom: fitZoom(size.width, size.height), x: 0, y: 0 });
+    cancelScroll();
+    if (size) setView(viewOn(boxes, page, fitZoom(size.width, size.height)));
+  }
+
+  /** Where a client point is in the column of pages, in its pixels. */
+  function stackPoint(e: { clientX: number; clientY: number }): Point | null {
+    const stage = stageRef.current?.getBoundingClientRect();
+    if (!stage) return null;
+    const { zoom, x, y } = viewRef.current;
+    return {
+      x: (e.clientX - stage.left - stage.width / 2 - x) / zoom + stackRef.current.width / 2,
+      y: (e.clientY - stage.top - stage.height / 2 - y) / zoom + stackRef.current.height / 2,
+    };
+  }
+
+  /** The page under a client point, or null between or beside them. */
+  function pageAt(e: { clientX: number; clientY: number }): number | null {
+    const point = stackPoint(e);
+    if (!point) return null;
+    const index = boxes.findIndex((b) => point.y >= b.y && point.y <= b.y + b.height);
+    return index < 0 ? null : index;
+  }
+
+  /** Whether a stroke, an erase, a lasso or a transform is under way: the page shown can't change mid-way. */
+  const busy = () => !!(drawing.current || erasing.current || selecting.current || transforming.current);
+
+  function cancelScroll() {
+    if (scrollFrame.current !== null) cancelAnimationFrame(scrollFrame.current);
+    scrollFrame.current = null;
+  }
+
+  /** Scroll smoothly to a PDF's page (counted from 0): centered if it fits on the stage, else its top at the top. */
+  function goToPage(next: number) {
+    const box = boxes[next];
+    const stage = stageRef.current?.getBoundingClientRect();
+    if (!pdf || !box || !stage) return;
+    cancelScroll();
+    const { zoom, y: from } = viewRef.current;
+    const to =
+      box.height * zoom <= stage.height - 2 * PAGE_MARGIN
+        ? viewOn(boxes, next, zoom).y
+        : -stage.height / 2 + PAGE_MARGIN - (box.y - stack.height / 2) * zoom;
+    const start = performance.now();
+    const step = (now: number) => {
+      const t = Math.min(1, (now - start) / SCROLL_DURATION);
+      const eased = 1 - (1 - t) ** 3;
+      setView((v) => ({ ...v, y: from + (to - from) * eased }));
+      scrollFrame.current = t < 1 ? requestAnimationFrame(step) : null;
+    };
+    scrollFrame.current = requestAnimationFrame(step);
   }
 
   /** Zoom to `zoom`, keeping the image's point under `at` (client coordinates; the stage's center by default) there. */
@@ -258,14 +349,18 @@ export default function MediaLightbox({
     setMarkup(false);
   }
 
-  /** Show a PDF's page (counted from 0), keeping the strokes on the one that was shown. */
-  function goToPage(next: number) {
-    if (!pdf || next < 0 || next >= pdf.numPages || next === page) return;
-    commitText();
-    otherPages.current.set(page, strokes);
+  /** Make a PDF's page (counted from 0) the one shown and marked up, keeping the strokes (and any text being typed)
+   * on the one that was. */
+  function showPage(next: number) {
+    const shown = pageRef.current;
+    if (!pdf || next < 0 || next >= pdf.numPages || next === shown) return;
+    const text = takeText();
+    otherPages.current.set(shown, text ? [...strokes, text] : strokes);
     setStrokes(otherPages.current.get(next) ?? []);
     otherPages.current.delete(next);
     setSelected(new Set());
+    setHover(null);
+    pageRef.current = next;
     setPage(next);
   }
 
@@ -330,57 +425,52 @@ export default function MediaLightbox({
     };
   }, [src, isPdf]);
 
-  // A PDF's page is sized, and fitted, when it's shown.
+  // A PDF's pages are all measured once it's loaded, laid out in a column, and its first page fitted on the stage.
   useEffect(() => {
     if (!pdf) return;
     let cancelled = false;
-    pdf.getPage(page + 1).then(
-      (pdfPage) => {
+    Promise.all(Array.from({ length: pdf.numPages }, (_, i) => pdf.getPage(i + 1))).then(
+      (pdfPages) => {
         if (cancelled) return;
-        const { width, height } = pdfPage.getViewport({ scale: PDF_SCALE });
-        setView({ zoom: fitZoom(width, height), x: 0, y: 0 });
-        setSize({ width, height });
+        let y = 0;
+        const laid = pdfPages.map((pdfPage) => {
+          const { width, height } = pdfPage.getViewport({ scale: PDF_SCALE });
+          const box = { width, height, y };
+          y += height + PAGE_GAP;
+          return box;
+        });
+        setPdfPages(laid);
+        setView(viewOn(laid, 0, fitZoom(laid[0].width, laid[0].height)));
       },
-      (err) => !cancelled && setError(`Could not show page ${page + 1} (${message(err)}).`),
+      (err) => !cancelled && setError(`Could not show the PDF's pages (${message(err)}).`),
     );
     return () => {
       cancelled = true;
     };
-  }, [pdf, page]);
+  }, [pdf]);
 
-  // A PDF's page is rendered at the markup canvas's resolution, so it stays sharp as it's zoomed in: off screen, then
-  // copied over, so it doesn't flash blank. A zoom renders it again once it rests; till then it's scaled as it was.
+  // The stage's height follows the window's.
   useEffect(() => {
-    const shown = pdfCanvasRef.current;
-    if (!pdf || !size || !shown) return;
-    let cancelled = false;
-    let task: RenderTask | null = null;
-    const render = async () => {
-      try {
-        const pdfPage = await pdf.getPage(page + 1);
-        if (cancelled) return;
-        const offscreen = document.createElement("canvas");
-        offscreen.width = canvasWidth;
-        offscreen.height = canvasHeight;
-        task = pdfPage.render({ canvas: offscreen, viewport: pdfPage.getViewport({ scale: (PDF_SCALE * canvasWidth) / size.width }) });
-        await task.promise;
-        if (cancelled) return;
-        shown.width = offscreen.width;
-        shown.height = offscreen.height;
-        shown.getContext("2d")?.drawImage(offscreen, 0, 0);
-        shown.dataset.page = String(page);
-      } catch (err) {
-        if (!cancelled) setError(`Could not show page ${page + 1} (${message(err)}).`);
-      }
-    };
-    // The first render of a page isn't held back: there's nothing to show till it's done.
-    const timer = setTimeout(() => void render(), shown.dataset.page === String(page) ? PDF_RENDER_DELAY : 0);
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-      task?.cancel();
-    };
-  }, [pdf, page, size, canvasWidth, canvasHeight]);
+    const stage = stageRef.current;
+    if (!stage) return;
+    const observer = new ResizeObserver(() => setStageHeight(stage.clientHeight));
+    observer.observe(stage);
+    setStageHeight(stage.clientHeight);
+    return () => observer.disconnect();
+  }, []);
+
+  // As a PDF's scrolled (or zoomed), the page nearest the stage's center becomes the one shown, unless a stroke or
+  // the like is under way on the one shown (it's caught up with on the next move).
+  useEffect(() => {
+    if (!isPdf || !boxes.length || busy()) return;
+    const center = -view.y / view.zoom + stack.height / 2;
+    const index = boxes.findIndex((b) => center < b.y + b.height + PAGE_GAP / 2);
+    showPage(index < 0 ? boxes.length - 1 : index);
+    // Only on a move: a click on another page (see activatePageAt) makes it the one shown without one.
+  }, [view, boxes]);
+
+  // The footer's scroll stops if the lightbox closes mid-way.
+  useEffect(() => cancelScroll, []);
 
 
   // Delete or Backspace deletes the selection (once it's done being dragged). Not while typing.
@@ -413,15 +503,20 @@ export default function MediaLightbox({
     return () => clearTimeout(timer);
   }, [textAt]);
 
-  /** Finish the text being typed: kept as a stroke, unless it's blank. */
-  function commitText() {
+  /** End the text being typed, returning its stroke, unless it's blank. */
+  function takeText(): Stroke | null {
     const entry = textEntryRef.current;
-    if (!entry) return;
+    if (!entry) return null;
     textEntryRef.current = null;
     setTextEntry(null);
-    if (entry.value.trim()) {
-      setStrokes((s) => [...s, { type: "text", color: entry.color, points: [{ x: entry.x, y: entry.y, width: entry.size }], text: entry.value }]);
-    }
+    if (!entry.value.trim()) return null;
+    return { type: "text", color: entry.color, points: [{ x: entry.x, y: entry.y, width: entry.size }], text: entry.value };
+  }
+
+  /** Finish the text being typed: kept as a stroke, unless it's blank. */
+  function commitText() {
+    const text = takeText();
+    if (text) setStrokes((s) => [...s, text]);
   }
 
   function cancelText() {
@@ -429,21 +524,35 @@ export default function MediaLightbox({
     setTextEntry(null);
   }
 
-  // React's wheel listener is passive, so it can't keep the page from scrolling: the stage's own is added here.
+  // React's wheel listener is passive, so it can't keep the page from scrolling: the stage's own is added here. The
+  // wheel zooms an image, about the cursor; it scrolls a PDF (Shift + wheel sideways), kept from leaving the stage, and
+  // Ctrl + wheel, as a trackpad's pinch sends, zooms it.
   useEffect(() => {
     const stage = stageRef.current;
     if (!stage) return;
     const wheel = (e: WheelEvent) => {
       e.preventDefault();
-      zoomTo(viewRef.current.zoom * Math.exp(-e.deltaY / 400), { x: e.clientX, y: e.clientY });
+      cancelScroll();
+      if (!isPdf || e.ctrlKey || e.metaKey) {
+        zoomTo(viewRef.current.zoom * Math.exp(-e.deltaY / 400), { x: e.clientX, y: e.clientY });
+        return;
+      }
+      const unit = e.deltaMode === WheelEvent.DOM_DELTA_LINE ? WHEEL_LINE : e.deltaMode === WheelEvent.DOM_DELTA_PAGE ? stage.clientHeight : 1;
+      const dx = (e.shiftKey ? e.deltaY : e.deltaX) * unit;
+      const dy = (e.shiftKey ? 0 : e.deltaY) * unit;
+      setView((v) => {
+        const reach = { x: (stackRef.current.width * v.zoom) / 2, y: (stackRef.current.height * v.zoom) / 2 };
+        const clamp = (value: number, limit: number) => Math.min(limit, Math.max(-limit, value));
+        return { ...v, x: clamp(v.x - dx, reach.x), y: clamp(v.y - dy, reach.y) };
+      });
     };
     stage.addEventListener("wheel", wheel, { passive: false });
     return () => stage.removeEventListener("wheel", wheel);
-  }, []);
+  }, [isPdf]);
 
   // The canvas shows the strokes: redrawn whole when they change (an undo, a clear, a save) or it's resized (a zoom,
   // which clears it), and added to as one's drawn. Before paint, so a zoom doesn't flash it blank.
-  useLayoutEffect(redraw, [strokes, selected, size, markup, canvasWidth, canvasHeight, view.zoom]);
+  useLayoutEffect(redraw, [strokes, selected, size, page, markup, canvasWidth, canvasHeight, view.zoom]);
 
   /** Redraw the canvas whole, with the stroke being drawn too: a pinch can zoom mid-stroke, and a shape's drag moves
    * its end. A lasso being drawn shows as its outline, and deletes (or selects) once it's done. The selection shows
@@ -466,12 +575,21 @@ export default function MediaLightbox({
   /** Whether a pointer draws: in markup, a pen or the mouse with any tool but Move. Touch always pans. */
   const draws = (e: ReactPointerEvent) => editing && tool !== "pan" && (e.pointerType === "pen" || e.pointerType === "mouse");
 
-  /** A pointer's position on the image, in its pixels. */
+  /** A pointer's position on the page shown (the image), in its pixels. */
   function imagePoint(e: { clientX: number; clientY: number }): Point | null {
-    const canvas = canvasRef.current;
-    if (!canvas || !size) return null;
-    const rect = canvas.getBoundingClientRect();
-    return { x: ((e.clientX - rect.left) / rect.width) * size.width, y: ((e.clientY - rect.top) / rect.height) * size.height };
+    const point = stackPoint(e);
+    const box = boxes[pageRef.current];
+    if (!point || !box) return null;
+    return { x: point.x - (stackRef.current.width - box.width) / 2, y: point.y - box.y };
+  }
+
+  /** Marking up a PDF's page other than the one shown makes it the one shown; whether it was another. */
+  function activatePageAt(e: ReactPointerEvent): boolean {
+    if (!isPdf || busy()) return false;
+    const at = pageAt(e);
+    if (at === null || at === pageRef.current) return false;
+    showPage(at);
+    return true;
   }
 
   /** A stroke's width in image pixels: the line size on screen at the current zoom. A freehand stroke's thins from
@@ -510,6 +628,7 @@ export default function MediaLightbox({
     if (!editing || drawing.current || erasing.current || selecting.current || transforming.current) return;
     commitText();
     setEraserMenu(false);
+    activatePageAt(e);
     const eraser = isEraser(tool) ? tool : eraserRef.current;
     if (!isEraser(tool)) {
       previousToolRef.current = { pointerId: e.pointerId, tool };
@@ -531,15 +650,19 @@ export default function MediaLightbox({
     const right = e.pointerType === "mouse" && e.button === 2;
     if (e.button !== 0 && e.pointerType === "mouse" && !right) return;
     if (saving) return;
+    cancelScroll();
     e.currentTarget.setPointerCapture(e.pointerId);
     if (right) return rightDown(e);
     if (draws(e)) {
+      if (busy() || tool === "pan") return;
+      // Another page's selection was dropped with it.
+      const moved = activatePageAt(e);
       const point = imagePoint(e);
-      if (!point || drawing.current || erasing.current || selecting.current || transforming.current || tool === "pan") return;
+      if (!point) return;
       if (isEraser(tool)) return eraseDown(tool, point, e.pointerId);
       if (tool === "select") {
         // On the selection, or a handle of it, transforms it; anywhere else drops it, and starts a lasso for another.
-        const box = selection.length ? selectionBox(selection) : null;
+        const box = selection.length && !moved ? selectionBox(selection) : null;
         const handle = box && selectionHandle(box, point, view.zoom);
         if (box && handle) {
           transforming.current = { pointerId: e.pointerId, handle, from: point, box, originals: selection, current: selection, angle: 0 };
@@ -553,7 +676,7 @@ export default function MediaLightbox({
       if (tool === "comment") {
         // A click pins a comment, open to be written in; any other open one closes.
         commitText();
-        const comment: Comment = { id: newId(), x: point.x, y: point.y, text: "", isExpanded: true, page };
+        const comment: Comment = { id: newId(), x: point.x, y: point.y, text: "", isExpanded: true, page: pageRef.current };
         setComments((all) => [
           ...all.filter((c) => !c.isExpanded || c.text.trim()).map((c) => ({ ...c, isExpanded: false })),
           comment,
@@ -705,6 +828,72 @@ export default function MediaLightbox({
     setComments((all) => (next ? all.map((c) => (c.id === id ? { ...c, ...next } : c)) : all.filter((c) => c.id !== id)));
   }
 
+  /** Whether a PDF's page is on the stage, or within a stage's height of it: only those are drawn. */
+  function nearScreen(box: PageBox): boolean {
+    const top = view.y + (box.y - stack.height / 2) * view.zoom;
+    const reach = stageHeight * 1.5;
+    return top + box.height * view.zoom > -reach && top < reach;
+  }
+
+  /** What shows over a page: its markup (the page shown's on the canvas it's drawn on), the text being typed on it,
+   * and its comments. In its pixels, so it zooms with it. */
+  function layers(index: number) {
+    const shown = index === page;
+    return (
+      <>
+        {/* The markup shows over the file whether or not it's being edited. */}
+        {shown
+          ? size && <canvas ref={canvasRef} width={canvasWidth} height={canvasHeight} className="absolute inset-0 h-full w-full" />
+          : boxes[index] && <PageMarkup strokes={otherPages.current.get(index)} box={boxes[index]} zoom={view.zoom} />}
+        {shown && editing && textEntry && (
+          // In image pixels, like the canvas, so it zooms with the image and its text sits where it's drawn.
+          <input
+            ref={textInputRef}
+            aria-label="Text"
+            value={textEntry.value}
+            onChange={(e) => setTextEntry({ ...textEntry, value: e.target.value })}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                commitText();
+              }
+            }}
+            onBlur={commitText}
+            // Typing and selecting in it isn't drawing on the stage.
+            onPointerDown={(e) => e.stopPropagation()}
+            className="absolute m-0 select-text border-0 bg-transparent p-0"
+            style={{
+              left: textEntry.x,
+              top: textEntry.y,
+              font: textFont(textEntry.size),
+              lineHeight: 1,
+              color: textEntry.color,
+              width: textWidth(textEntry.value, textEntry.size) + textEntry.size,
+              outline: `${1.5 / view.zoom}px dashed currentColor`,
+              outlineOffset: 2 / view.zoom,
+            }}
+          />
+        )}
+        {boxes[index] &&
+          comments
+            .filter((c) => (c.page ?? 0) === index)
+            .map((c) => (
+              <CommentPin
+                key={c.id}
+                comment={c}
+                zoom={view.zoom}
+                editable={editing && shown}
+                onToggle={() =>
+                  c.isExpanded && !c.text.trim() ? updateComment(c.id, null) : updateComment(c.id, { isExpanded: !c.isExpanded })
+                }
+                onSave={(text) => updateComment(c.id, text.trim() ? { text, isExpanded: false } : null)}
+                onDelete={() => updateComment(c.id, null)}
+              />
+            ))}
+      </>
+    );
+  }
+
   return createPortal(
     <div role="dialog" aria-modal aria-label={heading || kind} className="fixed inset-0 z-50 flex flex-col bg-background/95">
       <header className="flex min-h-14 items-center justify-between gap-4 border-b border-border-default px-5 py-2">
@@ -805,72 +994,43 @@ export default function MediaLightbox({
         <div
           className="absolute left-1/2 top-1/2"
           style={{
-            width: size?.width,
-            height: size?.height,
+            width: boxes.length ? stack.width : undefined,
+            height: boxes.length ? stack.height : undefined,
             transform: `translate(calc(-50% + ${view.x}px), calc(-50% + ${view.y}px)) scale(${view.zoom})`,
-            visibility: size ? "visible" : "hidden",
+            visibility: boxes.length ? "visible" : "hidden",
           }}
         >
-          {isPdf ? (
-            <canvas ref={pdfCanvasRef} aria-label={heading || kind} className="block h-full w-full bg-white shadow-lg" />
-          ) : (
-            <img
-              src={src}
-              alt={alt ?? ""}
-              draggable={false}
-              onLoad={(e) => {
-                const { naturalWidth: width, naturalHeight: height } = e.currentTarget;
-                setView({ zoom: fitZoom(width, height), x: 0, y: 0 });
-                setSize({ width, height });
-              }}
-              className="block h-full w-full max-w-none shadow-lg"
-            />
-          )}
-          {/* The markup shows over the file whether or not it's being edited. */}
-          {size && <canvas ref={canvasRef} width={canvasWidth} height={canvasHeight} className="absolute inset-0 h-full w-full" />}
-          {editing && textEntry && (
-            // In image pixels, like the canvas, so it zooms with the image and its text sits where it's drawn.
-            <input
-              ref={textInputRef}
-              aria-label="Text"
-              value={textEntry.value}
-              onChange={(e) => setTextEntry({ ...textEntry, value: e.target.value })}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  e.preventDefault();
-                  commitText();
-                }
-              }}
-              onBlur={commitText}
-              // Typing and selecting in it isn't drawing on the stage.
-              onPointerDown={(e) => e.stopPropagation()}
-              className="absolute m-0 select-text border-0 bg-transparent p-0"
-              style={{
-                left: textEntry.x,
-                top: textEntry.y,
-                font: textFont(textEntry.size),
-                lineHeight: 1,
-                color: textEntry.color,
-                width: textWidth(textEntry.value, textEntry.size) + textEntry.size,
-                outline: `${1.5 / view.zoom}px dashed currentColor`,
-                outlineOffset: 2 / view.zoom,
-              }}
-            />
-          )}
-          {size &&
-            pageComments.map((c) => (
-              <CommentPin
-                key={c.id}
-                comment={c}
-                zoom={view.zoom}
-                editable={editing}
-                onToggle={() =>
-                  c.isExpanded && !c.text.trim() ? updateComment(c.id, null) : updateComment(c.id, { isExpanded: !c.isExpanded })
-                }
-                onSave={(text) => updateComment(c.id, text.trim() ? { text, isExpanded: false } : null)}
-                onDelete={() => updateComment(c.id, null)}
+          {isPdf && pdf ? (
+            boxes.map((box, i) => (
+              <div
+                key={i}
+                className="absolute shadow-lg"
+                style={{ left: (stack.width - box.width) / 2, top: box.y, width: box.width, height: box.height }}
+              >
+                {nearScreen(box) ? (
+                  <PdfPage pdf={pdf} index={i} width={box.width} height={box.height} zoom={view.zoom} label={`${heading || kind}, page ${i + 1}`} onError={setError} />
+                ) : (
+                  <div aria-hidden className="h-full w-full bg-white" />
+                )}
+                {layers(i)}
+              </div>
+            ))
+          ) : !isPdf ? (
+            <>
+              <img
+                src={src}
+                alt={alt ?? ""}
+                draggable={false}
+                onLoad={(e) => {
+                  const { naturalWidth: width, naturalHeight: height } = e.currentTarget;
+                  setView({ zoom: fitZoom(width, height), x: 0, y: 0 });
+                  setImageSize({ width, height });
+                }}
+                className="block h-full w-full max-w-none shadow-lg"
               />
-            ))}
+              {layers(0)}
+            </>
+          ) : null}
         </div>
       </div>
       <footer className="flex items-center justify-center gap-1 border-t border-border-default px-5 py-1.5">
@@ -908,6 +1068,88 @@ export default function MediaLightbox({
     </div>,
     document.body,
   );
+}
+
+/**
+ * A PDF's page in the lightbox, rendered at the resolution its markup canvas would have (see renderScaleFor), so it
+ * stays sharp as it's zoomed in: off screen, then copied over, so it doesn't flash blank. A zoom renders it again once
+ * it rests; till then it's scaled as it was.
+ */
+function PdfPage({
+  pdf,
+  index,
+  width,
+  height,
+  zoom,
+  label,
+  onError,
+}: {
+  pdf: PDFDocumentProxy;
+  index: number;
+  width: number;
+  height: number;
+  zoom: number;
+  label: string;
+  onError: (error: string) => void;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const scale = renderScaleFor(width, height, zoom);
+  const canvasWidth = Math.max(1, Math.round(width * scale));
+  const canvasHeight = Math.max(1, Math.round(height * scale));
+
+  useEffect(() => {
+    const shown = canvasRef.current;
+    if (!shown) return;
+    let cancelled = false;
+    let task: RenderTask | null = null;
+    const render = async () => {
+      try {
+        const pdfPage = await pdf.getPage(index + 1);
+        if (cancelled) return;
+        const offscreen = document.createElement("canvas");
+        offscreen.width = canvasWidth;
+        offscreen.height = canvasHeight;
+        task = pdfPage.render({ canvas: offscreen, viewport: pdfPage.getViewport({ scale: (PDF_SCALE * canvasWidth) / width }) });
+        await task.promise;
+        if (cancelled) return;
+        shown.width = offscreen.width;
+        shown.height = offscreen.height;
+        shown.getContext("2d")?.drawImage(offscreen, 0, 0);
+        shown.dataset.rendered = "true";
+      } catch (err) {
+        if (!cancelled) onError(`Could not show page ${index + 1} (${message(err)}).`);
+      }
+    };
+    // The first render isn't held back: there's nothing to show till it's done.
+    const timer = setTimeout(() => void render(), shown.dataset.rendered ? PDF_RENDER_DELAY : 0);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+      task?.cancel();
+    };
+  }, [pdf, index, width, canvasWidth, canvasHeight, onError]);
+
+  return <canvas ref={canvasRef} aria-label={label} data-page={index + 1} className="block h-full w-full bg-white" />;
+}
+
+/** The markup on a PDF's page other than the one shown, drawn over it as it is. */
+function PageMarkup({ strokes, box, zoom }: { strokes: Stroke[] | undefined; box: PageBox; zoom: number }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const scale = renderScaleFor(box.width, box.height, zoom);
+  const canvasWidth = Math.max(1, Math.round(box.width * scale));
+  const canvasHeight = Math.max(1, Math.round(box.height * scale));
+
+  useLayoutEffect(() => {
+    const context = canvasRef.current?.getContext("2d");
+    if (!context || !strokes) return;
+    context.resetTransform();
+    context.clearRect(0, 0, canvasWidth, canvasHeight);
+    context.scale(canvasWidth / box.width, canvasHeight / box.height);
+    drawStrokes(context, strokes);
+  }, [strokes, box, canvasWidth, canvasHeight]);
+
+  if (!strokes?.length) return null;
+  return <canvas ref={canvasRef} width={canvasWidth} height={canvasHeight} className="absolute inset-0 h-full w-full" />;
 }
 
 /**

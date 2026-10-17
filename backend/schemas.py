@@ -24,6 +24,7 @@ class Status(str, Enum):
     BACKLOG = "backlog"
     TODO = "todo"
     IN_PROGRESS = "in_progress"
+    IN_REVIEW = "in_review"
     BLOCKED = "blocked"
     DONE = "done"
     # Put away: hidden from the task views and lists unless asked for (`include_archived`).
@@ -260,6 +261,45 @@ class Link(BaseModel):
     lag_days: float = 0
 
 
+class LinkCreate(BaseModel):
+    """`POST /api/links`: `predecessor_id` blocks `successor_id` (it must finish before the successor starts)."""
+
+    predecessor_id: int
+    successor_id: int
+    type: LinkType = LinkType.FINISH_TO_START
+    lag_days: float = 0
+
+
+class LinkWithDetails(BaseModel):
+    """A live dependency, with whether the two tasks' dates contradict it."""
+
+    id: int
+    predecessor_id: int
+    successor_id: int
+    type: LinkType = LinkType.FINISH_TO_START
+    lag_days: float = 0
+    conflict: bool = False
+    conflict_reason: str | None = Field(default=None, description="Why the dates contradict the link, if they do")
+
+
+class TaskDependencyItem(BaseModel):
+    """The task at the other end of one of a task's dependencies (`GET /api/tasks/{id}/links`)."""
+
+    link_id: int
+    task_id: int
+    title: str
+    status: Status
+    start_date: date | None = None
+    deadline: date | None = None
+    conflict: bool = False
+    conflict_reason: str | None = None
+
+
+class TaskDependenciesResponse(BaseModel):
+    blocked_by: list[TaskDependencyItem] = Field(default_factory=list, description="Predecessors: tasks this one waits on")
+    blocks: list[TaskDependencyItem] = Field(default_factory=list, description="Successors: tasks waiting on this one")
+
+
 class Capture(BaseModel):
     id: int | None = None
     text: str = Field(min_length=1)
@@ -426,9 +466,19 @@ class ChatRole(str, Enum):
     ASSISTANT = "assistant"
 
 
+class ChatAttachment(BaseModel):
+    """A file attached to a chat message, uploaded to the space's assets by `POST /api/notes/image`."""
+
+    name: str
+    url: str  # /api/notes/image/<asset name>?space_id=<id>
+    size: int | None = None
+    content_type: str | None = None
+
+
 class ChatMessage(BaseModel):
     role: ChatRole
     content: str
+    attachments: list[ChatAttachment] = Field(default_factory=list)
 
 
 class ChatRequest(BaseModel):
@@ -451,8 +501,9 @@ class ChatRequest(BaseModel):
     @field_validator("messages")
     @classmethod
     def _ends_with_user(cls, value: list[ChatMessage]) -> list[ChatMessage]:
-        if value[-1].role != ChatRole.USER or not value[-1].content.strip():
-            raise ValueError("the last message must be a non-blank user message")
+        last = value[-1]
+        if last.role != ChatRole.USER or not (last.content.strip() or last.attachments):
+            raise ValueError("the last message must be a user message with text or attachments")
         return value
 
 
@@ -1204,6 +1255,12 @@ class PersonIn(BaseModel):
     is_external: bool = Field(default=False, description="Outside the organisation, e.g. a client or supplier")
     avatar_url: str | None = Field(default=None, max_length=2048, description="None shows the person's initials")
     is_me: bool = Field(default=False, description="The app's user; marking someone unmarks the rest of the space")
+    color: str | None = Field(default=None, description='"#rrggbb" for their avatar medallion; None uses the default')
+
+    @field_validator("color", mode="before")
+    @classmethod
+    def _clean_color(cls, value: Any) -> str | None:
+        return clean_color(value)
 
     @field_validator("name")
     @classmethod
@@ -1239,7 +1296,7 @@ class Person(PersonIn):
 
 
 class UrlMetadata(BaseModel):
-    """A web page's metadata for a link pill: its `<title>`, or None when it can't be fetched or has none."""
+    """A web page's metadata for a link pill: its title (from the page, or else from its URL), or None for a non-web URL."""
 
     title: str | None = None
 
@@ -1269,3 +1326,19 @@ class LocalFileCheck(BaseModel):
     path: str
     unc_path: str | None = None
     error: str | None = None
+
+
+class ChatHistoryPayload(BaseModel):
+    """`PUT /api/chat/history`: client chat threads and active thread for a space."""
+
+    space_id: int
+    threads: list[dict[str, Any]] = Field(default_factory=list)
+    active_id: str | None = None
+
+
+class ChatHistoryResponse(BaseModel):
+    """`GET /api/chat/history` and `PUT /api/chat/history`: saved chat threads and active thread for a space."""
+
+    space_id: int
+    threads: list[dict[str, Any]] = Field(default_factory=list)
+    active_id: str | None = None

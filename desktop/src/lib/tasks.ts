@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
 
-import { sendJson } from "./api";
+import { getJson, sendJson } from "./api";
 import { writeAdvancedParams, type ViewFilters } from "./views";
 
 // Shapes of the task engine endpoints (see TaskItem, ProjectOption etc. in backend/schemas.py).
-export type TaskStatus = "backlog" | "todo" | "in_progress" | "blocked" | "done" | "archived";
+export type TaskStatus = "backlog" | "todo" | "in_progress" | "in_review" | "blocked" | "done" | "archived";
 export type TaskPriority = "low" | "normal" | "high" | "urgent";
 
 export type TaskItem = {
@@ -71,6 +71,7 @@ export const BOARD_COLUMNS: { status: TaskStatus; label: string }[] = [
   { status: "todo", label: "To do" },
   { status: "blocked", label: "Blocked" },
   { status: "in_progress", label: "In progress" },
+  { status: "in_review", label: "In review" },
   { status: "done", label: "Done" },
 ];
 
@@ -78,6 +79,7 @@ export const STATUS_LABELS: Record<TaskStatus, string> = {
   backlog: "Backlog",
   todo: "To do",
   in_progress: "In progress",
+  in_review: "In review",
   blocked: "Blocked",
   done: "Done",
   archived: "Archived",
@@ -93,6 +95,7 @@ export const DEFAULT_STATUS_COLORS: Record<TaskStatus, string> = {
   backlog: "#94a3b8",
   todo: "#64748b",
   in_progress: "#3b82f6",
+  in_review: "#8b5cf6",
   blocked: "#ef4444",
   done: "#22c55e",
   archived: "#a8a29e",
@@ -219,6 +222,71 @@ export function useTaskChanges(source: TaskChange["source"], listener: (change: 
     window.addEventListener(TASK_CHANGED, handle);
     return () => window.removeEventListener(TASK_CHANGED, handle);
   }, [source]);
+}
+
+/** A dependency as `GET /api/links` lists it (see LinkWithDetails in backend/schemas.py): `predecessor_id` blocks `successor_id`. */
+export type LinkWithDetails = {
+  id: number;
+  predecessor_id: number;
+  successor_id: number;
+  type: "finish_to_start";
+  lag_days: number;
+  /** Whether the tasks' dates contradict the link (the successor starts, or is due, before the predecessor finishes). */
+  conflict: boolean;
+  conflict_reason: string | null;
+};
+
+/** The task at the other end of one of a task's dependencies (see TaskDependencyItem in backend/schemas.py). */
+export type TaskLinkItem = {
+  link_id: number;
+  task_id: number;
+  title: string;
+  status: TaskStatus;
+  start_date: string | null;
+  deadline: string | null;
+  conflict: boolean;
+  conflict_reason: string | null;
+};
+
+/** `GET /api/tasks/{id}/links`: the tasks it waits on (`blocked_by`) and the tasks waiting on it (`blocks`). */
+export type TaskDependencies = { blocked_by: TaskLinkItem[]; blocks: TaskLinkItem[] };
+
+/** Fired after a dependency is added or removed, so the Gantt chart and the task panel reload their links. */
+export const LINKS_CHANGED = "copilot:links-changed";
+
+function announceLinksChange() {
+  window.dispatchEvent(new Event(LINKS_CHANGED));
+}
+
+/** Calls `listener` after any dependency is added or removed. */
+export function useLinksChanged(listener: () => void) {
+  const latest = useRef(listener);
+  latest.current = listener;
+  useEffect(() => {
+    const handle = () => latest.current();
+    window.addEventListener(LINKS_CHANGED, handle);
+    return () => window.removeEventListener(LINKS_CHANGED, handle);
+  }, []);
+}
+
+export function fetchTaskDependencies(taskId: number, signal?: AbortSignal): Promise<TaskDependencies> {
+  return getJson<TaskDependencies>(`/api/tasks/${taskId}/links`, signal);
+}
+
+export function fetchSpaceLinks(spaceId: number, signal?: AbortSignal): Promise<LinkWithDetails[]> {
+  return getJson<LinkWithDetails[]>(`/api/links?space_id=${spaceId}`, signal);
+}
+
+/** Makes `predecessorId` block `successorId`; refused (with the reason) for duplicates, other spaces and loops. */
+export async function createTaskLink(predecessorId: number, successorId: number): Promise<LinkWithDetails> {
+  const link = await sendJson<LinkWithDetails>("POST", "/api/links", { predecessor_id: predecessorId, successor_id: successorId });
+  announceLinksChange();
+  return link;
+}
+
+export async function deleteTaskLink(linkId: number): Promise<void> {
+  await sendJson<void>("DELETE", `/api/links/${linkId}`);
+  announceLinksChange();
 }
 
 // The task open in the right-hand panel is the `?taskId=` of the current page, so it survives a reload and Back closes it.
