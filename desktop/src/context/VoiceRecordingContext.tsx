@@ -32,6 +32,17 @@ export type ListenParticipant = {
   audio_stem?: string | null;
   snippet_url?: string | null;
   sample_text?: string;
+  // One clip per speaker merged into this participant (tagged as the same person), when there are several.
+  snippets?: VoiceClip[];
+};
+
+/** A clip of one speaker's voice: their snippet (if one was saved) and what they said in it. */
+export type VoiceClip = {
+  speaker_id?: string;
+  cluster_id?: number | null;
+  audio_stem?: string | null;
+  snippet_url?: string | null;
+  sample_text?: string;
 };
 
 /** A listen widget's data, as its ```listen block in the note holds it (see noteFormatting). */

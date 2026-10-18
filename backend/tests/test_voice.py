@@ -837,6 +837,100 @@ def test_untag_participant_without_a_note_returns_the_untagged_block(client):
     assert response.json()["block"]["participants"][0]["is_tagged"] is False
 
 
+TWO_UNKNOWN = {
+    "id": "lw_abc",
+    "participants": [
+        {"speaker_id": "Participant 1", "display_name": "Participant 1", "is_tagged": False, "email": "", "cluster_id": 1,
+         "audio_stem": "x", "snippet_url": "/api/voice/snippets/x_participant_1.wav", "sample_text": "Hello."},
+        {"speaker_id": "Participant 2", "display_name": "Participant 2", "is_tagged": False, "email": "", "cluster_id": 2,
+         "audio_stem": "x", "snippet_url": "/api/voice/snippets/x_participant_2.wav", "sample_text": "Frame 12."},
+        {"speaker_id": "Participant 3", "display_name": "Participant 3", "is_tagged": False, "email": "", "cluster_id": 3,
+         "audio_stem": "x", "snippet_url": None, "sample_text": "Agreed."},
+    ],
+    "dialogue": "[00:00 - 00:05] **Participant 1:** Hello.\n\n[00:06 - 00:10] **Participant 3:** Agreed.\n\n"
+    "[00:11 - 00:20] **Participant 2:** Frame 12.",
+}
+
+
+def test_tag_participant_merges_duplicate_speakers():
+    """The diarization split Alice's voice in two: tagging both as Alice leaves one Alice, with both clips."""
+    block = voice.tag_participant(TWO_UNKNOWN, "Participant 1", "Alice", "alice@spirityachts.com")
+    merged = voice.tag_participant(block, "Participant 2", "alice")
+
+    assert [p["display_name"] for p in merged["participants"]] == ["alice", "Participant 3"]
+    alice = merged["participants"][0]
+    assert alice["speaker_id"] == "Participant 1" and alice["is_tagged"] is True
+    assert alice["email"] == "alice@spirityachts.com"  # kept: she's the same person
+    assert [(c["speaker_id"], c["cluster_id"], c["snippet_url"], c["sample_text"]) for c in alice["snippets"]] == [
+        ("Participant 1", 1, "/api/voice/snippets/x_participant_1.wav", "Hello."),
+        ("Participant 2", 2, "/api/voice/snippets/x_participant_2.wav", "Frame 12."),
+    ]
+    assert merged["dialogue"].count("**alice:**") == 2
+    assert "Alice:" not in merged["dialogue"] and "Participant 1" not in merged["dialogue"]
+    assert "Participant 2" not in merged["dialogue"] and "**Participant 3:** Agreed." in merged["dialogue"]
+    assert len(TWO_UNKNOWN["participants"]) == 3  # not changed in place
+
+
+def test_merged_participant_is_renamed_and_merged_again_as_one():
+    block = voice.tag_participant(TWO_UNKNOWN, "Participant 1", "Alice")
+    block = voice.tag_participant(block, "Participant 2", "Alice")
+
+    renamed = voice.tag_participant(block, "Participant 1", "Alice Smith", "alice@spirityachts.com")
+    assert [p["display_name"] for p in renamed["participants"]] == ["Alice Smith", "Participant 3"]
+    assert renamed["dialogue"].count("**Alice Smith:**") == 2 and "**Alice:**" not in renamed["dialogue"]
+    assert len(renamed["participants"][0]["snippets"]) == 2
+
+    # A third voice of hers, merged in from the other side: still one Alice Smith, first in the list.
+    again = voice.tag_participant(renamed, "Participant 3", "Alice Smith")
+    assert [p["display_name"] for p in again["participants"]] == ["Alice Smith"]
+    assert [c["speaker_id"] for c in again["participants"][0]["snippets"]] == ["Participant 1", "Participant 2", "Participant 3"]
+    assert again["participants"][0]["email"] == "alice@spirityachts.com"
+    assert again["dialogue"].count("**Alice Smith:**") == 3
+
+
+def test_retag_merges_duplicates_left_by_older_tagging():
+    """Blocks tagged before merging existed can hold two entries of one name: re-tagging either merges them."""
+    block = {
+        **TWO_UNKNOWN,
+        "participants": [
+            {**p, "display_name": "Alice", "is_tagged": True} if p["cluster_id"] < 3 else p for p in TWO_UNKNOWN["participants"]
+        ],
+        "dialogue": TWO_UNKNOWN["dialogue"].replace("Participant 1", "Alice").replace("Participant 2", "Alice"),
+    }
+    renamed = voice.tag_participant(block, "Participant 2", "Carol")
+    assert [p["display_name"] for p in renamed["participants"]] == ["Carol", "Participant 3"]
+    assert renamed["dialogue"].count("**Carol:**") == 2
+
+
+def test_untag_merged_participant_keeps_them_one_speaker_with_their_clips():
+    block = voice.tag_participant(TWO_UNKNOWN, "Participant 1", "Alice", "alice@spirityachts.com")
+    block = voice.tag_participant(block, "Participant 2", "Alice")
+
+    untagged = voice.untag_participant(block, "Participant 1")
+
+    assert [p["display_name"] for p in untagged["participants"]] == ["Participant 1", "Participant 3"]
+    speaker = untagged["participants"][0]
+    assert speaker["is_tagged"] is False and speaker["email"] == "" and len(speaker["snippets"]) == 2
+    assert untagged["dialogue"].count("**Participant 1:**") == 2 and "Alice" not in untagged["dialogue"]
+    assert voice.has_untagged(untagged)
+
+
+def test_tag_participant_endpoint_merges_into_the_note(client, notes_dir):
+    block = voice.tag_participant({**TWO_UNKNOWN, "status": "completed"}, "Participant 1", "Alice")
+    write_note(notes_dir, "Review.md", f"{voice.listen_block_markdown(block)}\n")
+
+    response = client.post(
+        "/api/voice/tag-participant",
+        json={"speaker_id": "Participant 2", "alias": "Alice", "block": block, "widget_id": "lw_abc", "note_path": "Review.md"},
+    )
+
+    assert response.status_code == 200
+    saved = json.loads(voice.LISTEN_FENCE.search(file_layer.read_note("Review.md", notes_dir=notes_dir)["content"]).group(1))
+    for result in (response.json()["block"], saved):
+        assert [p["display_name"] for p in result["participants"]] == ["Alice", "Participant 3"]
+        assert len(result["participants"][0]["snippets"]) == 2
+
+
 # --- The listen block ---------------------------------------------------------------------------------------------
 
 

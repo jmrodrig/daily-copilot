@@ -7,6 +7,7 @@ import {
   useVoiceRecording,
   type ListenData,
   type ListenParticipant,
+  type VoiceClip,
   type VoiceSource,
 } from "../context/VoiceRecordingContext";
 import { message, promptCopilot, sendJson } from "../lib/api";
@@ -409,7 +410,7 @@ function Completed({
   const [open, setOpen] = useState(false);
   const turns = (data.dialogue ?? "").split(/\n{2,}/).filter((turn) => turn.trim());
   const participants = data.participants ?? [];
-  const tagged = participants.filter((p) => p.is_tagged);
+  const tagged = byPerson(participants.filter((p) => p.is_tagged));
   const untagged = participants.filter((p) => !p.is_tagged);
   // The space's People: who to name a speaker as, and the avatars of those named.
   const people = usePeople(note?.spaceId ?? 1);
@@ -485,6 +486,7 @@ function Completed({
               key={p.speaker_id}
               data={data}
               participant={p}
+              tagged={tagged}
               people={people}
               interactive={interactive}
               note={note}
@@ -514,11 +516,32 @@ function findPerson(people: Person[], name: string): Person | undefined {
   return needle ? people.find((p) => p.name.toLowerCase() === needle) : undefined;
 }
 
-/** A speaker's snippet player: plays it (stopping when unmounted), reporting a failure through `onError`. */
-function useSnippet(url: string | null | undefined, onError: (error: string) => void) {
+/** A participant's voice clips: one per speaker merged into them (tagged as the same person), else just their own. */
+function voiceClips(participant: ListenParticipant): VoiceClip[] {
+  if (participant.snippets?.length) return participant.snippets;
+  const { speaker_id, cluster_id, audio_stem, snippet_url, sample_text } = participant;
+  return [{ speaker_id, cluster_id, audio_stem, snippet_url, sample_text }];
+}
+
+/**
+ * The tagged participants, one per person: the backend merges those tagged with the same name, but a block tagged
+ * before it did can hold several, so they're shown as one (the first, with all their clips).
+ */
+function byPerson(tagged: ListenParticipant[]): ListenParticipant[] {
+  const people = new Map<string, ListenParticipant>();
+  for (const p of tagged) {
+    const key = p.display_name.trim().toLowerCase();
+    const first = people.get(key);
+    people.set(key, first ? { ...first, snippets: [...voiceClips(first), ...voiceClips(p)] } : p);
+  }
+  return [...people.values()];
+}
+
+/** A snippet player: plays one (stopping the last, and when unmounted), reporting a failure through `onError`. */
+function useSnippet(onError: (error: string) => void) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   useEffect(() => () => audioRef.current?.pause(), []);
-  return function play() {
+  return function play(url: string | null | undefined) {
     if (!url) return;
     audioRef.current?.pause();
     audioRef.current = new Audio(url);
@@ -526,9 +549,36 @@ function useSnippet(url: string | null | undefined, onError: (error: string) => 
   };
 }
 
+/** The play button of a voice clip, labelled `Clip n` when the speaker has several. */
+function ClipButton({
+  clip,
+  label,
+  name,
+  onPlay,
+}: {
+  clip: VoiceClip;
+  label: string | null;
+  name: string;
+  onPlay: (url: string | null | undefined) => void;
+}) {
+  return (
+    <button
+      type="button"
+      title={clip.snippet_url ? "Play a snippet of their voice" : "No snippet: they were recognised by their voiceprint"}
+      aria-label={`Play ${label ? `${label.toLowerCase()} of` : "a snippet of"} ${name}`}
+      disabled={!clip.snippet_url}
+      onClick={() => onPlay(clip.snippet_url)}
+      className="btn min-h-8 shrink-0 gap-1 px-2 text-[13px]"
+    >
+      <PlayIcon />
+      {label}
+    </button>
+  );
+}
+
 /**
  * A named speaker, as a chip of the participants' row: their avatar if they're in People, their email on hover. When
- * `interactive`, clicking it opens a popover to hear their snippet, name them as someone else, or remove their tag.
+ * `interactive`, clicking it opens a popover to hear their snippets, name them as someone else, or remove their tag.
  */
 function TaggedParticipant({
   data,
@@ -550,7 +600,8 @@ function TaggedParticipant({
   const spaceId = note?.spaceId ?? 1;
   const [editing, setEditing] = useState(false);
   const picker = usePeoplePicker(people, spaceId);
-  const play = useSnippet(participant.snippet_url, picker.setError);
+  const play = useSnippet(picker.setError);
+  const clips = voiceClips(participant);
   const chip = useRef<HTMLButtonElement>(null);
   const titleId = useId();
   const content = (
@@ -661,19 +712,12 @@ function TaggedParticipant({
             <div className="font-mono text-[11px] uppercase tracking-[0.06em] text-text-muted">Edit speaker</div>
             <div className="text-[14px] text-text-primary">{participant.display_name}</div>
           </div>
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              title={participant.snippet_url ? "Play a snippet of their voice" : "No snippet: they were recognised by their voiceprint"}
-              aria-label={`Play a snippet of ${participant.display_name}`}
-              disabled={!participant.snippet_url}
-              onClick={play}
-              className="btn min-h-8 px-2"
-            >
-              <PlayIcon />
-            </button>
-            {participant.sample_text && <span className="truncate text-xs italic text-text-muted">“{participant.sample_text}”</span>}
-          </div>
+          {clips.map((clip, i) => (
+            <div key={i} className="flex items-center gap-2">
+              <ClipButton clip={clip} label={clips.length > 1 ? `Clip ${i + 1}` : null} name={participant.display_name} onPlay={play} />
+              {clip.sample_text && <span className="truncate text-xs italic text-text-muted">“{clip.sample_text}”</span>}
+            </div>
+          ))}
           <PeoplePicker picker={picker} label={`Who ${participant.display_name} is`} inline autoFocus />
           <div className="flex flex-wrap items-center justify-end gap-2 pt-1">
             <button
@@ -926,11 +970,13 @@ function PeoplePicker({
 
 /**
  * A speaker who wasn't recognised: play their snippet, pick who they are from the space's People (or add them to it),
- * and enrol their voice under that person's name and email.
+ * or, with one click, someone already named in the recording (the same voice, split in two), and enrol their voice
+ * under that person's name and email.
  */
 function UntaggedParticipant({
   data,
   participant,
+  tagged,
   people,
   interactive,
   note,
@@ -938,6 +984,7 @@ function UntaggedParticipant({
 }: {
   data: ListenData;
   participant: ListenParticipant;
+  tagged: ListenParticipant[];
   people: Person[];
   interactive: boolean;
   note: { spaceId: number; path: string } | null;
@@ -946,14 +993,18 @@ function UntaggedParticipant({
   const spaceId = note?.spaceId ?? 1;
   const picker = usePeoplePicker(people, spaceId);
   const { busy: saving, setBusy: setSaving, error, setError } = picker;
-  const play = useSnippet(participant.snippet_url, setError);
+  const play = useSnippet(setError);
+  const clips = voiceClips(participant);
 
-  /** Names the speaker as the picked person (else the one named as typed, else adds the typed name to People). */
-  async function tag() {
+  /**
+   * Names the speaker as `as` if given (someone already named in the recording, merged with them), else as the picked
+   * person (else the one named as typed, else adds the typed name to People).
+   */
+  async function tag(as?: { name: string; email: string | null }) {
     setSaving(true);
     setError(null);
     try {
-      const person = await picker.resolve();
+      const person = as ?? (await picker.resolve());
       if (!person) return;
       const response = await sendJson<{ block: ListenData; note_updated: boolean }>("POST", "/api/voice/tag-participant", {
         speaker_id: participant.speaker_id,
@@ -984,16 +1035,9 @@ function UntaggedParticipant({
         }}
       >
         <span className="rounded border border-border-strong px-2 py-0.5 text-[14px] text-text-secondary">{participant.display_name}</span>
-        <button
-          type="button"
-          title="Play a snippet of their voice"
-          aria-label={`Play a snippet of ${participant.display_name}`}
-          disabled={!participant.snippet_url}
-          onClick={play}
-          className="btn min-h-8 px-2"
-        >
-          <PlayIcon />
-        </button>
+        {clips.map((clip, i) => (
+          <ClipButton key={i} clip={clip} label={clips.length > 1 ? `Clip ${i + 1}` : null} name={participant.display_name} onPlay={play} />
+        ))}
         {interactive && (
           <>
             <PeoplePicker picker={picker} label={`Name of ${participant.display_name}`} />
@@ -1003,7 +1047,31 @@ function UntaggedParticipant({
           </>
         )}
       </form>
-      {participant.sample_text && <p className="pl-1 text-xs italic text-text-muted">“{participant.sample_text}”</p>}
+      {interactive && tagged.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5 pl-1">
+          <span className="text-xs text-text-muted">Same voice as:</span>
+          {tagged.map((p) => (
+            <button
+              key={p.speaker_id}
+              type="button"
+              title={`Tag ${participant.display_name} as ${p.display_name}, merging them into one participant`}
+              disabled={saving}
+              onClick={() => void tag({ name: p.display_name, email: p.email || findPerson(people, p.display_name)?.email || null })}
+              className="rounded-full border border-emerald-500/40 bg-emerald-500/10 px-2 py-0.5 text-xs text-emerald-400 hover:border-emerald-500/70 hover:bg-emerald-500/20 disabled:opacity-50"
+            >
+              {p.display_name}
+            </button>
+          ))}
+        </div>
+      )}
+      {clips.map(
+        (clip, i) =>
+          clip.sample_text && (
+            <p key={i} className="pl-1 text-xs italic text-text-muted">
+              {clips.length > 1 && <span className="not-italic">Clip {i + 1}: </span>}“{clip.sample_text}”
+            </p>
+          ),
+      )}
       {error && <p className="text-xs text-accent">{error}</p>}
     </div>
   );

@@ -1062,34 +1062,78 @@ def identify_speaker(embedding: np.ndarray | None, threshold: float = MATCH_THRE
     return {**best, "similarity": round(best_sim, 3)}
 
 
+def _is_named(participant: dict[str, Any], name: str) -> bool:
+    """Whether `participant` is tagged as `name` (in any case)."""
+    shown = str(participant.get("display_name") or "").strip().lower()
+    return bool(participant.get("is_tagged")) and shown == name.strip().lower()
+
+
+def _clips(participant: dict[str, Any]) -> list[dict[str, Any]]:
+    """A participant's voice clips: one per speaker merged into them (see `_merge`), else just their own."""
+    if participant.get("snippets"):
+        return [dict(clip) for clip in participant["snippets"]]
+    return [{key: participant.get(key) for key in ("speaker_id", "cluster_id", "audio_stem", "snippet_url", "sample_text")}]
+
+
+def _merge(
+    participants: list[dict[str, Any]], target: dict[str, Any], names: list[str]
+) -> tuple[list[dict[str, Any]], dict[str, Any], list[dict[str, Any]]]:
+    """`participants` with `target` and everyone else tagged as one of `names` merged into one entry: the first of them
+    in the list, holding all their clips (the diarization can split one voice into several speakers). Returns the list,
+    that entry, and who was merged into it."""
+    group = [p for p in participants if p is target or any(_is_named(p, name) for name in names)]
+    primary = group[0]
+    if len(group) > 1:
+        primary["snippets"] = [clip for p in group for clip in _clips(p)]
+    merged = {id(p) for p in group}
+    return [p for p in participants if p is primary or id(p) not in merged], primary, group
+
+
+def _rename_turns(dialogue: str, names: set[str], new_name: str) -> str:
+    for name in names:
+        dialogue = dialogue.replace(f"**{name}:**", f"**{new_name}:**")
+    return dialogue
+
+
 def tag_participant(
     block: dict[str, Any], speaker_id: str, alias: str, email: str | None = None
 ) -> dict[str, Any]:
     """`block` (a listen widget's data) with the participant `speaker_id` named `alias`: their entry is marked tagged
-    and their turns in the dialogue renamed. Doesn't touch the contacts (see `enroll_participant`)."""
+    and their turns in the dialogue renamed. Anyone already tagged as `alias` is the same person, so they're merged into
+    one entry (keeping each one's clip). Doesn't touch the contacts (see `enroll_participant`)."""
     alias = alias.strip()
     participants = [dict(p) for p in block.get("participants") or []]
     target = next((p for p in participants if p.get("speaker_id") == speaker_id), None)
     if target is None:
         return block
     old_name = target.get("display_name") or speaker_id
+    # Those already tagged as the target's name too are the same person (merged before this, or tagged twice).
+    names = [alias, old_name] if target.get("is_tagged") else [alias]
+    participants, primary, group = _merge(participants, target, names)
     # Re-tagging as someone else drops the old person's email; tagging the same name again keeps it.
-    kept_email = target.get("email", "") if alias == old_name else ""
-    target.update(display_name=alias, is_tagged=True, email=(email or "").strip() or kept_email)
-    dialogue = str(block.get("dialogue") or "").replace(f"**{old_name}:**", f"**{alias}:**")
+    same = alias.lower()
+    kept_email = next(
+        (p.get("email") for p in group if p.get("email") and str(p.get("display_name") or "").strip().lower() == same), ""
+    )
+    renamed = {p.get("display_name") or p.get("speaker_id") for p in group} | {old_name}
+    primary.update(display_name=alias, is_tagged=True, email=(email or "").strip() or kept_email)
+    dialogue = _rename_turns(str(block.get("dialogue") or ""), renamed, alias)
     return {**block, "participants": participants, "dialogue": dialogue}
 
 
 def untag_participant(block: dict[str, Any], speaker_id: str) -> dict[str, Any]:
     """`block` with the participant `speaker_id` back to unidentified: named by their speaker id again, untagged, with
-    no email, and their turns in the dialogue renamed back. Doesn't touch the contacts or their voiceprints."""
+    no email, and their turns in the dialogue renamed back. A merged participant stays one speaker, keeping their clips
+    (their turns can't be told apart any more). Doesn't touch the contacts or their voiceprints."""
     participants = [dict(p) for p in block.get("participants") or []]
     target = next((p for p in participants if p.get("speaker_id") == speaker_id), None)
     if target is None:
         return block
     old_name = target.get("display_name") or speaker_id
-    target.update(display_name=speaker_id, is_tagged=False, email="")
-    dialogue = str(block.get("dialogue") or "").replace(f"**{old_name}:**", f"**{speaker_id}:**")
+    participants, primary, group = _merge(participants, target, [old_name] if target.get("is_tagged") else [])
+    renamed = {p.get("display_name") or p.get("speaker_id") for p in group}
+    primary.update(display_name=primary["speaker_id"], is_tagged=False, email="")
+    dialogue = _rename_turns(str(block.get("dialogue") or ""), renamed, primary["speaker_id"])
     return {**block, "participants": participants, "dialogue": dialogue}
 
 
