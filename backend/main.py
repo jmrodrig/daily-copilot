@@ -939,9 +939,14 @@ def update_note(request: NoteUpdate, db: Session = Depends(get_db)) -> NoteFile:
     path = note["path"]
     if request.title is not None:
         # Keep the file name in step with the title, taking the note's history and task links along.
+        # A name taken by another note is refused (409), so the user picks a different one. A change of case only
+        # keeps the current path (a case-insensitive file system sees that name as taken by the note itself).
         stem = sanitize_note_filename(request.title, fallback=Path(path).stem)
-        target = _unique_note_path(root, path, stem)
-        path = _move_entry(db, request.space_id, root, ContentEntry(kind=ContentKind.NOTE, path=path), target).path
+        target = _sibling(path, f"{stem}{file_layer.NOTE_SUFFIX}")
+        if target.lower() != path.lower():
+            if (root / target).exists():
+                raise HTTPException(status_code=409, detail=_name_taken(ContentKind.NOTE, stem))
+            path = _move_entry(db, request.space_id, root, ContentEntry(kind=ContentKind.NOTE, path=path), target).path
     file_layer.write_note(path, content, frontmatter, AccessMode.WRITE_DIRECTLY, notes_dir=root, source=DESKTOP_SOURCE)
     return NoteFile(path=path, frontmatter=to_jsonable(frontmatter), content=content)
 
@@ -1546,16 +1551,9 @@ def sanitize_note_filename(title: str, fallback: str = "Untitled") -> str:
     return stem or fallback
 
 
-def _unique_note_path(root: Path, current_path: str, new_stem: str) -> str:
-    """Where the note at `current_path` goes when renamed to `new_stem`: next to itself, or as `<stem> (2).md`,
-    `<stem> (3).md`, … if that name is taken. Its current path if the name is unchanged, or differs in case only
-    (which a case-insensitive file system sees as taken by the note itself)."""
-    target = _sibling(current_path, f"{new_stem}{file_layer.NOTE_SUFFIX}")
-    n = 1
-    while target.lower() != current_path.lower() and (root / target).exists():
-        n += 1
-        target = _sibling(current_path, f"{new_stem} ({n}){file_layer.NOTE_SUFFIX}")
-    return current_path if target.lower() == current_path.lower() else target
+def _name_taken(kind: ContentKind, name: str) -> str:
+    noun = "note" if kind is ContentKind.NOTE else "folder"
+    return f"A {noun} named '{name}' already exists in this folder. Please choose a different name."
 
 
 def _retitle(root: Path, path: str, old_title: str, new_title: str) -> None:
@@ -1586,7 +1584,10 @@ def _move_entry(db: Session, space_id: int, root: Path, entry: ContentEntry, new
     except file_layer.NotePathError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except FileExistsError as exc:
-        raise HTTPException(status_code=409, detail=f"{new_path} already exists") from exc
+        name = new_path.rpartition("/")[2]
+        if entry.kind is ContentKind.NOTE:
+            name = name.removesuffix(file_layer.NOTE_SUFFIX)
+        raise HTTPException(status_code=409, detail=_name_taken(entry.kind, name)) from exc
     spaces.relocate(db, space_id, entry.path, new_path)
     return ContentEntry(kind=entry.kind, path=new_path)
 

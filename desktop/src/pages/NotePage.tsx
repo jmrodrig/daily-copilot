@@ -81,6 +81,8 @@ export default function NotePage() {
   // An auto-save or Ctrl+S ("content") keeps the draft editable; publishing or editing a note ("state") doesn't.
   const [saving, setSaving] = useState<"content" | "state" | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
+  // A new title already taken by another note in the folder (HTTP 409): asks for a different one.
+  const [collision, setCollision] = useState<{ conflictingTitle: string } | null>(null);
   // Tags are saved on their own, straight away; the body's auto-save waits for them.
   const [savingTags, setSavingTags] = useState(false);
   const [tagError, setTagError] = useState<string | null>(null);
@@ -251,11 +253,15 @@ export default function NotePage() {
     return () => window.removeEventListener("keydown", keydown);
   }, [state]);
 
-  /** Save the draft's title and body and/or switch the note's state (PUT /api/notes/file). */
-  async function save(next?: NoteState) {
+  /**
+   * Save the draft's title and body and/or switch the note's state (PUT /api/notes/file). `retitle` saves that title
+   * in place of the edited one (the collision dialog's pick, before `titleDraft` has caught up).
+   */
+  async function save(next?: NoteState, retitle?: string) {
     if (note.state !== "ok" || saving || savingTags) return;
     const content = body;
-    const draft = titleDraft;
+    const draft = retitle ?? titleDraft;
+    const savedTitle = state === "draft" && draft.trim() !== (fm.title || "") ? draft.trim() : null;
     setSaving(next ? "state" : "content");
     setSaveError(null);
     failedRef.current = null;
@@ -264,7 +270,7 @@ export default function NotePage() {
         space_id: spaceId,
         path,
         ...(state === "draft" && { content }),
-        ...(state === "draft" && newTitle !== null && { title: newTitle }),
+        ...(savedTitle !== null && { title: savedTitle }),
         ...(next && { state: next }),
       });
       setNote({ state: "ok", note: saved });
@@ -280,11 +286,27 @@ export default function NotePage() {
         navigate(notePath(spaceId, saved.path, isTemplate ? "templates" : "content"), { replace: true });
       }
     } catch (err) {
+      const msg = message(err);
       failedRef.current = `${draft}\n${content}`;
-      setSaveError(message(err));
+      setSaveError(msg);
+      if (savedTitle !== null && msg.toLowerCase().includes("already exists")) setCollision({ conflictingTitle: savedTitle });
     } finally {
       setSaving(null);
     }
+  }
+
+  /** The collision dialog's pick: save the note under the new title. */
+  function renameAfterCollision(name: string) {
+    setCollision(null);
+    setTitleDraft(name);
+    void save(undefined, name);
+  }
+
+  /** The collision dialog was dismissed: back to the saved title, with the error cleared. */
+  function revertAfterCollision() {
+    setCollision(null);
+    if (note.state === "ok") setTitleDraft(noteTitle(note.note.frontmatter, note.note.path));
+    setSaveError(null);
   }
 
   /** Replace the note's `tags` front-matter (PUT /api/notes/file), leaving its body and unsaved edits alone. */
@@ -441,6 +463,13 @@ export default function NotePage() {
           }
           onRestored={restored}
           onClose={() => setHistoryOpen(false)}
+        />
+      )}
+      {collision && (
+        <CollisionDialog
+          conflictingTitle={collision.conflictingTitle}
+          onRename={renameAfterCollision}
+          onCancel={revertAfterCollision}
         />
       )}
       {restoredToast && <RestoredToast label={restoredToast} onClose={() => setRestoredToast(null)} />}
@@ -633,6 +662,64 @@ function ExternalWindowIcon() {
 
 // How long the "restored" message stays up (ms).
 const TOAST_DURATION = 4000;
+
+/** Asks for a different title when the one given is taken by another note in the folder. */
+function CollisionDialog({
+  conflictingTitle,
+  onRename,
+  onCancel,
+}: {
+  conflictingTitle: string;
+  onRename: (name: string) => void;
+  onCancel: () => void;
+}) {
+  const [name, setName] = useState(conflictingTitle);
+  const clean = name.trim();
+  const canRename = clean !== "" && clean !== conflictingTitle;
+  return createPortal(
+    <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/50 pt-[15vh]" onMouseDown={onCancel}>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (canRename) onRename(clean);
+        }}
+        onMouseDown={(e) => e.stopPropagation()}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") {
+            e.preventDefault();
+            onCancel();
+          }
+        }}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Name already taken"
+        className="panel flex w-[420px] flex-col gap-3"
+      >
+        <h2 className="text-base font-semibold">Name already taken</h2>
+        <p className="text-xs text-text-muted">
+          A note named "{conflictingTitle}" already exists in this folder. Please choose a different name.
+        </p>
+        <input
+          autoFocus
+          aria-label="New title"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          onFocus={(e) => e.currentTarget.select()}
+          className="field"
+        />
+        <div className="flex justify-end gap-2">
+          <button type="button" className="btn" onClick={onCancel}>
+            Revert to original
+          </button>
+          <button type="submit" className="btn-primary" disabled={!canRename}>
+            Rename
+          </button>
+        </div>
+      </form>
+    </div>,
+    document.body,
+  );
+}
 
 /** The message that a version's been restored, at the foot of the window till it times out or is dismissed. */
 function RestoredToast({ label, onClose }: { label: string; onClose: () => void }) {

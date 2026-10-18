@@ -778,14 +778,26 @@ def test_update_note_sanitizes_filename_with_illegal_characters(client, notes_di
     assert (notes_dir / path).exists()
 
 
-def test_update_note_resolves_collision_with_existing_file(client, notes_dir):
+def test_update_note_throws_409_on_collision_with_existing_file(client, notes_dir):
     file_layer.write_note("Target.md", "Taken\n", {}, "write_directly")
-    file_layer.write_note("Target (2).md", "Taken too\n", {}, "write_directly")
     file_layer.write_note("Other.md", "Mine\n", {}, "write_directly")
 
-    assert _retitle(client, "Other.md", "Target")["path"] == "Target (3).md"
+    res = client.put("/api/notes/file", json={"space_id": 1, "path": "Other.md", "title": "Target"})
+    assert res.status_code == 409
+    assert "already exists in this folder. Please choose a different name" in res.json()["detail"]
+    assert file_layer.read_note("Other.md") == {"path": "Other.md", "frontmatter": {}, "content": "Mine\n"}
     assert (notes_dir / "Target.md").read_text(encoding="utf-8") == "Taken\n"
-    assert file_layer.read_note("Target (3).md")["content"] == "Mine\n"
+    assert not (notes_dir / "Target (2).md").exists()
+
+
+def test_rename_content_409_names_the_taken_note(client, notes_dir):
+    file_layer.write_note("Target.md", "Taken\n", {}, "write_directly")
+    file_layer.write_note("Other.md", "Mine\n", {}, "write_directly")
+
+    res = client.post("/api/content/rename", json={"space_id": 1, "path": "Other.md", "name": "Target"})
+    assert res.status_code == 409
+    assert res.json()["detail"] == "A note named 'Target' already exists in this folder. Please choose a different name."
+    assert (notes_dir / "Other.md").exists()
 
 
 def test_update_note_relocates_linked_tasks_on_rename(client, notes_dir):
