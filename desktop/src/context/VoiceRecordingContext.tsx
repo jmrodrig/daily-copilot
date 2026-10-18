@@ -325,14 +325,14 @@ export function VoiceRecordingProvider({ children }: { children: ReactNode }) {
 
   const recordingHere = status.is_recording && status.widget_id !== null && (mounted[status.widget_id] ?? 0) > 0;
 
-  // The window's title says it's recording ("🔴 Listening (01:23)"), whichever page is shown.
+  // The window's title says it's recording ("⚪ Listening (01:23)"), whichever page is shown.
   const clock = formatClock(elapsed);
   useEffect(() => {
     setTitleStatus(
       status.is_recording
         ? status.is_paused
           ? `⏸ Paused (${clock})`
-          : `🔴 Listening (${clock})`
+          : `⚪ Listening (${clock})`
         : status.is_processing
           ? "⏳ Transcribing"
           : "",

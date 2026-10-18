@@ -215,7 +215,7 @@ export default function Layout() {
       <main ref={mainRef} className="min-w-[320px] flex-1 overflow-auto print:overflow-visible">
         <Outlet />
       </main>
-      <ListeningIndicator />
+      <ListeningIndicator chatOpen={chatOpen} />
       {rightOfMain && (
         <Divider
           {...dividerProps}
@@ -267,23 +267,24 @@ export default function Layout() {
 }
 
 /**
- * The badge at the top of the window while a voice recording runs (or is being transcribed), on every page and in
- * every window: `🔴 Listening (01:23)`, linking to the note that's recording, with a Stop button.
+ * The badge at the top right of the window while a voice recording runs (or is being transcribed), on every page and
+ * in every window: `⚪ Listening (01:23)`, linking to the note that's recording, with a Stop button. It sits just left
+ * of the chat header's buttons (or of the collapsed chat rail), clear of the note's own title and buttons.
  */
-function ListeningIndicator() {
+function ListeningIndicator({ chatOpen }: { chatOpen: boolean }) {
   const { status, elapsed, stop } = useVoiceRecording();
   if (!status.is_recording && !status.is_processing) return null;
   const label = status.is_recording
-    ? `${status.is_paused ? "⏸ Paused" : "🔴 Listening"} (${formatClock(elapsed)})`
+    ? `${status.is_paused ? "⏸ Paused" : "⚪ Listening"} (${formatClock(elapsed)})`
     : "⏳ Transcribing…";
   const to = status.note_path && status.space_id !== null ? notePath(status.space_id, status.note_path) : null;
   return (
     <div
       role="status"
       aria-live="polite"
-      className={`fixed left-1/2 top-2 z-40 flex -translate-x-1/2 items-center gap-2 rounded-full border bg-surface-raised py-1 pl-3 pr-1.5 text-[13px] font-medium shadow-lg print:hidden ${
-        status.is_recording && !status.is_paused ? "border-red-500/60" : "border-border-strong"
-      }`}
+      className={`fixed top-2 z-40 flex items-center gap-2 rounded-full border bg-surface-raised py-1 pl-3 pr-1.5 text-[13px] font-medium text-text-primary shadow-lg print:hidden ${
+        chatOpen ? "right-36" : "right-14"
+      } ${status.is_recording && !status.is_paused ? "border-white/30 hover:border-white/50" : "border-border-strong"}`}
     >
       {to ? (
         <Link to={to} title="Go to the note that's recording" className="tabular-nums text-text-primary hover:underline">
@@ -296,7 +297,7 @@ function ListeningIndicator() {
         <button
           type="button"
           onClick={() => void stop()}
-          className="rounded-full border border-red-500/50 px-2 py-0.5 text-[12px] text-red-500 hover:bg-red-500/10"
+          className="rounded-full border border-white/30 px-2 py-0.5 text-[12px] text-white hover:border-white/60 hover:bg-white/10"
         >
           Stop
         </button>
