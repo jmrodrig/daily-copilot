@@ -786,6 +786,57 @@ def test_tag_participant_as_a_person_added_to_people(client):
     assert [p["name"] for p in client.get("/api/people?space_id=1").json()] == ["Sarah Connor"]
 
 
+def test_retag_participant_renames_them_as_someone_else():
+    block = {"id": "lw_abc", **FAKE_RESULT}
+    retagged = voice.tag_participant(block, "Participant 1", "Carol")
+
+    assert "**Carol:** Hello." in retagged["dialogue"]
+    assert "Alice" not in retagged["dialogue"]
+    assert retagged["participants"][0]["display_name"] == "Carol" and retagged["participants"][0]["is_tagged"] is True
+    assert retagged["participants"][0]["email"] == ""  # Alice's email isn't Carol's
+    assert retagged["participants"][1] == FAKE_RESULT["participants"][1]
+    # Tagging with the same name again keeps the email.
+    assert voice.tag_participant(block, "Participant 1", "Alice")["participants"][0]["email"] == "alice@spirityachts.com"
+
+
+def test_untag_participant_sets_them_back_to_unidentified():
+    block = {"id": "lw_abc", **FAKE_RESULT}
+    untagged = voice.untag_participant(block, "Participant 1")
+
+    assert "**Participant 1:** Hello." in untagged["dialogue"]
+    assert "Alice" not in untagged["dialogue"]
+    assert untagged["participants"][0] == {**FAKE_RESULT["participants"][0], "display_name": "Participant 1", "is_tagged": False, "email": ""}
+    assert block["participants"][0]["display_name"] == "Alice"  # not changed in place
+    assert voice.untag_participant(block, "Participant 9") is block
+
+
+def test_untag_participant_endpoint_updates_the_note(client, notes_dir):
+    block = {"id": "lw_abc", "status": "completed", **FAKE_RESULT}
+    write_note(notes_dir, "Review.md", f"Before.\n\n{voice.listen_block_markdown(block)}\n")
+
+    response = client.post(
+        "/api/voice/untag-participant",
+        json={"speaker_id": "Participant 1", "block": block, "widget_id": "lw_abc", "note_path": "Review.md"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["note_updated"] is True and body["has_untagged"] is True and body["contact"] == {}
+    assert "**Participant 1:** Hello." in body["block"]["dialogue"]
+    saved = json.loads(voice.LISTEN_FENCE.search(file_layer.read_note("Review.md", notes_dir=notes_dir)["content"]).group(1))
+    assert saved["participants"][0]["display_name"] == "Participant 1" and saved["participants"][0]["is_tagged"] is False
+    assert "**Participant 1:** Hello." in saved["dialogue"]
+
+
+def test_untag_participant_without_a_note_returns_the_untagged_block(client):
+    response = client.post(
+        "/api/voice/untag-participant", json={"speaker_id": "Participant 1", "block": {"id": "lw_abc", **FAKE_RESULT}}
+    )
+    assert response.status_code == 200
+    assert response.json()["note_updated"] is False
+    assert response.json()["block"]["participants"][0]["is_tagged"] is False
+
+
 # --- The listen block ---------------------------------------------------------------------------------------------
 
 

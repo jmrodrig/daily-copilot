@@ -464,7 +464,15 @@ function Completed({
         <div className="flex flex-wrap items-center gap-2 pt-1">
           <span className="font-mono text-xs uppercase tracking-[0.06em] text-text-muted">Participants:</span>
           {tagged.map((p) => (
-            <TaggedParticipant key={p.speaker_id} participant={p} person={findPerson(people, p.display_name)} />
+            <TaggedParticipant
+              key={p.speaker_id}
+              data={data}
+              participant={p}
+              people={people}
+              interactive={interactive}
+              note={note}
+              onTagged={onTagged}
+            />
           ))}
         </div>
       )}
@@ -506,17 +514,200 @@ function findPerson(people: Person[], name: string): Person | undefined {
   return needle ? people.find((p) => p.name.toLowerCase() === needle) : undefined;
 }
 
-/** A named speaker, as a chip of the participants' row: their avatar if they're in People, their email on hover. */
-function TaggedParticipant({ participant, person }: { participant: ListenParticipant; person: Person | undefined }) {
-  const email = participant.email ?? person?.email ?? null;
-  return (
-    <span
-      title={email ? `${participant.display_name} <${email}>` : participant.display_name}
-      className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/40 bg-emerald-500/10 px-2.5 py-0.5 text-[13px] text-emerald-400"
-    >
+/** A speaker's snippet player: plays it (stopping when unmounted), reporting a failure through `onError`. */
+function useSnippet(url: string | null | undefined, onError: (error: string) => void) {
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  useEffect(() => () => audioRef.current?.pause(), []);
+  return function play() {
+    if (!url) return;
+    audioRef.current?.pause();
+    audioRef.current = new Audio(url);
+    void audioRef.current.play().catch((err: unknown) => onError(`Could not play the snippet (${message(err)}).`));
+  };
+}
+
+/**
+ * A named speaker, as a chip of the participants' row: their avatar if they're in People, their email on hover. When
+ * `interactive`, clicking it opens a popover to hear their snippet, name them as someone else, or remove their tag.
+ */
+function TaggedParticipant({
+  data,
+  participant,
+  people,
+  interactive,
+  note,
+  onTagged,
+}: {
+  data: ListenData;
+  participant: ListenParticipant;
+  people: Person[];
+  interactive: boolean;
+  note: { spaceId: number; path: string } | null;
+  onTagged: (data: ListenData, writtenToNote: boolean) => void;
+}) {
+  const person = findPerson(people, participant.display_name);
+  const email = participant.email || person?.email || null;
+  const spaceId = note?.spaceId ?? 1;
+  const [editing, setEditing] = useState(false);
+  const picker = usePeoplePicker(people, spaceId);
+  const play = useSnippet(participant.snippet_url, picker.setError);
+  const chip = useRef<HTMLButtonElement>(null);
+  const titleId = useId();
+  const content = (
+    <>
       {person ? <Avatar person={person} size="h-4 w-4 shrink-0 rounded-full" textClass="text-[8px]" /> : <span aria-hidden>✓</span>}
       {participant.display_name}
+    </>
+  );
+  const chipClass =
+    "inline-flex items-center gap-1.5 rounded-full border border-emerald-500/40 bg-emerald-500/10 px-2.5 py-0.5 text-[13px] text-emerald-400";
+  const hover = email ? `${participant.display_name} <${email}>` : participant.display_name;
+  if (!interactive) {
+    return (
+      <span title={hover} className={chipClass}>
+        {content}
+      </span>
+    );
+  }
+
+  function open() {
+    picker.reset(participant.display_name, person ?? null);
+    setEditing(true);
+  }
+
+  function close() {
+    setEditing(false);
+    chip.current?.focus();
+  }
+
+  async function post(path: string, body: Record<string, unknown>) {
+    picker.setBusy(true);
+    picker.setError(null);
+    try {
+      const response = await sendJson<{ block: ListenData; note_updated: boolean }>("POST", path, {
+        speaker_id: participant.speaker_id,
+        block: data,
+        widget_id: data.id,
+        space_id: spaceId,
+        note_path: note?.path ?? null,
+        ...body,
+      });
+      setEditing(false);
+      onTagged(response.block, response.note_updated);
+    } catch (err) {
+      picker.setError(message(err));
+    } finally {
+      picker.setBusy(false);
+    }
+  }
+
+  /** Names the speaker as the person picked instead (enrolling their voice under that person). */
+  async function update() {
+    picker.setError(null);
+    let next: Person | null;
+    try {
+      next = await picker.resolve();
+    } catch (err) {
+      return picker.setError(message(err));
+    }
+    if (!next) return;
+    if (next.name === participant.display_name) return close();
+    await post("/api/voice/tag-participant", {
+      alias: next.name,
+      email: next.email,
+      audio_stem: participant.audio_stem ?? null,
+      cluster_id: participant.cluster_id ?? null,
+    });
+  }
+
+  const unchanged = picker.query.trim() === participant.display_name;
+  return (
+    <span className="inline-flex">
+      <button
+        ref={chip}
+        type="button"
+        title={`${hover}: click to edit speaker tagging`}
+        aria-haspopup="dialog"
+        aria-expanded={editing}
+        onClick={() => (editing ? close() : open())}
+        className={`${chipClass} cursor-pointer hover:border-emerald-500/70 hover:bg-emerald-500/20`}
+      >
+        {content}
+        <PencilIcon />
+      </button>
+      <Popover
+        anchor={chip}
+        open={editing}
+        onClose={() => setEditing(false)}
+        role="dialog"
+        label={`Edit speaker ${participant.display_name}`}
+        className="max-w-sm p-3"
+      >
+        <form
+          aria-labelledby={titleId}
+          className="flex w-72 flex-col gap-2"
+          onKeyDown={(e) => {
+            if (e.key === "Escape") {
+              e.stopPropagation();
+              close();
+            }
+          }}
+          onSubmit={(e) => {
+            e.preventDefault();
+            void update();
+          }}
+        >
+          <div id={titleId}>
+            <div className="font-mono text-[11px] uppercase tracking-[0.06em] text-text-muted">Edit speaker</div>
+            <div className="text-[14px] text-text-primary">{participant.display_name}</div>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              title={participant.snippet_url ? "Play a snippet of their voice" : "No snippet: they were recognised by their voiceprint"}
+              aria-label={`Play a snippet of ${participant.display_name}`}
+              disabled={!participant.snippet_url}
+              onClick={play}
+              className="btn min-h-8 px-2"
+            >
+              <PlayIcon />
+            </button>
+            {participant.sample_text && <span className="truncate text-xs italic text-text-muted">“{participant.sample_text}”</span>}
+          </div>
+          <PeoplePicker picker={picker} label={`Who ${participant.display_name} is`} inline autoFocus />
+          <div className="flex flex-wrap items-center justify-end gap-2 pt-1">
+            <button
+              type="button"
+              className="btn mr-auto min-h-8 px-2.5 text-[14px]"
+              disabled={picker.busy}
+              onClick={() => void post("/api/voice/untag-participant", {})}
+            >
+              Remove tag
+            </button>
+            <button type="button" className="btn min-h-8 px-2.5 text-[14px]" onClick={close}>
+              Cancel
+            </button>
+            <button
+              type="submit"
+              className="btn-primary min-h-8 px-3 text-[14px]"
+              disabled={picker.busy || !picker.query.trim() || unchanged}
+            >
+              {picker.busy ? "Saving…" : "Update"}
+            </button>
+          </div>
+          {picker.error && <p className="text-xs text-accent">{picker.error}</p>}
+        </form>
+      </Popover>
     </span>
+  );
+}
+
+function PencilIcon() {
+  return (
+    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden className="opacity-60">
+      <path d="M12 20h9" />
+      <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" />
+    </svg>
   );
 }
 
@@ -534,6 +725,203 @@ function speakerChoices(people: Person[], typed: string): SpeakerChoice[] {
     ...matching.map((person) => ({ key: `p${person.id}`, person })),
     ...(name && !findPerson(people, name) ? [{ key: "new" as const, name }] : []),
   ];
+}
+
+/** The state of a speaker's People picker: what's typed, the person picked, and adding a typed name to People. */
+function usePeoplePicker(people: Person[], spaceId: number) {
+  const [query, setQuery] = useState("");
+  // The person picked (or added); typing again drops it.
+  const [selected, setSelected] = useState<Person | null>(null);
+  const [open, setOpen] = useState(false);
+  const [highlight, setHighlight] = useState(0);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const choices = useMemo(() => speakerChoices(people, query), [people, query]);
+
+  function choose(person: Person) {
+    setSelected(person);
+    setQuery(person.name);
+    setOpen(false);
+  }
+
+  /** Adds a name to the space's People, telling every People list to reload. */
+  async function addPerson(name: string): Promise<Person> {
+    const person = await sendJson<Person>("POST", "/api/people", { space_id: spaceId, name, is_external: false });
+    announcePeopleChange();
+    return person;
+  }
+
+  /** Picks a choice: a person, or adds the typed name to People and picks them. */
+  async function pick(choice: SpeakerChoice) {
+    if ("person" in choice) return choose(choice.person);
+    setOpen(false);
+    setBusy(true);
+    setError(null);
+    try {
+      choose(await addPerson(choice.name));
+    } catch (err) {
+      setError(message(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** Who to name the speaker as: the person picked, else the one named as typed, else the typed name added to People. */
+  async function resolve(): Promise<Person | null> {
+    const typed = query.trim().slice(0, ASSIGNEE_MAX);
+    if (!selected && !typed) return null;
+    setOpen(false);
+    let person = selected ?? findPerson(people, typed);
+    if (!person) {
+      person = await addPerson(typed);
+      choose(person); // So naming them again, if it fails, doesn't add them twice.
+    }
+    return person;
+  }
+
+  /** Starts over from `name` (and the person of that name, if any). */
+  function reset(name: string, person: Person | null) {
+    setQuery(name);
+    setSelected(person);
+    setHighlight(0);
+    setOpen(false);
+    setError(null);
+  }
+
+  return {
+    query,
+    setQuery,
+    selected,
+    setSelected,
+    open,
+    setOpen,
+    highlight,
+    setHighlight,
+    busy,
+    setBusy,
+    error,
+    setError,
+    choices,
+    pick,
+    resolve,
+    reset,
+  };
+}
+
+/**
+ * A combobox of the space's People, filtered by name or email as typed, with adding the typed name to People as its
+ * last choice. Its list floats in a popover, or with `inline`, opens under it (when it's in a popover itself).
+ */
+function PeoplePicker({
+  picker,
+  label,
+  inline = false,
+  autoFocus = false,
+}: {
+  picker: ReturnType<typeof usePeoplePicker>;
+  label: string;
+  inline?: boolean;
+  autoFocus?: boolean;
+}) {
+  const { query, setQuery, selected, setSelected, open, setOpen, highlight, setHighlight, busy, choices, pick } = picker;
+  const anchor = useRef<HTMLDivElement>(null);
+  const listId = useId();
+  const listOpen = open && choices.length > 0;
+
+  function keys(e: KeyboardEvent<HTMLInputElement>) {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      if (!open) return setOpen(true);
+      const step = e.key === "ArrowDown" ? 1 : -1;
+      setHighlight((h) => (choices.length ? (h + step + choices.length) % choices.length : 0));
+    } else if (e.key === "Enter" && open && choices[highlight]) {
+      // Picks rather than submitting the form; the next Enter submits.
+      e.preventDefault();
+      void pick(choices[highlight]);
+    } else if (e.key === "Escape" && open) {
+      e.stopPropagation();
+      setOpen(false);
+    }
+  }
+
+  const options = choices.map((choice, index) => (
+    <div
+      key={choice.key}
+      id={`${listId}-${choice.key}`}
+      role="option"
+      aria-selected={"person" in choice && choice.person.id === selected?.id}
+      // Keep the focus in the input while picking.
+      onMouseDown={(e) => e.preventDefault()}
+      onMouseEnter={() => setHighlight(index)}
+      onClick={() => void pick(choice)}
+      className={`flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 ${
+        index === highlight ? "bg-surface-raised text-text-primary" : "text-text-secondary"
+      }`}
+    >
+      {"person" in choice ? (
+        <>
+          <PersonBadge person={choice.person} />
+          {choice.person.email && <span className="truncate text-xs text-text-muted">{choice.person.email}</span>}
+        </>
+      ) : (
+        <span className="truncate text-accent-soft">+ Add “{choice.name}” to People</span>
+      )}
+    </div>
+  ));
+
+  const field = (
+    <div ref={anchor} className="relative flex items-center">
+      {selected && (
+        <span className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2">
+          <Avatar person={selected} size="h-5 w-5 shrink-0 rounded-full" textClass="text-[9px]" />
+        </span>
+      )}
+      <input
+        role="combobox"
+        aria-label={label}
+        aria-expanded={listOpen}
+        aria-controls={listId}
+        aria-autocomplete="list"
+        aria-activedescendant={listOpen && choices[highlight] ? `${listId}-${choices[highlight].key}` : undefined}
+        placeholder="Pick or add a person"
+        value={query}
+        maxLength={ASSIGNEE_MAX}
+        autoComplete="off"
+        autoFocus={autoFocus}
+        disabled={busy}
+        onFocus={() => {
+          setHighlight(0);
+          setOpen(true);
+        }}
+        onClick={() => setOpen(true)}
+        onChange={(e) => {
+          setQuery(e.target.value);
+          setSelected(null);
+          setHighlight(0);
+          setOpen(true);
+        }}
+        onBlur={() => setOpen(false)}
+        onKeyDown={keys}
+        className={`field py-1.5 ${inline ? "w-full" : "w-56"} ${selected ? "pl-8" : ""}`}
+      />
+      {!inline && (
+        <Popover anchor={anchor} open={listOpen} onClose={() => setOpen(false)} id={listId} label={label}>
+          {options}
+        </Popover>
+      )}
+    </div>
+  );
+  if (!inline) return field;
+  return (
+    <div className="flex flex-col gap-1">
+      {field}
+      {listOpen && (
+        <div id={listId} role="listbox" aria-label={label} className="max-h-40 overflow-y-auto rounded-md border border-border-default p-1">
+          {options}
+        </div>
+      )}
+    </div>
+  );
 }
 
 /**
@@ -555,68 +943,18 @@ function UntaggedParticipant({
   note: { spaceId: number; path: string } | null;
   onTagged: (data: ListenData, writtenToNote: boolean) => void;
 }) {
-  const [query, setQuery] = useState("");
-  // The person picked (or added); typing again drops it.
-  const [selected, setSelected] = useState<Person | null>(null);
-  const [open, setOpen] = useState(false);
-  const [highlight, setHighlight] = useState(0);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  const anchor = useRef<HTMLDivElement>(null);
-  const listId = useId();
-  useEffect(() => () => audioRef.current?.pause(), []);
   const spaceId = note?.spaceId ?? 1;
-  const choices = useMemo(() => speakerChoices(people, query), [people, query]);
-
-  function play() {
-    if (!participant.snippet_url) return;
-    audioRef.current?.pause();
-    audioRef.current = new Audio(participant.snippet_url);
-    void audioRef.current.play().catch((err: unknown) => setError(`Could not play the snippet (${message(err)}).`));
-  }
-
-  function choose(person: Person) {
-    setSelected(person);
-    setQuery(person.name);
-    setOpen(false);
-  }
-
-  /** Adds a name to the space's People, telling every People list to reload. */
-  async function addPerson(name: string): Promise<Person> {
-    const person = await sendJson<Person>("POST", "/api/people", { space_id: spaceId, name, is_external: false });
-    announcePeopleChange();
-    return person;
-  }
-
-  /** Picks a choice: a person, or adds the typed name to People and picks them. */
-  async function pick(choice: SpeakerChoice) {
-    if ("person" in choice) return choose(choice.person);
-    setOpen(false);
-    setSaving(true);
-    setError(null);
-    try {
-      choose(await addPerson(choice.name));
-    } catch (err) {
-      setError(message(err));
-    } finally {
-      setSaving(false);
-    }
-  }
+  const picker = usePeoplePicker(people, spaceId);
+  const { busy: saving, setBusy: setSaving, error, setError } = picker;
+  const play = useSnippet(participant.snippet_url, setError);
 
   /** Names the speaker as the picked person (else the one named as typed, else adds the typed name to People). */
   async function tag() {
-    const typed = query.trim().slice(0, ASSIGNEE_MAX);
-    if (!selected && !typed) return;
-    setOpen(false);
     setSaving(true);
     setError(null);
     try {
-      let person = selected ?? findPerson(people, typed);
-      if (!person) {
-        person = await addPerson(typed);
-        choose(person); // So tagging again, if it fails, doesn't add them twice.
-      }
+      const person = await picker.resolve();
+      if (!person) return;
       const response = await sendJson<{ block: ListenData; note_updated: boolean }>("POST", "/api/voice/tag-participant", {
         speaker_id: participant.speaker_id,
         alias: person.name,
@@ -636,23 +974,6 @@ function UntaggedParticipant({
     }
   }
 
-  function keys(e: KeyboardEvent<HTMLInputElement>) {
-    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-      e.preventDefault();
-      if (!open) return setOpen(true);
-      const step = e.key === "ArrowDown" ? 1 : -1;
-      setHighlight((h) => (choices.length ? (h + step + choices.length) % choices.length : 0));
-    } else if (e.key === "Enter" && open && choices[highlight]) {
-      // Picks rather than submitting the form; the next Enter tags.
-      e.preventDefault();
-      void pick(choices[highlight]);
-    } else if (e.key === "Escape" && open) {
-      e.stopPropagation();
-      setOpen(false);
-    }
-  }
-
-  const label = `Name of ${participant.display_name}`;
   return (
     <div className="flex flex-col gap-1">
       <form
@@ -675,67 +996,8 @@ function UntaggedParticipant({
         </button>
         {interactive && (
           <>
-            <div ref={anchor} className="relative flex items-center">
-              {selected && (
-                <span className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2">
-                  <Avatar person={selected} size="h-5 w-5 shrink-0 rounded-full" textClass="text-[9px]" />
-                </span>
-              )}
-              <input
-                role="combobox"
-                aria-label={label}
-                aria-expanded={open}
-                aria-controls={listId}
-                aria-autocomplete="list"
-                aria-activedescendant={open && choices[highlight] ? `${listId}-${choices[highlight].key}` : undefined}
-                placeholder="Pick or add a person"
-                value={query}
-                maxLength={ASSIGNEE_MAX}
-                autoComplete="off"
-                disabled={saving}
-                onFocus={() => {
-                  setHighlight(0);
-                  setOpen(true);
-                }}
-                onClick={() => setOpen(true)}
-                onChange={(e) => {
-                  setQuery(e.target.value);
-                  setSelected(null);
-                  setHighlight(0);
-                  setOpen(true);
-                }}
-                onBlur={() => setOpen(false)}
-                onKeyDown={keys}
-                className={`field w-56 py-1.5 ${selected ? "pl-8" : ""}`}
-              />
-              <Popover anchor={anchor} open={open && choices.length > 0} onClose={() => setOpen(false)} id={listId} label={label}>
-                {choices.map((choice, index) => (
-                  <div
-                    key={choice.key}
-                    id={`${listId}-${choice.key}`}
-                    role="option"
-                    aria-selected={"person" in choice && choice.person.id === selected?.id}
-                    // Keep the focus in the input while picking.
-                    onMouseDown={(e) => e.preventDefault()}
-                    onMouseEnter={() => setHighlight(index)}
-                    onClick={() => void pick(choice)}
-                    className={`flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 ${
-                      index === highlight ? "bg-surface-raised text-text-primary" : "text-text-secondary"
-                    }`}
-                  >
-                    {"person" in choice ? (
-                      <>
-                        <PersonBadge person={choice.person} />
-                        {choice.person.email && <span className="truncate text-xs text-text-muted">{choice.person.email}</span>}
-                      </>
-                    ) : (
-                      <span className="truncate text-accent-soft">+ Add “{choice.name}” to People</span>
-                    )}
-                  </div>
-                ))}
-              </Popover>
-            </div>
-            <button type="submit" className="btn-primary min-h-8 px-3 text-[14px]" disabled={saving || !query.trim()}>
+            <PeoplePicker picker={picker} label={`Name of ${participant.display_name}`} />
+            <button type="submit" className="btn-primary min-h-8 px-3 text-[14px]" disabled={saving || !picker.query.trim()}>
               {saving ? "Saving…" : "Tag & Enroll"}
             </button>
           </>

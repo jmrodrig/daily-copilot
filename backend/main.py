@@ -2554,6 +2554,21 @@ def tag_voice_participant(request: schemas.VoiceTagRequest) -> schemas.VoiceTagR
         block=block, note_updated=written is not None, has_untagged=voice.has_untagged(block), contact=contact
     )
 
+
+@app.post("/api/voice/untag-participant")
+def untag_voice_participant(request: schemas.VoiceUntagRequest) -> schemas.VoiceTagResponse:
+    """Remove a speaker's name: set them back to unidentified in the widget's data and in its block in the note (their
+    turns renamed back). Any voiceprint enrolled under the name is kept."""
+
+    def untag(block: dict[str, Any]) -> dict[str, Any]:
+        return voice.untag_participant(block, request.speaker_id)
+
+    written = _write_listen_block(request.space_id, request.note_path, request.widget_id, untag)
+    block = untag(request.block) if request.block else (written or {})
+    return schemas.VoiceTagResponse(
+        block=block, note_updated=written is not None, has_untagged=voice.has_untagged(block), contact={}
+    )
+
 if __name__ == "__main__":
     import uvicorn
 

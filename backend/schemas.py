@@ -1453,6 +1453,18 @@ class VoiceTagRequest(BaseModel):
         return value.strip()
 
 
+class VoiceUntagRequest(BaseModel):
+    """`POST /api/voice/untag-participant`: set a named speaker of a recording back to unidentified."""
+
+    speaker_id: str = Field(min_length=1, max_length=64)
+    # The widget's data as the page has it, returned untagged.
+    block: dict[str, Any] = Field(default_factory=dict)
+    # The widget's block in its note, untagged on disk too.
+    widget_id: str | None = Field(default=None, pattern=_WIDGET_ID)
+    space_id: int = 1
+    note_path: str | None = None
+
+
 class VoiceTagResponse(BaseModel):
     block: dict[str, Any]
     note_updated: bool = False

@@ -1073,8 +1073,23 @@ def tag_participant(
     if target is None:
         return block
     old_name = target.get("display_name") or speaker_id
-    target.update(display_name=alias, is_tagged=True, email=(email or "").strip() or target.get("email", ""))
+    # Re-tagging as someone else drops the old person's email; tagging the same name again keeps it.
+    kept_email = target.get("email", "") if alias == old_name else ""
+    target.update(display_name=alias, is_tagged=True, email=(email or "").strip() or kept_email)
     dialogue = str(block.get("dialogue") or "").replace(f"**{old_name}:**", f"**{alias}:**")
+    return {**block, "participants": participants, "dialogue": dialogue}
+
+
+def untag_participant(block: dict[str, Any], speaker_id: str) -> dict[str, Any]:
+    """`block` with the participant `speaker_id` back to unidentified: named by their speaker id again, untagged, with
+    no email, and their turns in the dialogue renamed back. Doesn't touch the contacts or their voiceprints."""
+    participants = [dict(p) for p in block.get("participants") or []]
+    target = next((p for p in participants if p.get("speaker_id") == speaker_id), None)
+    if target is None:
+        return block
+    old_name = target.get("display_name") or speaker_id
+    target.update(display_name=speaker_id, is_tagged=False, email="")
+    dialogue = str(block.get("dialogue") or "").replace(f"**{old_name}:**", f"**{speaker_id}:**")
     return {**block, "participants": participants, "dialogue": dialogue}
 
 
