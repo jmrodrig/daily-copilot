@@ -224,10 +224,22 @@ export default function Sidebar({ onCollapse }: { onCollapse: () => void }) {
     const itemStem = item.kind === "note" ? (item.note.path.split("/").pop() ?? "").replace(/\.md$/i, "") : item.folder.name;
     if (!clean || (clean === itemLabel(item) && clean.toLowerCase() === itemStem.toLowerCase())) return;
     const path = itemPath(item);
+    let taken = false;
     const renamed = await changeContent(`rename ${itemLabel(item)}`, () =>
-      sendJson<ContentEntry>("POST", "/api/content/rename", { space_id: spaceId, path, name: clean }),
+      sendJson<ContentEntry>("POST", "/api/content/rename", { space_id: spaceId, path, name: clean }).catch((err: unknown) => {
+        taken = message(err).toLowerCase().includes("already exists");
+        throw err;
+      }),
     );
     if (renamed) followMove(path, renamed.path);
+    else if (taken) {
+      // The name is taken in this folder: ask for a different one rather than numbering it.
+      const what = item.kind === "note" ? "note" : "folder";
+      const nextName = window.prompt(`A ${what} named "${clean}" already exists in this folder. Please pick a different name:`, clean);
+      if (nextName === null) return;
+      setMenuError(null);
+      if (nextName.trim() && nextName.trim() !== clean) void renameItem(item, nextName.trim());
+    }
   }
 
   async function duplicateItem(item: TreeItem) {
