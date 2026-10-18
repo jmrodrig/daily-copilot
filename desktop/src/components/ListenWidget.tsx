@@ -1,5 +1,5 @@
 import { NodeViewWrapper, ReactNodeViewRenderer, type NodeViewProps } from "@tiptap/react";
-import { useEffect, useMemo, useRef, useState, type MutableRefObject } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type MutableRefObject } from "react";
 import { Link, useLocation, useSearchParams } from "react-router-dom";
 
 import {
@@ -9,11 +9,13 @@ import {
   type ListenParticipant,
   type VoiceSource,
 } from "../context/VoiceRecordingContext";
-import { getJson, message, promptCopilot, sendJson } from "../lib/api";
+import { message, promptCopilot, sendJson } from "../lib/api";
 import { clientAudioUnavailable, listClientAudioInputs, type ClientAudioInput } from "../lib/clientAudio";
 import { notifyNoteUpdated } from "../lib/notes";
+import { announcePeopleChange, ASSIGNEE_MAX, Avatar, byName, PersonBadge, usePeople, type Person } from "../lib/people";
 import { notePath, useSpace } from "../lib/space";
 import { ListenBlock } from "./noteFormatting";
+import Popover from "./Popover";
 
 const SOURCES: { value: VoiceSource; label: string }[] = [
   { value: "mic", label: "Default microphone" },
@@ -407,6 +409,10 @@ function Completed({
   const [open, setOpen] = useState(false);
   const turns = (data.dialogue ?? "").split(/\n{2,}/).filter((turn) => turn.trim());
   const participants = data.participants ?? [];
+  const tagged = participants.filter((p) => p.is_tagged);
+  const untagged = participants.filter((p) => !p.is_tagged);
+  // The space's People: who to name a speaker as, and the avatars of those named.
+  const people = usePeople(note?.spaceId ?? 1);
   const where = note
     ? `the note ${note.path} (its transcript is the "dialogue" of the \`\`\`listen block recorded ${data.recorded_at?.replace("T", " ").slice(0, 16) ?? ""}, speakers in bold)`
     : "this note";
@@ -454,21 +460,29 @@ function Completed({
         )}
       </div>
 
-      {participants.length > 0 && (
+      {tagged.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2 pt-1">
+          <span className="font-mono text-xs uppercase tracking-[0.06em] text-text-muted">Participants:</span>
+          {tagged.map((p) => (
+            <TaggedParticipant key={p.speaker_id} participant={p} person={findPerson(people, p.display_name)} />
+          ))}
+        </div>
+      )}
+
+      {untagged.length > 0 && (
         <div className="flex flex-col gap-2">
-          <span className="font-mono text-xs uppercase tracking-[0.06em] text-text-muted">Participants</span>
-          {participants.map((p) =>
-            p.is_tagged ? (
-              <div key={p.speaker_id} className="flex items-center gap-2">
-                <span className="rounded border border-emerald-500/50 bg-emerald-500/10 px-2 py-0.5 text-[14px] text-emerald-500">
-                  ✓ {p.display_name}
-                </span>
-                {p.email && <span className="text-xs text-text-muted">{p.email}</span>}
-              </div>
-            ) : (
-              <UntaggedParticipant key={p.speaker_id} data={data} participant={p} interactive={interactive} note={note} onTagged={onTagged} />
-            ),
-          )}
+          <span className="font-mono text-xs uppercase tracking-[0.06em] text-text-muted">Unidentified speakers</span>
+          {untagged.map((p) => (
+            <UntaggedParticipant
+              key={p.speaker_id}
+              data={data}
+              participant={p}
+              people={people}
+              interactive={interactive}
+              note={note}
+              onTagged={onTagged}
+            />
+          ))}
         </div>
       )}
 
@@ -486,38 +500,74 @@ function Completed({
   );
 }
 
-// The known contacts' names, fetched once per page for the name suggestions.
-let contactNames: Promise<string[]> | null = null;
-const loadContactNames = () =>
-  (contactNames ??= getJson<{ name: string }[]>("/api/voice/contacts").then(
-    (contacts) => contacts.map((c) => c.name),
-    () => {
-      contactNames = null;
-      return [];
-    },
-  ));
+/** The person of the space's People named `name` (in any case), if any. */
+function findPerson(people: Person[], name: string): Person | undefined {
+  const needle = name.trim().toLowerCase();
+  return needle ? people.find((p) => p.name.toLowerCase() === needle) : undefined;
+}
 
-/** A speaker who wasn't recognised: play their snippet, name them, and enrol their voice. */
+/** A named speaker, as a chip of the participants' row: their avatar if they're in People, their email on hover. */
+function TaggedParticipant({ participant, person }: { participant: ListenParticipant; person: Person | undefined }) {
+  const email = participant.email ?? person?.email ?? null;
+  return (
+    <span
+      title={email ? `${participant.display_name} <${email}>` : participant.display_name}
+      className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/40 bg-emerald-500/10 px-2.5 py-0.5 text-[13px] text-emerald-400"
+    >
+      {person ? <Avatar person={person} size="h-4 w-4 shrink-0 rounded-full" textClass="text-[8px]" /> : <span aria-hidden>✓</span>}
+      {participant.display_name}
+    </span>
+  );
+}
+
+/** One choice of a speaker's People picker: a person, or the typed name to add to People. */
+type SpeakerChoice = { key: string; person: Person } | { key: "new"; name: string };
+
+/** The choices for what's typed: the People whose name or email has it, then (unless it's someone's name) adding it. */
+function speakerChoices(people: Person[], typed: string): SpeakerChoice[] {
+  const name = typed.trim().slice(0, ASSIGNEE_MAX);
+  const needle = name.toLowerCase();
+  const matching = [...people]
+    .sort(byName)
+    .filter((p) => !needle || p.name.toLowerCase().includes(needle) || (p.email ?? "").toLowerCase().includes(needle));
+  return [
+    ...matching.map((person) => ({ key: `p${person.id}`, person })),
+    ...(name && !findPerson(people, name) ? [{ key: "new" as const, name }] : []),
+  ];
+}
+
+/**
+ * A speaker who wasn't recognised: play their snippet, pick who they are from the space's People (or add them to it),
+ * and enrol their voice under that person's name and email.
+ */
 function UntaggedParticipant({
   data,
   participant,
+  people,
   interactive,
   note,
   onTagged,
 }: {
   data: ListenData;
   participant: ListenParticipant;
+  people: Person[];
   interactive: boolean;
   note: { spaceId: number; path: string } | null;
   onTagged: (data: ListenData, writtenToNote: boolean) => void;
 }) {
-  const [name, setName] = useState("");
-  const [names, setNames] = useState<string[]>([]);
+  const [query, setQuery] = useState("");
+  // The person picked (or added); typing again drops it.
+  const [selected, setSelected] = useState<Person | null>(null);
+  const [open, setOpen] = useState(false);
+  const [highlight, setHighlight] = useState(0);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const anchor = useRef<HTMLDivElement>(null);
+  const listId = useId();
   useEffect(() => () => audioRef.current?.pause(), []);
-  const listId = `listen-contacts-${data.id}-${participant.cluster_id ?? participant.speaker_id}`;
+  const spaceId = note?.spaceId ?? 1;
+  const choices = useMemo(() => speakerChoices(people, query), [people, query]);
 
   function play() {
     if (!participant.snippet_url) return;
@@ -526,23 +576,58 @@ function UntaggedParticipant({
     void audioRef.current.play().catch((err: unknown) => setError(`Could not play the snippet (${message(err)}).`));
   }
 
-  async function tag() {
-    const alias = name.trim();
-    if (!alias) return;
+  function choose(person: Person) {
+    setSelected(person);
+    setQuery(person.name);
+    setOpen(false);
+  }
+
+  /** Adds a name to the space's People, telling every People list to reload. */
+  async function addPerson(name: string): Promise<Person> {
+    const person = await sendJson<Person>("POST", "/api/people", { space_id: spaceId, name, is_external: false });
+    announcePeopleChange();
+    return person;
+  }
+
+  /** Picks a choice: a person, or adds the typed name to People and picks them. */
+  async function pick(choice: SpeakerChoice) {
+    if ("person" in choice) return choose(choice.person);
+    setOpen(false);
     setSaving(true);
     setError(null);
     try {
+      choose(await addPerson(choice.name));
+    } catch (err) {
+      setError(message(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  /** Names the speaker as the picked person (else the one named as typed, else adds the typed name to People). */
+  async function tag() {
+    const typed = query.trim().slice(0, ASSIGNEE_MAX);
+    if (!selected && !typed) return;
+    setOpen(false);
+    setSaving(true);
+    setError(null);
+    try {
+      let person = selected ?? findPerson(people, typed);
+      if (!person) {
+        person = await addPerson(typed);
+        choose(person); // So tagging again, if it fails, doesn't add them twice.
+      }
       const response = await sendJson<{ block: ListenData; note_updated: boolean }>("POST", "/api/voice/tag-participant", {
         speaker_id: participant.speaker_id,
-        alias,
+        alias: person.name,
+        email: person.email,
         audio_stem: participant.audio_stem ?? null,
         cluster_id: participant.cluster_id ?? null,
         block: data,
         widget_id: data.id,
-        space_id: note?.spaceId ?? 1,
+        space_id: spaceId,
         note_path: note?.path ?? null,
       });
-      contactNames = null;
       onTagged(response.block, response.note_updated);
     } catch (err) {
       setError(message(err));
@@ -551,6 +636,23 @@ function UntaggedParticipant({
     }
   }
 
+  function keys(e: KeyboardEvent<HTMLInputElement>) {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      if (!open) return setOpen(true);
+      const step = e.key === "ArrowDown" ? 1 : -1;
+      setHighlight((h) => (choices.length ? (h + step + choices.length) % choices.length : 0));
+    } else if (e.key === "Enter" && open && choices[highlight]) {
+      // Picks rather than submitting the form; the next Enter tags.
+      e.preventDefault();
+      void pick(choices[highlight]);
+    } else if (e.key === "Escape" && open) {
+      e.stopPropagation();
+      setOpen(false);
+    }
+  }
+
+  const label = `Name of ${participant.display_name}`;
   return (
     <div className="flex flex-col gap-1">
       <form
@@ -573,22 +675,67 @@ function UntaggedParticipant({
         </button>
         {interactive && (
           <>
-            <input
-              aria-label={`Name of ${participant.display_name}`}
-              placeholder="Name"
-              list={listId}
-              value={name}
-              disabled={saving}
-              onFocus={() => void loadContactNames().then(setNames)}
-              onChange={(e) => setName(e.target.value)}
-              className="field w-44 py-1.5"
-            />
-            <datalist id={listId}>
-              {names.map((n) => (
-                <option key={n} value={n} />
-              ))}
-            </datalist>
-            <button type="submit" className="btn-primary min-h-8 px-3 text-[14px]" disabled={saving || !name.trim()}>
+            <div ref={anchor} className="relative flex items-center">
+              {selected && (
+                <span className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2">
+                  <Avatar person={selected} size="h-5 w-5 shrink-0 rounded-full" textClass="text-[9px]" />
+                </span>
+              )}
+              <input
+                role="combobox"
+                aria-label={label}
+                aria-expanded={open}
+                aria-controls={listId}
+                aria-autocomplete="list"
+                aria-activedescendant={open && choices[highlight] ? `${listId}-${choices[highlight].key}` : undefined}
+                placeholder="Pick or add a person"
+                value={query}
+                maxLength={ASSIGNEE_MAX}
+                autoComplete="off"
+                disabled={saving}
+                onFocus={() => {
+                  setHighlight(0);
+                  setOpen(true);
+                }}
+                onClick={() => setOpen(true)}
+                onChange={(e) => {
+                  setQuery(e.target.value);
+                  setSelected(null);
+                  setHighlight(0);
+                  setOpen(true);
+                }}
+                onBlur={() => setOpen(false)}
+                onKeyDown={keys}
+                className={`field w-56 py-1.5 ${selected ? "pl-8" : ""}`}
+              />
+              <Popover anchor={anchor} open={open && choices.length > 0} onClose={() => setOpen(false)} id={listId} label={label}>
+                {choices.map((choice, index) => (
+                  <div
+                    key={choice.key}
+                    id={`${listId}-${choice.key}`}
+                    role="option"
+                    aria-selected={"person" in choice && choice.person.id === selected?.id}
+                    // Keep the focus in the input while picking.
+                    onMouseDown={(e) => e.preventDefault()}
+                    onMouseEnter={() => setHighlight(index)}
+                    onClick={() => void pick(choice)}
+                    className={`flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 ${
+                      index === highlight ? "bg-surface-raised text-text-primary" : "text-text-secondary"
+                    }`}
+                  >
+                    {"person" in choice ? (
+                      <>
+                        <PersonBadge person={choice.person} />
+                        {choice.person.email && <span className="truncate text-xs text-text-muted">{choice.person.email}</span>}
+                      </>
+                    ) : (
+                      <span className="truncate text-accent-soft">+ Add “{choice.name}” to People</span>
+                    )}
+                  </div>
+                ))}
+              </Popover>
+            </div>
+            <button type="submit" className="btn-primary min-h-8 px-3 text-[14px]" disabled={saving || !query.trim()}>
               {saving ? "Saving…" : "Tag & Enroll"}
             </button>
           </>

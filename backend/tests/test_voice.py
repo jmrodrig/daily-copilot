@@ -764,6 +764,28 @@ def test_tag_participant_without_a_note_returns_the_tagged_block(client):
     assert response.json()["contact"]["sample_count"] == 0  # no embedding kept: named, but no voiceprint
 
 
+def test_tag_participant_as_a_person_added_to_people(client):
+    """The widget's picker adds a typed name to People, then tags the speaker with that person's name and email."""
+    person = client.post("/api/people", json={"space_id": 1, "name": " Sarah Connor ", "is_external": False}).json()
+    assert person["name"] == "Sarah Connor" and person["email"] is None
+
+    response = client.post(
+        "/api/voice/tag-participant",
+        json={
+            "speaker_id": "Participant 2",
+            "alias": person["name"],
+            "email": person["email"],
+            "block": {"id": "lw_abc", **FAKE_RESULT},
+        },
+    )
+
+    assert response.status_code == 200
+    tagged = response.json()["block"]["participants"][1]
+    assert tagged["display_name"] == "Sarah Connor" and tagged["is_tagged"] is True
+    assert "**Sarah Connor:** Let's review" in response.json()["block"]["dialogue"]
+    assert [p["name"] for p in client.get("/api/people?space_id=1").json()] == ["Sarah Connor"]
+
+
 # --- The listen block ---------------------------------------------------------------------------------------------
 
 
