@@ -732,6 +732,77 @@ def test_update_note_tags(client, notes_dir):
     assert client.get("/api/notes/file", params={"path": "a.md"}).json()["frontmatter"] == {"state": "draft"}
 
 
+def _retitle(client, path, title):
+    res = client.put("/api/notes/file", json={"space_id": 1, "path": path, "title": title})
+    assert res.status_code == 200
+    return res.json()
+
+
+def test_update_note_renames_file_on_disk_when_title_changes(client, notes_dir):
+    assert client.post("/api/notes", json={"space_id": 1, "path": "Initial.md", "title": "Initial"}).status_code == 201
+
+    saved = _retitle(client, "Initial.md", "Updated Title")
+
+    assert saved["path"] == "Updated Title.md"
+    assert not (notes_dir / "Initial.md").exists()
+    assert "title: Updated Title" in (notes_dir / "Updated Title.md").read_text(encoding="utf-8")
+    # The same title again (or the same name in another case) keeps the file where it is.
+    assert _retitle(client, "Updated Title.md", "Updated Title")["path"] == "Updated Title.md"
+    assert _retitle(client, "Updated Title.md", "updated title")["path"] == "Updated Title.md"
+
+
+def test_update_note_keeps_its_folder(client, notes_dir):
+    (notes_dir / "Docs").mkdir()
+    file_layer.write_note("Docs/a.md", "Body\n", {}, "write_directly")
+    assert _retitle(client, "Docs/a.md", "Plan")["path"] == "Docs/Plan.md"
+    assert (notes_dir / "Docs" / "Plan.md").exists()
+
+
+@pytest.mark.parametrize(
+    ("title", "path"),
+    [
+        ("Project: Phase 1 / Scantlings?", "Project- Phase 1 - Scantlings.md"),
+        ('a<b>c"d\\e|f*g', "a-b-c-d-e-f-g.md"),
+        ("  Tabs\tand\nnewlines  ", "Tabs and newlines.md"),
+        ("Trailing dots...", "Trailing dots.md"),
+        ("???", "a.md"),
+        ("CON", "CON_.md"),
+    ],
+)
+def test_update_note_sanitizes_filename_with_illegal_characters(client, notes_dir, title, path):
+    file_layer.write_note("a.md", "Body\n", {}, "write_directly")
+    saved = _retitle(client, "a.md", title)
+    assert saved["path"] == path
+    # The title itself is kept as typed.
+    assert saved["frontmatter"]["title"] == title.strip()
+    assert (notes_dir / path).exists()
+
+
+def test_update_note_resolves_collision_with_existing_file(client, notes_dir):
+    file_layer.write_note("Target.md", "Taken\n", {}, "write_directly")
+    file_layer.write_note("Target (2).md", "Taken too\n", {}, "write_directly")
+    file_layer.write_note("Other.md", "Mine\n", {}, "write_directly")
+
+    assert _retitle(client, "Other.md", "Target")["path"] == "Target (3).md"
+    assert (notes_dir / "Target.md").read_text(encoding="utf-8") == "Taken\n"
+    assert file_layer.read_note("Target (3).md")["content"] == "Mine\n"
+
+
+def test_update_note_relocates_linked_tasks_on_rename(client, notes_dir):
+    file_layer.write_note("Initial.md", "Body\n", {}, "write_directly")
+    task = client.post("/api/tasks", json={"space_id": 1, "title": "Check", "note_path": "Initial.md"}).json()
+
+    assert _retitle(client, "Initial.md", "NewName")["path"] == "NewName.md"
+    assert client.get(f"/api/tasks/{task['id']}").json()["note_path"] == "NewName.md"
+
+
+def test_rename_content_sanitizes_the_name(client, notes_dir):
+    file_layer.write_note("a.md", "Body\n", {}, "write_directly")
+    res = client.post("/api/content/rename", json={"space_id": 1, "path": "a.md", "name": "P5001: Checklist?"})
+    assert res.json() == {"kind": "note", "path": "P5001- Checklist.md"}
+    assert file_layer.read_note("P5001- Checklist.md")["frontmatter"] == {}
+
+
 def _save(client, content, **fields):
     res = client.put("/api/notes/file", json={"space_id": 1, "path": "a.md", "content": content, **fields})
     assert res.status_code == 200
@@ -739,16 +810,18 @@ def _save(client, content, **fields):
 
 def test_note_history_lists_versions_newest_first(client, notes_dir):
     file_layer.write_note("a.md", "One\n", {"state": "draft", "title": "First"}, "write_directly", source="desktop")
-    _save(client, "One two\n", title="Second")
-    _save(client, "One two three\n")
+    _save(client, "One two\n", tags=["x"])
+    _save(client, "One two three\n", title="Second")
 
-    versions = client.get("/api/notes/history", params={"path": "a.md"}).json()
+    # Retitling renamed the file; its history follows it.
+    versions = client.get("/api/notes/history", params={"path": "Second.md"}).json()
     assert [(v["action"], v["source"], v["title"], v["state"], v["content_length"]) for v in versions] == [
         ("update", "desktop", "Second", "draft", 14),
-        ("update", "desktop", "Second", "draft", 8),
+        ("rename", "desktop", "First", "draft", 8),
+        ("update", "desktop", "First", "draft", 8),
         ("create", "desktop", "First", "draft", 4),
     ]
-    assert versions[0]["id"] > versions[1]["id"] > versions[2]["id"]
+    assert versions[0]["id"] > versions[1]["id"] > versions[2]["id"] > versions[3]["id"]
     assert client.get("/api/notes/history", params={"path": "missing.md"}).json() == []
     assert client.get("/api/notes/history", params={"path": "../x.md"}).status_code == 400
     assert client.get("/api/notes/history", params={"path": "a.md", "space_id": 99}).status_code == 404
@@ -785,7 +858,8 @@ def test_note_version_detail(client, notes_dir):
 
 def test_restore_note_version(client, notes_dir):
     file_layer.write_note("a.md", "Original\n", {"created": date(2026, 9, 30), "state": "draft"}, "write_directly")
-    _save(client, "Rewritten\n", title="New title")
+    # A title that matches the file name, so the note stays at a.md.
+    _save(client, "Rewritten\n", title="a")
     original = client.get("/api/notes/history", params={"path": "a.md"}).json()[-1]
 
     res = client.post(f"/api/notes/history/{original['id']}/restore", params={"path": "a.md", "space_id": 1})

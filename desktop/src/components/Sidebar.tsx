@@ -220,7 +220,9 @@ export default function Sidebar({ onCollapse }: { onCollapse: () => void }) {
   async function renameItem(item: TreeItem, name: string) {
     setRenamingItem(null);
     const clean = name.trim().replace(/[\\/]+/g, "-");
-    if (!clean || clean === itemLabel(item)) return;
+    // A note whose file name lags behind its title is renamed even to the title it already shows.
+    const itemStem = item.kind === "note" ? (item.note.path.split("/").pop() ?? "").replace(/\.md$/i, "") : item.folder.name;
+    if (!clean || (clean === itemLabel(item) && clean.toLowerCase() === itemStem.toLowerCase())) return;
     const path = itemPath(item);
     const renamed = await changeContent(`rename ${itemLabel(item)}`, () =>
       sendJson<ContentEntry>("POST", "/api/content/rename", { space_id: spaceId, path, name: clean }),

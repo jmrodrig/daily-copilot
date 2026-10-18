@@ -31,10 +31,10 @@ import {
   announceTaskChange,
   BOARD_COLUMNS,
   boardColumn,
+  compareKanbanTasks,
   fromGanttDates,
   isOverdue,
   PRIORITY_LABELS,
-  PRIORITY_RANK,
   STATUS_LABELS,
   taskQuery,
   updateTaskDates,
@@ -548,10 +548,8 @@ function Kanban({
     <div className="overflow-x-auto">
       <div className="grid min-h-[420px] min-w-[750px] grid-cols-5 gap-3">
         {BOARD_COLUMNS.map(({ status, label }) => {
-          // Most pressing first; the sort is stable, so equal priorities keep the server's order.
-          const column = tasks
-            .filter((t) => boardColumn(t.status) === status)
-            .sort((a, b) => PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority]);
+          // Most pressing first, then soonest due.
+          const column = tasks.filter((t) => boardColumn(t.status) === status).sort(compareKanbanTasks);
           return (
             <section
               key={status}
