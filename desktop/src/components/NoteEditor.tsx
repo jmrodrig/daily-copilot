@@ -24,6 +24,7 @@ import StarterKit from "@tiptap/starter-kit";
 import { useEffect, useLayoutEffect, useRef, useState, useMemo, useCallback, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import "katex/dist/katex.min.css";
 
+import { WIDGET_REMOVAL_CONFIRMED, WidgetRemovalGuard, type WidgetRemoval } from "../extensions/WidgetRemovalGuard";
 import { message, uploadFile } from "../lib/api";
 import { checkLocalFile, isLocalHref, openLocalFile } from "../lib/localFiles";
 import type { TaskItem as TaskRow } from "../lib/tasks";
@@ -46,15 +47,8 @@ import {
 import { SlashCommand, SlashMenu, type SlashItem, type SlashMenuState } from "./slashCommand";
 import { WhiteboardIcon } from "./markupUi";
 import { WhiteboardNode } from "./WhiteboardWidget";
-import {
-  ActiveListenWidget,
-  LISTEN_REMOVAL_CONFIRMED,
-  ListenNode,
-  ListenRemovalDialog,
-  ListenRemovalGuard,
-  MicIcon,
-  type ListenRemoval,
-} from "./ListenWidget";
+import { ActiveListenWidget, ListenNode, MicIcon } from "./ListenWidget";
+import WidgetRemovalDialog from "./WidgetRemovalDialog";
 import {
   ALIGNMENTS,
   AlignedBlocks,
@@ -130,10 +124,10 @@ export default function NoteEditor({
   // The `/` menu's key handling while it's shown (see SlashMenu), and what picking one of its items does.
   const slashKeyRef = useRef<(event: KeyboardEvent) => boolean>(() => false);
   const slashPickRef = useRef<(item: SlashItem, range: { from: number; to: number }) => void>(() => {});
-  // The listen widget recording or being transcribed (see ActiveListenWidget), and an edit that would remove one that
-  // is, or that holds a recording, held back till the removal is confirmed (see ListenRemovalGuard).
+  // The listen widget recording or being transcribed (see ActiveListenWidget), and an edit that would remove a listen
+  // widget or a whiteboard, held back till the removal is confirmed (see WidgetRemovalGuard).
   const activeListenRef = useRef<string | null>(null);
-  const [heldRemoval, setHeldRemoval] = useState<{ tr: Transaction; removal: ListenRemoval } | null>(null);
+  const [heldRemoval, setHeldRemoval] = useState<{ tr: Transaction; removal: WidgetRemoval } | null>(null);
 
   const editor = useEditor({
     extensions: [
@@ -167,7 +161,7 @@ export default function NoteEditor({
       WhiteboardNode.configure({ spaceId, onSave: () => onSaveRef.current() }),
       // A ```listen block, shown as its recording widget (see ListenWidget).
       ListenNode,
-      ListenRemovalGuard.configure({
+      WidgetRemovalGuard.configure({
         activeWidget: () => activeListenRef.current,
         onBlocked: (tr, removal) => setHeldRemoval({ tr, removal }),
       }),
@@ -478,7 +472,7 @@ export default function NoteEditor({
       )}
       <ActiveListenWidget widgetRef={activeListenRef} />
       {editor && heldRemoval && (
-        <ListenRemovalDialog
+        <WidgetRemovalDialog
           removal={heldRemoval.removal}
           onKeep={() => {
             setHeldRemoval(null);
@@ -489,7 +483,7 @@ export default function NoteEditor({
             // The edit as it was made, unless the note has changed since.
             const { tr } = heldRemoval;
             if (editor.isDestroyed || !tr.before.eq(editor.state.doc)) return false;
-            editor.view.dispatch(tr.setMeta(LISTEN_REMOVAL_CONFIRMED, true));
+            editor.view.dispatch(tr.setMeta(WIDGET_REMOVAL_CONFIRMED, true));
             editor.commands.focus();
             return true;
           }}

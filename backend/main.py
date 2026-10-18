@@ -2344,7 +2344,7 @@ VOICE_SOURCE = "voice"
 # An hour of compressed audio is tens of MB; a long WAV can be hundreds.
 MAX_VOICE_BYTES = 1024 * 1024 * 1024
 _VOICE_UPLOAD_SUFFIXES = {".wav", ".m4a", ".mp3", ".mp4", ".aac", ".ogg", ".oga", ".opus", ".webm", ".flac", ".3gp"}
-_AUDIO_MEDIA_TYPES = {".wav": "audio/wav", ".m4a": "audio/mp4", ".mp4": "audio/mp4", ".mp3": "audio/mpeg", ".webm": "audio/webm"}
+_AUDIO_MEDIA_TYPES = {".wav": "audio/wav", ".m4a": "audio/mp4", ".mp4": "audio/mp4", ".mp3": "audio/mpeg", ".webm": "audio/webm", ".ogg": "audio/ogg"}
 
 
 def _write_listen_block(space_id: int | None, note_path: str | None, widget_id: str | None, update) -> dict[str, Any] | None:
@@ -2448,10 +2448,14 @@ async def transcribe_upload(
     space_id: int = Form(spaces.DEFAULT_SPACE_ID),
     note_path: str | None = Form(None),
     project: str = Form(INBOX, pattern=r"^[A-Za-z0-9_-]+$", max_length=64),
+    widget_id: str | None = Form(None, max_length=64),
+    source: str = Form("mic", pattern=r"^(mic|loopback|mixed|upload)$"),
     db: Session = Depends(get_db),
 ) -> schemas.VoiceResult:
-    """Transcribe an uploaded recording (the Android app's, or a file picked on the desktop) into a new listen block:
-    appended to `note_path`, else in a new voice note in the project's inbox (as a capture is)."""
+    """Transcribe an uploaded recording. With `widget_id` and `note_path` (a listen widget's recording, made in the
+    browser) the result is written into that widget's block in the note; otherwise (the Android app's, or a file picked
+    on the desktop) into a new listen block: appended to `note_path`, else in a new voice note in the project's inbox
+    (as a capture is)."""
     root = spaces.content_dir(_space_id_or_404(db, space_id))
     if note_path:
         try:
@@ -2475,6 +2479,10 @@ async def transcribe_upload(
         path.unlink(missing_ok=True)
         raise HTTPException(status_code=413, detail=f"Recordings are limited to {MAX_VOICE_BYTES // (1024 * 1024)} MB")
     result = await anyio.to_thread.run_sync(_transcribe, path)
+    if widget_id and note_path:
+        block = voice.completed_block(widget_id, source, result)
+        written = _write_listen_block(space_id, note_path, widget_id, lambda _old: block)
+        return schemas.VoiceResult.model_validate({**block, "note_updated": written is not None, "note_path": note_path})
     block = voice.completed_block(f"lw_{secrets.token_hex(6)}", "upload", result)
     markdown = voice.listen_block_markdown(block)
 

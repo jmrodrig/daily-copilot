@@ -494,6 +494,52 @@ def test_transcribe_upload_appends_to_a_note(client, session, notes_dir):
     assert content.startswith("Notes from the call.\n\n```listen\n")
 
 
+def test_transcribe_upload_updates_existing_widget_block(client, session, notes_dir):
+    write_note(notes_dir, "Meetings/Review.md", f"# Review\n\n{IDLE_BLOCK}\n\nAfter the widget.\n")
+
+    response = client.post(
+        "/api/voice/transcribe",
+        data={"note_path": "Meetings/Review.md", "widget_id": "lw_abc", "source": "mixed"},
+        files={"file": ("recording.webm", b"fake webm", "audio/webm")},
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["id"] == "lw_abc"
+    assert result["source"] == "mixed"
+    assert result["status"] == "completed"
+    assert result["note_updated"] is True
+    assert result["note_path"] == "Meetings/Review.md"
+    assert result["audio_file"].endswith(".webm")
+
+    # Written into the widget's own block, in place: no second block appended.
+    content = file_layer.read_note("Meetings/Review.md", notes_dir=notes_dir)["content"]
+    assert content.startswith("# Review\n\n```listen\n")
+    assert content.endswith("\n```\n\nAfter the widget.\n")
+    assert content.count("```listen") == 1
+    block = json.loads(voice.LISTEN_FENCE.search(content).group(1))
+    assert block["id"] == "lw_abc"
+    assert block["status"] == "completed"
+    assert block["dialogue"] == FAKE_RESULT["dialogue"]
+
+
+def test_transcribe_upload_for_a_widget_gone_from_its_note_still_returns_the_result(client, session, notes_dir):
+    write_note(notes_dir, "Other.md", "No widget here.")
+
+    response = client.post(
+        "/api/voice/transcribe",
+        data={"note_path": "Other.md", "widget_id": "lw_gone"},
+        files={"file": ("recording.webm", b"fake webm", "audio/webm")},
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["id"] == "lw_gone"
+    assert result["source"] == "mic"
+    assert result["note_updated"] is False
+    assert file_layer.read_note("Other.md", notes_dir=notes_dir)["content"] == "No widget here."
+
+
 def test_transcribe_upload_refuses_other_files_and_missing_notes(client, session):
     assert client.post("/api/voice/transcribe", files={"file": ("notes.exe", b"MZ")}).status_code == 400
     missing = client.post("/api/voice/transcribe", data={"note_path": "Nope.md"}, files={"file": ("a.wav", b"RIFF")})
