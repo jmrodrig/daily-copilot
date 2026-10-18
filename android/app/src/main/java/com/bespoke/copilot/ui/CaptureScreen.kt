@@ -119,6 +119,11 @@ fun CaptureScreen(showMessage: (String, Boolean) -> Unit) {
             onClick = { save() },
         )
 
+        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            SectionLabel("Listen")
+            ListenCard(project, showMessage)
+        }
+
         Text(
             text = "v${BuildConfig.VERSION_NAME} · ${BuildConfig.BACKEND_URL}",
             fontSize = 12.sp,

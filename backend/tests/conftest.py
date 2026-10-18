@@ -10,15 +10,18 @@ from sqlalchemy.orm import sessionmaker  # noqa: E402
 
 import database  # noqa: E402
 import spaces  # noqa: E402
+import voice  # noqa: E402
 from config import Settings  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
 def data_dirs(tmp_path, monkeypatch):
-    """Point the spaces (and the legacy notes folder the startup migration moves) at tmp_path,
-    so no test ever touches the real `data/` or `notes/` folders."""
+    """Point the spaces (and the legacy notes folder the startup migration moves) and the voice notes' data at
+    tmp_path, so no test ever touches the real `data/` or `notes/` folders."""
     settings = Settings(_env_file=None, data_dir=tmp_path / "data", notes_dir=tmp_path / "legacy-notes")
     monkeypatch.setattr(spaces, "get_settings", lambda: settings)
+    # Voice notes keep their recordings, voiceprints and contacts under data_dir too.
+    monkeypatch.setattr(voice, "get_settings", lambda: settings)
     return settings
 
 

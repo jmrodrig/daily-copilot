@@ -30,3 +30,6 @@ local.properties
 # Local notes (user data)
 backend/notes/
 backend/data/
+
+# Speaker-embedding model (voice notes): ~29 MB, downloaded from Hugging Face when missing (see backend/voice.py)
+backend/models/*.onnx

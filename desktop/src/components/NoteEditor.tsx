@@ -46,6 +46,7 @@ import {
 import { SlashCommand, SlashMenu, type SlashItem, type SlashMenuState } from "./slashCommand";
 import { WhiteboardIcon } from "./markupUi";
 import { WhiteboardNode } from "./WhiteboardWidget";
+import { ListenNode, MicIcon } from "./ListenWidget";
 import {
   ALIGNMENTS,
   AlignedBlocks,
@@ -65,6 +66,7 @@ import {
   snapWidths,
   widthLabel,
   EMPTY_WHITEBOARD_JSON,
+  newListenJson,
   InlineMath,
   localPathRanges,
   transformNotePastedHTML,
@@ -151,6 +153,8 @@ export default function NoteEditor({
       ResizableImage.configure({ inline: true, allowBase64: false }),
       // A ```whiteboard block, shown as a live board (see WhiteboardWidget).
       WhiteboardNode.configure({ spaceId, onSave: () => onSaveRef.current() }),
+      // A ```listen block, shown as its recording widget (see ListenWidget).
+      ListenNode,
       // `$…$` and `$$…$$`, shown rendered with KaTeX (see noteFormatting).
       InlineMath,
       BlockMath,
@@ -367,6 +371,10 @@ export default function NoteEditor({
     if (!editor) return;
     if (item.id === "whiteboard") {
       editor.chain().focus().deleteRange(range).insertContent({ type: "whiteboard", attrs: { data: EMPTY_WHITEBOARD_JSON } }).run();
+      return;
+    }
+    if (item.id === "listen") {
+      editor.chain().focus().deleteRange(range).insertContent({ type: "listen", attrs: { data: newListenJson() } }).run();
       return;
     }
     editor.chain().focus().deleteRange(range).run();
@@ -1418,6 +1426,14 @@ function Toolbar({
         onClick={() => chain().insertContent({ type: "whiteboard", attrs: { data: EMPTY_WHITEBOARD_JSON } }).run()}
       >
         <WhiteboardIcon />
+      </ToolButton>
+      <ToolButton
+        label="Insert listen widget (record and transcribe a meeting)"
+        on={false}
+        disabled={off}
+        onClick={() => chain().insertContent({ type: "listen", attrs: { data: newListenJson() } }).run()}
+      >
+        <MicIcon />
       </ToolButton>
       <ToolButton
         label="Insert table"

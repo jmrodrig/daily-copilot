@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ComponentProps, type ReactNode } from "react";
 import Markdown, { defaultUrlTransform, type Components } from "react-markdown";
 import { createPortal } from "react-dom";
-import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { Link, useBlocker, useNavigate, useSearchParams, type Blocker } from "react-router-dom";
 import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize from "rehype-sanitize";
@@ -25,6 +25,8 @@ import { NOTE_COLUMN, NOTE_HTML_SCHEMA, copyCleanSelection, layoutMedia, liftCel
 import WhiteboardView from "../components/WhiteboardView";
 import { COLLAPSE_ICON, EXPAND_ICON, WhiteboardFrame } from "../components/WhiteboardWidget";
 import { Segment, ToolIcon } from "../components/markupUi";
+import ListenWidget from "../components/ListenWidget";
+import { useVoiceRecording } from "../context/VoiceRecordingContext";
 
 // GET /api/notes/file (see NoteFile in backend/schemas.py).
 type NoteFile = { path: string; frontmatter: Record<string, unknown>; content: string };
@@ -106,6 +108,25 @@ export default function NotePage() {
   const followedPathRef = useRef<string | null>(null);
   // The path the editor was loaded for: it's remounted for another note, not for this one renamed.
   const [editorPath, setEditorPath] = useState(path);
+
+  // While a listen widget on this note is recording, leaving the note (a link, the sidebar, back or forward) asks
+  // first: stay, stop the recording and leave, or open the other page in a new window and keep recording here. The
+  // note's own rename, and opening a task beside it, aren't leaving it.
+  const voice = useVoiceRecording();
+  const blocker = useBlocker(({ currentLocation, nextLocation }) => {
+    if (!voice.recordingHere) return false;
+    const current = new URLSearchParams(currentLocation.search);
+    const next = new URLSearchParams(nextLocation.search);
+    const sameNote =
+      nextLocation.pathname === currentLocation.pathname &&
+      (["path", "space", "root"] as const).every((key) => next.get(key) === current.get(key));
+    const followingRename = nextLocation.pathname === "/note" && followedPathRef.current !== null && next.get("path") === followedPathRef.current;
+    return !sameNote && !followingRename;
+  });
+  // The recording ended meanwhile (stopped from the title bar, or another window): carry on where the user was going.
+  useEffect(() => {
+    if (blocker.state === "blocked" && !voice.recordingHere) blocker.proceed();
+  }, [blocker, voice.recordingHere]);
 
   const [externalChange, setExternalChange] = useState(false);
   useEffect(() => {
@@ -458,7 +479,7 @@ export default function NotePage() {
             isWhiteboardNote(version.frontmatter) ? (
               <WhiteboardFrame value={version.content.trim()} editable={false} />
             ) : (
-              <NoteMarkdown content={version.content} />
+              <NoteMarkdown content={version.content} preview />
             )
           }
           onRestored={restored}
@@ -473,6 +494,17 @@ export default function NotePage() {
         />
       )}
       {restoredToast && <RestoredToast label={restoredToast} onClose={() => setRestoredToast(null)} />}
+      {blocker.state === "blocked" && (
+        <LeaveRecordingDialog
+          onStay={() => blocker.reset()}
+          onStopAndLeave={() => {
+            // The backend finishes the transcript and writes it into the note on its own.
+            void voice.stop();
+            blocker.proceed();
+          }}
+          onOpenInNewWindow={() => openBlockedInNewWindow(blocker)}
+        />
+      )}
     </>
   );
 
@@ -624,15 +656,15 @@ export default function NotePage() {
   );
 }
 
-/** A note's body as the read-only page shows it (and the version history previews it). */
-function NoteMarkdown({ content }: { content: string }) {
+/** A note's body as the read-only page shows it (and, as a `preview`, the version history: its widgets only show). */
+function NoteMarkdown({ content, preview = false }: { content: string; preview?: boolean }) {
   return (
     <article className="note-body markdown text-[16px] leading-relaxed text-text-secondary" onCopy={copyCleanSelection}>
       {/* Inline HTML carries text and cell colors, alignment and image and table sizes; anything else in it is stripped. */}
       <Markdown
         remarkPlugins={[remarkGfm, remarkMath]}
         rehypePlugins={[rehypeRaw, [rehypeSanitize, NOTE_HTML_SCHEMA], liftCellColors, layoutMedia, rehypeKatex]}
-        components={NOTE_COMPONENTS}
+        components={preview ? PREVIEW_COMPONENTS : NOTE_COMPONENTS}
         urlTransform={noteUrlTransform}
       >
         {content}
@@ -657,6 +689,65 @@ function ExternalWindowIcon() {
       <path d="M13.5 2.5 8 8" />
       <path d="M12 9.5v3a1 1 0 0 1-1 1H3.5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h3" />
     </svg>
+  );
+}
+
+/** Open where the blocked navigation was going in a new window, staying on this note (and its recording). */
+function openBlockedInNewWindow(blocker: Blocker) {
+  if (blocker.state !== "blocked") return;
+  const { pathname, search, hash } = blocker.location;
+  window.open(`${window.location.origin}${pathname}${search}${hash}`, "_blank", "noopener,noreferrer");
+  blocker.reset();
+}
+
+/** Asks before leaving a note whose listen widget is recording. Escape (or a click outside) stays. */
+function LeaveRecordingDialog({
+  onStay,
+  onStopAndLeave,
+  onOpenInNewWindow,
+}: {
+  onStay: () => void;
+  onStopAndLeave: () => void;
+  onOpenInNewWindow: () => void;
+}) {
+  return createPortal(
+    <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/50 pt-[15vh]" onMouseDown={onStay}>
+      <div
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="leave-recording-title"
+        aria-describedby="leave-recording-text"
+        onMouseDown={(e) => e.stopPropagation()}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") {
+            e.preventDefault();
+            onStay();
+          }
+        }}
+        className="panel flex w-[480px] animate-dialog-in flex-col gap-3"
+      >
+        <h2 id="leave-recording-title" className="flex items-center gap-2 text-base font-semibold">
+          <span className="h-2.5 w-2.5 animate-pulse rounded-full bg-red-500" />
+          Voice recording is active
+        </h2>
+        <p id="leave-recording-text" className="text-[15px] text-text-secondary">
+          Voice recording is active on this note. Leaving this note will stop listening and finalize the transcription.
+        </p>
+        <p className="text-xs text-text-muted">Tip: Open the new view in a new window to keep recording.</p>
+        <div className="mt-1 flex flex-wrap justify-end gap-2">
+          <button type="button" className="btn" onClick={onOpenInNewWindow}>
+            Open in New Window
+          </button>
+          <button type="button" className="btn border-red-500/60 text-red-500 hover:bg-red-500/10" onClick={onStopAndLeave}>
+            Stop &amp; Leave
+          </button>
+          <button type="button" className="btn-primary" autoFocus onClick={onStay}>
+            Stay on Page
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -952,18 +1043,27 @@ function noteUrlTransform(url: string): string {
   return isLocalHref(decoded) ? decoded : defaultUrlTransform(url);
 }
 
-const NOTE_COMPONENTS: Components = {
-  img: NoteImage,
-  // A ```whiteboard block (see noteFormatting) shows as its board, read-only; any other code block as code.
-  pre: ({ node, ...props }) => {
+/**
+ * A code block as the read-only note shows it: a ```whiteboard block (see noteFormatting) as its board, read-only, a
+ * ```listen block as its widget (which can record and tag speakers here too: the backend saves those into the note,
+ * see ListenWidget), unless `interactive` is false; any other code block as code.
+ */
+function notePre(interactive: boolean): Components["pre"] {
+  return ({ node, ...props }) => {
     const code = node?.children[0];
     const classes = code?.type === "element" && code.tagName === "code" ? code.properties.className : null;
-    if (code?.type === "element" && Array.isArray(classes) && classes.includes("language-whiteboard")) {
-      const json = code.children.map((child) => (child.type === "text" ? child.value : "")).join("");
-      return <WhiteboardFrame value={json.trim()} editable={false} />;
-    }
+    const fence = (lang: string) => code?.type === "element" && Array.isArray(classes) && classes.includes(`language-${lang}`);
+    const text = () =>
+      code?.type === "element" ? code.children.map((child) => (child.type === "text" ? child.value : "")).join("").trim() : "";
+    if (fence("whiteboard")) return <WhiteboardFrame value={text()} editable={false} />;
+    if (fence("listen")) return <ListenWidget value={text()} interactive={interactive} />;
     return <pre {...props} />;
-  },
+  };
+}
+
+const NOTE_COMPONENTS: Components = {
+  img: NoteImage,
+  pre: notePre(true),
   // Inline code holding a local path, as the chat cites files (`\\server\share\…`, `Y:\…`), opens the file too.
   code: ({ node: _node, ref: _ref, ...props }) => {
     const text = typeof props.children === "string" ? props.children.trim() : "";
@@ -1024,6 +1124,8 @@ const NOTE_COMPONENTS: Components = {
     return <a {...props} target={props.href?.startsWith("#") ? undefined : "_blank"} rel="noopener noreferrer" />;
   },
 };
+
+const PREVIEW_COMPONENTS: Components = { ...NOTE_COMPONENTS, pre: notePre(false) };
 
 /** A link to a local file or folder in the read-only note, shown as a pill: opens it on click (see openLocalFile). */
 function LocalFileLink({ href, children }: { href: string; children: ReactNode }) {

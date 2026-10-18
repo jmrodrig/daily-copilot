@@ -37,6 +37,11 @@ class Settings(BaseSettings):
     # (needs gemini_api_key)
     chat_model: str = "claude-opus-5-5"
 
+    # Voice notes (see voice.py): the faster-whisper model ("tiny.en", "base.en" or "small.en") and the spoken
+    # language ("auto" detects it).
+    whisper_model: str = "base.en"
+    whisper_language: str = "en"
+
     # API keys: SecretStr keeps them out of reprs and logs.
     gemini_api_key: SecretStr | None = None
     anthropic_api_key: SecretStr | None = None

@@ -3,16 +3,24 @@ import { PluginKey } from "@tiptap/pm/state";
 import Suggestion, { type SuggestionProps } from "@tiptap/suggestion";
 import { useEffect, useState, type MutableRefObject } from "react";
 
+import { MicIcon } from "./ListenWidget";
 import { WhiteboardIcon } from "./markupUi";
 import { PillIcon, type RefKind } from "./referencePill";
 
-/** What `/` offers: insert a new task, a link to a task, a note or a web page, or a whiteboard. */
-export type SlashItem = { id: "task" | "link" | "whiteboard"; title: string; description: string; icon: RefKind | "whiteboard"; keywords: string[] };
+/** What `/` offers: insert a new task, a link to a task, a note or a web page, a whiteboard, or a listen widget. */
+export type SlashItem = {
+  id: "task" | "link" | "whiteboard" | "listen";
+  title: string;
+  description: string;
+  icon: RefKind | "whiteboard" | "listen";
+  keywords: string[];
+};
 
 const SLASH_ITEMS: SlashItem[] = [
   { id: "task", title: "Task", description: "Create a task and insert it here", icon: "task", keywords: ["todo", "action"] },
   { id: "link", title: "Link", description: "Link a task, a note or a URL", icon: "url", keywords: ["note", "url", "page", "reference"] },
   { id: "whiteboard", title: "Whiteboard", description: "Draw, and pin images and PDFs", icon: "whiteboard", keywords: ["draw", "canvas", "sketch", "diagram", "board"] },
+  { id: "listen", title: "Listen", description: "Record and transcribe a meeting or call", icon: "listen", keywords: ["record", "voice", "audio", "meeting", "transcribe", "mic", "call"] },
 ];
 
 /** The open menu: the matching items, where the `/` is on screen, and how to pick one. */
@@ -114,7 +122,13 @@ export function SlashMenu({ menu, keyHandler }: { menu: SlashMenuState; keyHandl
           className={`flex items-center gap-2.5 px-3 py-2 text-left ${i === index ? "bg-surface-hover" : ""}`}
         >
           <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded border border-border-default text-accent-soft">
-            {item.icon === "whiteboard" ? <WhiteboardIcon size={15} /> : <PillIcon kind={item.icon} size={15} />}
+            {item.icon === "whiteboard" ? (
+              <WhiteboardIcon size={15} />
+            ) : item.icon === "listen" ? (
+              <MicIcon size={15} />
+            ) : (
+              <PillIcon kind={item.icon} size={15} />
+            )}
           </span>
           <span className="flex min-w-0 flex-col">
             <span className="text-[15px] text-text-primary">{item.title}</span>

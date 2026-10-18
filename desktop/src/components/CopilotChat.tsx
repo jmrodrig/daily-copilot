@@ -18,7 +18,7 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import "katex/dist/katex.min.css";
 
-import { errorDetail, getJson, message, PROMPTS_CHANGED, sendJson, uploadFile, type SavedPrompt } from "../lib/api";
+import { CHAT_PROMPT, errorDetail, getJson, message, PROMPTS_CHANGED, sendJson, uploadFile, type SavedPrompt } from "../lib/api";
 import { isLocalHref, openLocalFile } from "../lib/localFiles";
 import { notifyNoteUpdated } from "../lib/notes";
 import { notePath, useSpace } from "../lib/space";
@@ -814,6 +814,25 @@ export default function CopilotChat({
     return prompts.filter((p) => p.command.startsWith(typed));
   }, [input, prompts, menuDismissed]);
   const highlighted = Math.min(menuIndex, Math.max(menuItems.length - 1, 0));
+
+  // A question written in from elsewhere (a listen widget's "Summarize Meeting"), ready to be checked and sent.
+  useEffect(() => {
+    const prompted = (event: Event) => {
+      const text = (event as CustomEvent<string>).detail;
+      if (typeof text !== "string" || !text) return;
+      setInput(text);
+      setMenuDismissed(true);
+      setTimeout(() => {
+        const el = inputRef.current;
+        if (el) {
+          el.focus();
+          el.setSelectionRange(text.length, text.length);
+        }
+      });
+    };
+    window.addEventListener(CHAT_PROMPT, prompted);
+    return () => window.removeEventListener(CHAT_PROMPT, prompted);
+  }, []);
 
   function changeInput(value: string) {
     setInput(value);

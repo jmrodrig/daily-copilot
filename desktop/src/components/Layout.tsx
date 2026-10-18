@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent, type RefObject } from "react";
-import { Outlet } from "react-router-dom";
+import { Link, Outlet } from "react-router-dom";
 
+import { formatClock, useVoiceRecording } from "../context/VoiceRecordingContext";
+import { CHAT_PROMPT } from "../lib/api";
+import { notePath } from "../lib/space";
 import { useTaskPanel } from "../lib/tasks";
 import CopilotChat from "./CopilotChat";
 import Sidebar, { IconButton } from "./Sidebar";
@@ -95,6 +98,13 @@ export default function Layout() {
   useEffect(() => {
     localStorage.setItem(WIDTHS_KEY, JSON.stringify(widths));
   }, [widths]);
+
+  // A question written into the chat from elsewhere (a listen widget's "Summarize Meeting") opens it to be seen.
+  useEffect(() => {
+    const open = () => setChatOpen(true);
+    window.addEventListener(CHAT_PROMPT, open);
+    return () => window.removeEventListener(CHAT_PROMPT, open);
+  }, [setChatOpen]);
 
   // Shrink the open panes (the chat first, then the task, then the page tree) when the window is too narrow for them
   // and the main view, so the chat (and its scrollbar) never runs off the right edge.
@@ -205,6 +215,7 @@ export default function Layout() {
       <main ref={mainRef} className="min-w-[320px] flex-1 overflow-auto print:overflow-visible">
         <Outlet />
       </main>
+      <ListeningIndicator />
       {rightOfMain && (
         <Divider
           {...dividerProps}
@@ -251,6 +262,47 @@ export default function Layout() {
           />
         </div>
       </aside>
+    </div>
+  );
+}
+
+/**
+ * The badge at the top of the window while a voice recording runs (or is being transcribed), on every page and in
+ * every window: `🔴 Listening (01:23)`, linking to the note that's recording, with a Stop button.
+ */
+function ListeningIndicator() {
+  const { status, elapsed, stop } = useVoiceRecording();
+  if (!status.is_recording && !status.is_processing) return null;
+  const label = status.is_recording
+    ? `${status.is_paused ? "⏸ Paused" : "🔴 Listening"} (${formatClock(elapsed)})`
+    : "⏳ Transcribing…";
+  const to = status.note_path && status.space_id !== null ? notePath(status.space_id, status.note_path) : null;
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      className={`fixed left-1/2 top-2 z-40 flex -translate-x-1/2 items-center gap-2 rounded-full border bg-surface-raised py-1 pl-3 pr-1.5 text-[13px] font-medium shadow-lg print:hidden ${
+        status.is_recording && !status.is_paused ? "border-red-500/60" : "border-border-strong"
+      }`}
+    >
+      {to ? (
+        <Link to={to} title="Go to the note that's recording" className="tabular-nums text-text-primary hover:underline">
+          {label}
+        </Link>
+      ) : (
+        <span className="tabular-nums">{label}</span>
+      )}
+      {status.is_recording ? (
+        <button
+          type="button"
+          onClick={() => void stop()}
+          className="rounded-full border border-red-500/50 px-2 py-0.5 text-[12px] text-red-500 hover:bg-red-500/10"
+        >
+          Stop
+        </button>
+      ) : (
+        <span className="pr-1.5 text-[12px] text-text-muted">{status.stage}</span>
+      )}
     </div>
   );
 }

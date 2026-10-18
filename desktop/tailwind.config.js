@@ -56,11 +56,14 @@ export default {
         // Toasts rise into place; `translate` keeps their -translate-x-1/2 centring intact.
         "toast-in": { from: { opacity: "0", translate: "0 8px" } },
         "dialog-in": { from: { opacity: "0", transform: "scale(0.98) translateY(-4px)" } },
+        // A listen widget's activity bars, bobbing while it records.
+        "voice-bar": { "0%, 100%": { transform: "scaleY(0.3)" }, "50%": { transform: "scaleY(1)" } },
       },
       animation: {
         "pane-in": "pane-in 200ms ease-out",
         "toast-in": "toast-in 180ms ease-out",
         "dialog-in": "dialog-in 160ms ease-out",
+        "voice-bar": "voice-bar 900ms ease-in-out infinite",
       },
     },
   },
