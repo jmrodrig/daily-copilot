@@ -13,7 +13,10 @@ Everything is kept under `<data_dir>/voice/`:
 A recording is embedded in its note as a ```listen fenced block of JSON on one line (see `listen_block_markdown`), the
 way a whiteboard is. Only one recording runs at a time, across the app (`SESSION`).
 
-The heavy libraries (pyaudiowpatch, faster-whisper, onnxruntime, scipy, av) are imported when first used, so the
+When pyaudiowpatch finds no audio device (its MME, DirectSound and WASAPI can come up empty), they're found and
+recorded with sounddevice instead, whose PortAudio has Windows WDM-KS: the system audio is then a "Stereo Mix" input.
+
+The heavy libraries (pyaudiowpatch, sounddevice, faster-whisper, onnxruntime, scipy, av) are imported when first used, so the
 backend starts, and its tests run, without them.
 """
 
@@ -148,8 +151,20 @@ def _pyaudio():
     return pyaudiowpatch
 
 
+def _sounddevice():
+    try:
+        import sounddevice
+    except (ImportError, OSError) as exc:  # not installed, or no PortAudio library
+        raise VoiceError("Audio capture needs sounddevice: pip install sounddevice") from exc
+    return sounddevice
+
+
+# Input devices that record what the speakers play (sounddevice has no WASAPI loopback flag: these are told by name).
+_LOOPBACK_NAME_RE = re.compile(r"stereo ?mix|wave out mix|what u hear|loopback", re.IGNORECASE)
+
+
 def _default_devices(pa, p) -> tuple[int | None, int | None]:
-    """The default microphone's index and the default speakers' WASAPI loopback's."""
+    """The default microphone's index and the default speakers' WASAPI loopback's (pyaudiowpatch)."""
     mic = loopback = None
     try:
         mic = p.get_default_input_device_info()["index"]
@@ -171,11 +186,30 @@ def _default_devices(pa, p) -> tuple[int | None, int | None]:
     return mic, loopback
 
 
-def list_audio_devices() -> dict[str, Any]:
-    """The microphones and system-audio (loopback) devices to record from, with the defaults' indexes."""
+def _sounddevice_defaults(sd, mics: list[dict[str, Any]], loopbacks: list[dict[str, Any]]) -> tuple[int | None, int | None]:
+    """The default microphone's index (the system's default input, else one named like a microphone, else the first)
+    and the first loopback's (Stereo Mix, say)."""
+    indexes = {m["index"] for m in mics}
+    try:
+        default_input = int(sd.default.device[0])
+    except Exception:  # noqa: BLE001 - no default set
+        default_input = -1
+    if default_input in indexes:
+        mic = default_input
+    else:
+        named = [m for m in mics if "microphone" in m["name"].lower()] or [
+            m for m in mics if re.search(r"\bmic|headset", m["name"], re.IGNORECASE)
+        ]
+        mic = (named or mics or [{"index": None}])[0]["index"]
+    loopback = loopbacks[0]["index"] if loopbacks else None
+    return mic, loopback
+
+
+def _pyaudio_devices() -> dict[str, Any]:
+    """The input devices pyaudiowpatch sees (MME, DirectSound, WASAPI and its loopbacks)."""
     pa = _pyaudio()
     p = pa.PyAudio()
-    devices: dict[str, Any] = {"mics": [], "loopbacks": []}
+    devices: dict[str, Any] = {"backend": "pyaudio", "mics": [], "loopbacks": []}
     try:
         for i in range(p.get_device_count()):
             try:
@@ -195,12 +229,72 @@ def list_audio_devices() -> dict[str, Any]:
                 "host_api": host_api,
                 "channels": channels,
                 "default_samplerate": int(info.get("defaultSampleRate", 44100)),
+                "backend": "pyaudio",
             }
             devices["loopbacks" if info.get("isLoopbackDevice") else "mics"].append(device)
         devices["default_mic_index"], devices["default_loopback_index"] = _default_devices(pa, p)
     finally:
         p.terminate()
     return devices
+
+
+def _sounddevice_devices() -> dict[str, Any]:
+    """The input devices sounddevice sees (its PortAudio has Windows WDM-KS, which finds them when WASAPI doesn't)."""
+    sd = _sounddevice()
+    devices: dict[str, Any] = {"backend": "sounddevice", "mics": [], "loopbacks": []}
+    for i, info in enumerate(sd.query_devices()):
+        channels = int(info.get("max_input_channels", 0))
+        if channels <= 0:
+            continue
+        try:
+            host_api = sd.query_hostapis(info.get("hostapi"))["name"]
+        except Exception:  # noqa: BLE001
+            host_api = ""
+        name = str(info.get("name", f"Device {i}"))
+        device = {
+            "index": int(info.get("index", i)),
+            "name": name,
+            "host_api": host_api,
+            "channels": channels,
+            "default_samplerate": int(info.get("default_samplerate", 44100)),
+            "backend": "sounddevice",
+        }
+        devices["loopbacks" if _LOOPBACK_NAME_RE.search(name) else "mics"].append(device)
+    devices["default_mic_index"], devices["default_loopback_index"] = _sounddevice_defaults(
+        sd, devices["mics"], devices["loopbacks"]
+    )
+    return devices
+
+
+def list_audio_devices() -> dict[str, Any]:
+    """The microphones and system-audio (loopback) devices to record from, with the defaults' indexes, and the
+    `backend` that sees them: pyaudiowpatch, else (when it's missing or finds no device) sounddevice."""
+    try:
+        devices = _pyaudio_devices()
+    except Exception as exc:  # noqa: BLE001 - not installed, or PortAudio failed: try sounddevice
+        logger.info("pyaudiowpatch can't list the audio devices (%s): trying sounddevice", exc)
+        devices, error = None, exc
+    else:
+        if devices["mics"] or devices["loopbacks"]:
+            return devices
+        logger.info("pyaudiowpatch found no audio device: trying sounddevice (WDM-KS)")
+        error = None
+    try:
+        return _sounddevice_devices()
+    except Exception as exc:  # noqa: BLE001
+        if devices is not None:  # pyaudiowpatch worked, there's just nothing to record from
+            logger.warning("sounddevice can't list the audio devices either: %s", exc)
+            return devices
+        if isinstance(error, VoiceError) and isinstance(exc, VoiceError):
+            raise VoiceError("Audio capture needs pyaudiowpatch or sounddevice: pip install pyaudiowpatch sounddevice") from exc
+        raise VoiceError(f"Could not list the audio devices: {error}; {exc}") from exc
+
+
+def _pcm16(indata: np.ndarray) -> bytes:
+    """A sounddevice buffer (float -1..1, or int16) as interleaved int16 PCM bytes."""
+    if indata.dtype == np.int16:
+        return indata.tobytes()
+    return (np.clip(indata, -1.0, 1.0) * 32767.0).astype(np.int16).tobytes()
 
 
 def resample_and_downmix(raw: bytes, src_rate: int, src_channels: int, target_rate: int = TARGET_RATE) -> np.ndarray:
@@ -235,17 +329,23 @@ def mix(mic: np.ndarray, loop: np.ndarray) -> np.ndarray:
 
 
 class DualStreamRecorder:
-    """Records the microphone and/or a WASAPI loopback device into one 16 kHz mono WAV.
+    """Records the microphone and/or a loopback device into one 16 kHz mono WAV.
 
     Each stream's callback queues its raw buffers; a writer thread resamples, mixes and writes them as they come.
-    A device given as None isn't opened.
+    A device given as None isn't opened. The devices are opened with `backend` ("pyaudio" or "sounddevice"), else
+    with the one `list_audio_devices` lists them from. sounddevice streams are callback ones: WDM-KS can't do
+    blocking reads.
     """
 
-    def __init__(self, output_path: Path, mic_index: int | None, loopback_index: int | None) -> None:
+    def __init__(
+        self, output_path: Path, mic_index: int | None, loopback_index: int | None, backend: str | None = None
+    ) -> None:
         self.output_path = output_path
         self.mic_index = mic_index
         self.loopback_index = loopback_index
+        self.backend = backend
         self._pa = None
+        self._sd = None
         self._streams: list[Any] = []
         self._mic_queue: queue.Queue[bytes] = queue.Queue()
         self._loop_queue: queue.Queue[bytes] = queue.Queue()
@@ -271,8 +371,17 @@ class DualStreamRecorder:
         active = now - self._started - self._paused_total - ((now - self._paused_at) if self._paused else 0.0)
         return max(0.0, active)
 
-    def _open(self, p, index: int, queue_: queue.Queue[bytes], loopback: bool) -> tuple[int, int]:
-        pa = _pyaudio()
+    def _open(self, index: int, queue_: queue.Queue[bytes], loopback: bool) -> tuple[int, int]:
+        opener = self._open_sounddevice if self.backend == "sounddevice" else self._open_pyaudio
+        rate, channels = opener(index, queue_, loopback)
+        logger.info(
+            "Recording %s (%s device %s, %s Hz, %s ch)",
+            "loopback" if loopback else "microphone", self.backend, index, rate, channels,
+        )
+        return rate, channels
+
+    def _open_pyaudio(self, index: int, queue_: queue.Queue[bytes], loopback: bool) -> tuple[int, int]:
+        pa, p = _pyaudio(), self._pa
         info = p.get_device_info_by_index(index)
         rate = int(info.get("defaultSampleRate", 44100 if loopback else TARGET_RATE))
         channels = max(1, int(info.get("maxInputChannels", 2 if loopback else 1)))
@@ -295,29 +404,51 @@ class DualStreamRecorder:
         )
         stream.start_stream()
         self._streams.append(stream)
-        logger.info("Recording %s (device %s, %s Hz, %s ch)", "loopback" if loopback else "microphone", index, rate, channels)
+        return rate, channels
+
+    def _open_sounddevice(self, index: int, queue_: queue.Queue[bytes], loopback: bool) -> tuple[int, int]:
+        info = self._sd.query_devices(index)
+        rate = int(info.get("default_samplerate", 44100 if loopback else TARGET_RATE))
+        channels = min(2, max(1, int(info.get("max_input_channels", 2 if loopback else 1))))
+
+        def callback(indata, _frames, _time_info, _status):
+            if self._recording and not self._paused and len(indata):
+                queue_.put(_pcm16(indata))
+
+        stream = self._sd.InputStream(
+            device=index, channels=channels, samplerate=rate, dtype="float32", blocksize=2048, callback=callback
+        )
+        try:
+            stream.start()
+        except Exception:
+            stream.close()
+            raise
+        self._streams.append(stream)
         return rate, channels
 
     def start(self) -> None:
-        pa = _pyaudio()
-        self._pa = pa.PyAudio()
+        if self.backend is None:
+            self.backend = list_audio_devices()["backend"]
+        if self.backend == "sounddevice":
+            self._sd = _sounddevice()
+        else:
+            self._pa = _pyaudio().PyAudio()
         self._recording = True
         self._started = time.time()
         errors = []
         if self.mic_index is not None:
             try:
-                self._mic_format = self._open(self._pa, self.mic_index, self._mic_queue, loopback=False)
+                self._mic_format = self._open(self.mic_index, self._mic_queue, loopback=False)
             except Exception as exc:  # noqa: BLE001 - reported below if nothing opened
                 errors.append(f"microphone: {exc}")
         if self.loopback_index is not None:
             try:
-                self._loop_format = self._open(self._pa, self.loopback_index, self._loop_queue, loopback=True)
+                self._loop_format = self._open(self.loopback_index, self._loop_queue, loopback=True)
             except Exception as exc:  # noqa: BLE001
                 errors.append(f"system audio: {exc}")
         if not self._streams:
             self._recording = False
-            self._pa.terminate()
-            self._pa = None
+            self._release()
             raise VoiceError("Could not open an audio device (" + "; ".join(errors or ["none chosen"]) + ")")
         for error in errors:
             logger.warning("Recording without the %s", error)
@@ -334,14 +465,14 @@ class DualStreamRecorder:
             self._paused_total += time.time() - self._paused_at
             self._paused = False
 
-    def stop(self) -> Path:
-        """Close the devices and finish the WAV file."""
-        self._recording = False
-        self._paused = False
-        self._stop.set()
+    def _release(self) -> None:
+        """Close the streams, and pyaudiowpatch's PortAudio."""
         for stream in self._streams:
             try:
-                stream.stop_stream()
+                if self.backend == "sounddevice":
+                    stream.stop()
+                else:
+                    stream.stop_stream()
                 stream.close()
             except Exception:  # noqa: BLE001
                 pass
@@ -352,6 +483,14 @@ class DualStreamRecorder:
             except Exception:  # noqa: BLE001
                 pass
             self._pa = None
+        self._sd = None
+
+    def stop(self) -> Path:
+        """Close the devices and finish the WAV file."""
+        self._recording = False
+        self._paused = False
+        self._stop.set()
+        self._release()
         if self._writer and self._writer.is_alive():
             self._writer.join(timeout=5.0)
         return self.output_path
@@ -386,14 +525,9 @@ def source_devices(source: str, mic_index: int | None, loopback_index: int | Non
     if source not in SOURCES:
         raise VoiceError(f"Unknown audio source: {source}")
     if (source != "loopback" and mic_index is None) or (source != "mic" and loopback_index is None):
-        pa = _pyaudio()
-        p = pa.PyAudio()
-        try:
-            default_mic, default_loopback = _default_devices(pa, p)
-        finally:
-            p.terminate()
-        mic_index = default_mic if mic_index is None else mic_index
-        loopback_index = default_loopback if loopback_index is None else loopback_index
+        devices = list_audio_devices()
+        mic_index = devices.get("default_mic_index") if mic_index is None else mic_index
+        loopback_index = devices.get("default_loopback_index") if loopback_index is None else loopback_index
     mic = mic_index if source in ("mic", "mixed") else None
     loop = loopback_index if source in ("loopback", "mixed") else None
     if mic is None and loop is None:

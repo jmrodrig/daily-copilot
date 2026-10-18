@@ -139,14 +139,174 @@ def test_devices_endpoint(client, monkeypatch):
     assert response.json()["default_loopback_index"] == 2
 
 
-def test_devices_endpoint_without_pyaudio_is_503(client, monkeypatch):
+def test_devices_endpoint_without_pyaudio_or_sounddevice_is_503(client, monkeypatch):
+    def missing():
+        raise voice.VoiceError("Audio capture needs a library")
+
+    monkeypatch.setattr(voice, "_pyaudio", missing)
+    monkeypatch.setattr(voice, "_sounddevice", missing)
+    response = client.get("/api/voice/devices")
+    assert response.status_code == 503
+    assert "pyaudiowpatch or sounddevice" in response.json()["detail"]
+
+
+class EmptyPyAudio(FakePyAudio):
+    """PortAudio's MME, DirectSound and WASAPI finding nothing."""
+
+    DEVICES = []
+
+    def get_default_input_device_info(self):
+        raise OSError("No Default Input Device Available")
+
+
+class FakeInputStream:
+    """A sounddevice callback stream: `feed` plays as the device delivering a buffer."""
+
+    opened: list["FakeInputStream"] = []
+
+    def __init__(self, device, channels, samplerate, dtype, blocksize, callback):
+        self.device, self.channels, self.samplerate, self.dtype = device, channels, samplerate, dtype
+        self.callback = callback
+        self.started = self.closed = False
+        FakeInputStream.opened.append(self)
+
+    def feed(self, samples: np.ndarray):
+        self.callback(samples.astype(np.float32).reshape(-1, self.channels), len(samples), None, None)
+
+    def start(self):
+        self.started = True
+
+    def stop(self):
+        self.started = False
+
+    def close(self):
+        self.closed = True
+
+
+class FakeSoundDevice:
+    """sounddevice as it is on a machine where only WDM-KS finds the hardware."""
+
+    DEVICES = [
+        {"index": 0, "name": "FrontMic (Realtek HD Audio Front Mic input)", "hostapi": 0, "max_input_channels": 2, "max_output_channels": 0, "default_samplerate": 44100.0},
+        {"index": 1, "name": "Speakers (Realtek HD Audio output)", "hostapi": 0, "max_input_channels": 0, "max_output_channels": 2, "default_samplerate": 44100.0},
+        {"index": 2, "name": "Stereo Mix (Realtek HD Audio Stereo input)", "hostapi": 0, "max_input_channels": 2, "max_output_channels": 0, "default_samplerate": 48000.0},
+        {"index": 3, "name": "Microphone (Canyon CNS-CWC5 Microphone)", "hostapi": 0, "max_input_channels": 1, "max_output_channels": 0, "default_samplerate": 16000.0},
+    ]
+    default = SimpleNamespace(device=[-1, 1])  # no default input
+    InputStream = FakeInputStream
+
+    @classmethod
+    def query_devices(cls, index=None):
+        return cls.DEVICES if index is None else cls.DEVICES[index]
+
+    @staticmethod
+    def query_hostapis(index):
+        return {"name": "Windows WDM-KS"}
+
+
+@pytest.fixture
+def wdm_ks_only(monkeypatch):
+    """pyaudiowpatch finds no device; sounddevice (WDM-KS) finds them all."""
+    FakeInputStream.opened = []
+    monkeypatch.setattr(voice, "_pyaudio", lambda: SimpleNamespace(PyAudio=EmptyPyAudio, paWASAPI=13))
+    monkeypatch.setattr(voice, "_sounddevice", lambda: FakeSoundDevice)
+
+
+def test_devices_fall_back_to_sounddevice_when_pyaudio_finds_none(wdm_ks_only):
+    devices = voice.list_audio_devices()
+
+    assert devices["backend"] == "sounddevice"
+    # Stereo Mix records the system audio; an output-only device isn't listed.
+    assert [d["name"] for d in devices["loopbacks"]] == ["Stereo Mix (Realtek HD Audio Stereo input)"]
+    assert [d["index"] for d in devices["mics"]] == [0, 3]
+    assert devices["mics"][1] == {
+        "index": 3,
+        "name": "Microphone (Canyon CNS-CWC5 Microphone)",
+        "host_api": "Windows WDM-KS",
+        "channels": 1,
+        "default_samplerate": 16000,
+        "backend": "sounddevice",
+    }
+    # No default input set: the one named a microphone.
+    assert devices["default_mic_index"] == 3
+    assert devices["default_loopback_index"] == 2
+
+
+def test_sounddevice_default_input_is_the_default_mic(wdm_ks_only, monkeypatch):
+    monkeypatch.setattr(FakeSoundDevice, "default", SimpleNamespace(device=[0, 1]))
+    assert voice.list_audio_devices()["default_mic_index"] == 0
+
+
+@pytest.mark.parametrize("name", ["Wave Out Mix", "What U Hear (Sound Blaster)", "Loopback (VB-Audio)", "StereoMix"])
+def test_sounddevice_loopbacks_are_told_by_name(wdm_ks_only, monkeypatch, name):
+    device = {"index": 0, "name": name, "hostapi": 0, "max_input_channels": 2, "default_samplerate": 48000.0}
+    monkeypatch.setattr(FakeSoundDevice, "DEVICES", [device])
+
+    devices = voice.list_audio_devices()
+
+    assert devices["mics"] == [] and devices["default_mic_index"] is None
+    assert [d["name"] for d in devices["loopbacks"]] == [name]
+
+
+def test_devices_fall_back_to_sounddevice_without_pyaudio(wdm_ks_only, monkeypatch):
     def missing():
         raise voice.VoiceError("Audio capture needs pyaudiowpatch")
 
     monkeypatch.setattr(voice, "_pyaudio", missing)
-    response = client.get("/api/voice/devices")
-    assert response.status_code == 503
-    assert "pyaudiowpatch" in response.json()["detail"]
+    assert voice.list_audio_devices()["backend"] == "sounddevice"
+
+
+def test_pyaudio_devices_are_kept_when_it_finds_some(monkeypatch):
+    monkeypatch.setattr(voice, "_pyaudio", lambda: SimpleNamespace(PyAudio=FakePyAudio, paWASAPI=13))
+    monkeypatch.setattr(voice, "_sounddevice", lambda: pytest.fail("sounddevice isn't needed"))
+    assert voice.list_audio_devices()["backend"] == "pyaudio"
+
+
+def test_source_devices_defaults_come_from_the_fallback(wdm_ks_only):
+    assert voice.source_devices("mic", None, None) == (3, None)
+    assert voice.source_devices("loopback", None, None) == (None, 2)
+    assert voice.source_devices("mixed", 0, None) == (0, 2)
+
+
+def test_sounddevice_recording_lifecycle(wdm_ks_only, tmp_path):
+    output = tmp_path / "rec.wav"
+    recorder = voice.DualStreamRecorder(output, 3, 2)
+    recorder.start()
+
+    assert recorder.backend == "sounddevice"
+    mic, loop = FakeInputStream.opened
+    assert (mic.device, mic.channels, mic.samplerate, mic.dtype) == (3, 1, 16000, "float32")
+    assert (loop.device, loop.channels, loop.samplerate) == (2, 2, 48000)
+    assert mic.started and loop.started
+
+    mic.feed(np.full(1600, 0.5))  # 0.1 s at 16 kHz
+    loop.feed(np.full(4800 * 2, 0.25))  # 0.1 s of stereo at 48 kHz
+    recorder.pause()
+    mic.feed(np.full(16000, 0.5))  # not recorded
+    assert recorder.is_paused
+    recorder.resume()
+    mic.feed(np.full(1600, -0.5))
+
+    assert recorder.stop() == output
+    assert mic.closed and loop.closed and not mic.started
+    with wave.open(str(output)) as wav:
+        assert (wav.getnchannels(), wav.getsampwidth(), wav.getframerate()) == (1, 2, voice.TARGET_RATE)
+        samples = np.frombuffer(wav.readframes(wav.getnframes()), dtype=np.int16)
+    assert 3200 <= len(samples) <= 3200 + 1600  # the paused second left out
+    assert samples.max() > 0 and samples.min() < 0
+
+
+def test_sounddevice_recording_without_any_device_opening_fails(wdm_ks_only, tmp_path, monkeypatch):
+    def broken(self):
+        raise RuntimeError("Error opening InputStream")
+
+    monkeypatch.setattr(FakeInputStream, "start", broken)
+    recorder = voice.DualStreamRecorder(tmp_path / "rec.wav", 3, None, backend="sounddevice")
+
+    with pytest.raises(voice.VoiceError, match="Error opening InputStream"):
+        recorder.start()
+    assert FakeInputStream.opened[0].closed
+    assert recorder.duration() == 0.0
 
 
 # --- The single recording -----------------------------------------------------------------------------------------
