@@ -232,9 +232,50 @@ def test_devices_fall_back_to_sounddevice_when_pyaudio_finds_none(wdm_ks_only):
     assert devices["default_loopback_index"] == 2
 
 
-def test_sounddevice_default_input_is_the_default_mic(wdm_ks_only, monkeypatch):
+def test_sounddevice_default_skips_an_unplugged_front_mic_for_a_usb_one(wdm_ks_only, monkeypatch):
+    # The system's default input is the chassis FrontMic (silent with nothing plugged in): the Canyon mic wins.
     monkeypatch.setattr(FakeSoundDevice, "default", SimpleNamespace(device=[0, 1]))
+    assert voice.list_audio_devices()["default_mic_index"] == 3
+
+
+def test_sounddevice_default_input_breaks_ties(wdm_ks_only, monkeypatch):
+    usb = {"index": 4, "name": "Microphone (USB Audio Device)", "hostapi": 0, "max_input_channels": 1, "default_samplerate": 48000.0}
+    monkeypatch.setattr(FakeSoundDevice, "DEVICES", [*FakeSoundDevice.DEVICES, usb])
+    monkeypatch.setattr(FakeSoundDevice, "default", SimpleNamespace(device=[4, 1]))
+    assert voice.list_audio_devices()["default_mic_index"] == 4
+
+
+def test_sounddevice_front_mic_is_the_default_when_alone(wdm_ks_only, monkeypatch):
+    monkeypatch.setattr(FakeSoundDevice, "DEVICES", FakeSoundDevice.DEVICES[:3])
     assert voice.list_audio_devices()["default_mic_index"] == 0
+
+
+@pytest.mark.parametrize(
+    ("raw", "clean"),
+    [
+        ("Headset (@System32\\drivers\\bthhfenum.sys,#2;%1 Hands-Free%0\n;(MOMENTUM 4))", "Headset (MOMENTUM 4)"),
+        ("Microphone (Canyon CNS-CWC5 Microphone)", "Microphone (Canyon CNS-CWC5 Microphone)"),
+        ("Stereo Mix\n(Realtek)", "Stereo Mix (Realtek)"),
+    ],
+)
+def test_device_names_are_cleaned(raw, clean):
+    assert voice._clean_device_name(raw) == clean
+
+
+@pytest.mark.parametrize(
+    ("names", "expected"),
+    [
+        (["FrontMic (Realtek)", "Microphone (Canyon CNS-CWC5 Microphone)"], 1),
+        (["Line In (Realtek)", "Headset (MOMENTUM 4)"], 1),
+        (["Aux (Realtek)", "Microphone (Realtek)"], 1),
+        (["Headset (MOMENTUM 4)", "Microphone (USB Webcam)"], 1),
+        (["FrontMic (Realtek)", "Line In (Realtek)"], 0),
+    ],
+)
+def test_preferred_mic_ranks_dedicated_mics_over_chassis_jacks(names, expected):
+    mics = [{"index": i, "name": name} for i, name in enumerate(names)]
+    assert voice._preferred_mic(mics, None) == expected
+    assert voice._preferred_mic([], 0) is None
 
 
 @pytest.mark.parametrize("name", ["Wave Out Mix", "What U Hear (Sound Blaster)", "Loopback (VB-Audio)", "StereoMix"])
@@ -331,6 +372,12 @@ def test_second_start_is_refused_while_recording(client, session):
 def test_start_records_from_the_source_devices(client, session):
     client.post("/api/voice/recording/start", json={"source": "mixed", "widget_id": "lw_one", "mic_device_index": 3})
     assert session._recorder.devices == (3, 9)
+
+
+def test_start_takes_the_short_device_index_names(client, session):
+    body = {"source": "mixed", "widget_id": "lw_one", "mic_index": 5, "loopback_index": 7}
+    assert client.post("/api/voice/recording/start", json=body).status_code == 200
+    assert session._recorder.devices == (5, 7)
 
 
 def test_start_is_refused_while_the_last_recording_is_transcribed(client, session):

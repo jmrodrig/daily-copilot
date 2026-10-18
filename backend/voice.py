@@ -163,6 +163,44 @@ def _sounddevice():
 _LOOPBACK_NAME_RE = re.compile(r"stereo ?mix|wave out mix|what u hear|loopback", re.IGNORECASE)
 
 
+# A device named by an unresolved Windows resource string (a Bluetooth headset's, say):
+# `Headset (@System32\drivers\bthhfenum.sys,#2;%1 Hands-Free%0 ;(MOMENTUM 4))`, the name being the last argument.
+_RESOURCE_NAME_RE = re.compile(r"\(@[^()]*;\((?P<name>[^()]*)\)\)$")
+
+
+def _clean_device_name(name: str) -> str:
+    """`name` on one line, a resource string's name in place of it (`Headset (MOMENTUM 4)`)."""
+    return _RESOURCE_NAME_RE.sub(r"(\g<name>)", " ".join(name.split()))
+
+
+# Microphones ranked for the default: a dedicated one (a USB or webcam mic, a headset) first, then one named a
+# microphone, then any other, and last a sound card's chassis jacks (a front-panel mic, line in, aux), which record
+# digital silence when nothing is plugged in, yet are often the system's default input.
+_DEDICATED_MIC_RE = re.compile(r"canyon|usb|webcam|web cam|camera", re.IGNORECASE)
+_NAMED_MIC_RE = re.compile(r"^microphone|headset", re.IGNORECASE)
+_CHASSIS_MIC_RE = re.compile(r"front ?mic|rear ?mic|line ?in|aux|mic in at", re.IGNORECASE)
+
+
+def _mic_rank(name: str) -> int:
+    if _DEDICATED_MIC_RE.search(name):
+        return 0
+    if _CHASSIS_MIC_RE.search(name):
+        return 3
+    if _NAMED_MIC_RE.search(name):
+        return 1
+    return 2
+
+
+def _preferred_mic(mics: list[dict[str, Any]], default_input: int | None) -> int | None:
+    """The microphone to record from when none is chosen: the best ranked (`_mic_rank`), the system's default input
+    among those, else the first listed."""
+    if not mics:
+        return None
+    best = min(_mic_rank(m["name"]) for m in mics)
+    ranked = [m for m in mics if _mic_rank(m["name"]) == best]
+    return next((m["index"] for m in ranked if m["index"] == default_input), ranked[0]["index"])
+
+
 def _default_devices(pa, p) -> tuple[int | None, int | None]:
     """The default microphone's index and the default speakers' WASAPI loopback's (pyaudiowpatch)."""
     mic = loopback = None
@@ -187,20 +225,13 @@ def _default_devices(pa, p) -> tuple[int | None, int | None]:
 
 
 def _sounddevice_defaults(sd, mics: list[dict[str, Any]], loopbacks: list[dict[str, Any]]) -> tuple[int | None, int | None]:
-    """The default microphone's index (the system's default input, else one named like a microphone, else the first)
-    and the first loopback's (Stereo Mix, say)."""
-    indexes = {m["index"] for m in mics}
+    """The default microphone's index (`_preferred_mic`, the system's default input breaking ties) and the first
+    loopback's (Stereo Mix, say)."""
     try:
         default_input = int(sd.default.device[0])
     except Exception:  # noqa: BLE001 - no default set
-        default_input = -1
-    if default_input in indexes:
-        mic = default_input
-    else:
-        named = [m for m in mics if "microphone" in m["name"].lower()] or [
-            m for m in mics if re.search(r"\bmic|headset", m["name"], re.IGNORECASE)
-        ]
-        mic = (named or mics or [{"index": None}])[0]["index"]
+        default_input = None
+    mic = _preferred_mic(mics, default_input)
     loopback = loopbacks[0]["index"] if loopbacks else None
     return mic, loopback
 
@@ -225,14 +256,15 @@ def _pyaudio_devices() -> dict[str, Any]:
                 host_api = ""
             device = {
                 "index": i,
-                "name": info.get("name", f"Device {i}"),
+                "name": _clean_device_name(str(info.get("name", f"Device {i}"))),
                 "host_api": host_api,
                 "channels": channels,
                 "default_samplerate": int(info.get("defaultSampleRate", 44100)),
                 "backend": "pyaudio",
             }
             devices["loopbacks" if info.get("isLoopbackDevice") else "mics"].append(device)
-        devices["default_mic_index"], devices["default_loopback_index"] = _default_devices(pa, p)
+        default_mic, devices["default_loopback_index"] = _default_devices(pa, p)
+        devices["default_mic_index"] = _preferred_mic(devices["mics"], default_mic)
     finally:
         p.terminate()
     return devices
@@ -250,7 +282,7 @@ def _sounddevice_devices() -> dict[str, Any]:
             host_api = sd.query_hostapis(info.get("hostapi"))["name"]
         except Exception:  # noqa: BLE001
             host_api = ""
-        name = str(info.get("name", f"Device {i}"))
+        name = _clean_device_name(str(info.get("name", f"Device {i}")))
         device = {
             "index": int(info.get("index", i)),
             "name": name,

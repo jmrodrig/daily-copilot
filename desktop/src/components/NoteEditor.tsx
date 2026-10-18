@@ -46,7 +46,15 @@ import {
 import { SlashCommand, SlashMenu, type SlashItem, type SlashMenuState } from "./slashCommand";
 import { WhiteboardIcon } from "./markupUi";
 import { WhiteboardNode } from "./WhiteboardWidget";
-import { ListenNode, MicIcon } from "./ListenWidget";
+import {
+  ActiveListenWidget,
+  LISTEN_REMOVAL_CONFIRMED,
+  ListenNode,
+  ListenRemovalDialog,
+  ListenRemovalGuard,
+  MicIcon,
+  type ListenRemoval,
+} from "./ListenWidget";
 import {
   ALIGNMENTS,
   AlignedBlocks,
@@ -122,6 +130,10 @@ export default function NoteEditor({
   // The `/` menu's key handling while it's shown (see SlashMenu), and what picking one of its items does.
   const slashKeyRef = useRef<(event: KeyboardEvent) => boolean>(() => false);
   const slashPickRef = useRef<(item: SlashItem, range: { from: number; to: number }) => void>(() => {});
+  // The listen widget recording or being transcribed (see ActiveListenWidget), and an edit that would remove one that
+  // is, or that holds a recording, held back till the removal is confirmed (see ListenRemovalGuard).
+  const activeListenRef = useRef<string | null>(null);
+  const [heldRemoval, setHeldRemoval] = useState<{ tr: Transaction; removal: ListenRemoval } | null>(null);
 
   const editor = useEditor({
     extensions: [
@@ -155,6 +167,10 @@ export default function NoteEditor({
       WhiteboardNode.configure({ spaceId, onSave: () => onSaveRef.current() }),
       // A ```listen block, shown as its recording widget (see ListenWidget).
       ListenNode,
+      ListenRemovalGuard.configure({
+        activeWidget: () => activeListenRef.current,
+        onBlocked: (tr, removal) => setHeldRemoval({ tr, removal }),
+      }),
       // `$…$` and `$$…$$`, shown rendered with KaTeX (see noteFormatting).
       InlineMath,
       BlockMath,
@@ -457,6 +473,25 @@ export default function NoteEditor({
           onClose={(refocus) => {
             setPanel(null);
             if (refocus) editor.commands.focus();
+          }}
+        />
+      )}
+      <ActiveListenWidget widgetRef={activeListenRef} />
+      {editor && heldRemoval && (
+        <ListenRemovalDialog
+          removal={heldRemoval.removal}
+          onKeep={() => {
+            setHeldRemoval(null);
+            editor.commands.focus();
+          }}
+          onRemove={() => {
+            setHeldRemoval(null);
+            // The edit as it was made, unless the note has changed since.
+            const { tr } = heldRemoval;
+            if (editor.isDestroyed || !tr.before.eq(editor.state.doc)) return false;
+            editor.view.dispatch(tr.setMeta(LISTEN_REMOVAL_CONFIRMED, true));
+            editor.commands.focus();
+            return true;
           }}
         />
       )}

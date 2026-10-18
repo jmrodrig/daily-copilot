@@ -1,5 +1,9 @@
+import { Extension } from "@tiptap/core";
+import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
+import { Plugin, PluginKey, type Transaction } from "@tiptap/pm/state";
 import { NodeViewWrapper, ReactNodeViewRenderer, type NodeViewProps } from "@tiptap/react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type MutableRefObject } from "react";
+import { createPortal } from "react-dom";
 import { Link, useLocation, useSearchParams } from "react-router-dom";
 
 import {
@@ -19,6 +23,60 @@ const SOURCES: { value: VoiceSource; label: string }[] = [
   { value: "loopback", label: "System audio (Teams / calls)" },
   { value: "mixed", label: "Mixed (microphone + system audio)" },
 ];
+
+// GET /api/voice/devices (see AudioDevices in backend/schemas.py): what a recording can capture.
+type AudioDevice = { index: number; name: string; host_api: string };
+type AudioDevices = {
+  mics: AudioDevice[];
+  loopbacks: AudioDevice[];
+  default_mic_index: number | null;
+  default_loopback_index: number | null;
+};
+
+/** A choice of the audio source picker: what to record, from which devices (the backend's defaults when null). */
+type SourceOption = { key: string; source: VoiceSource; label: string; micIndex: number | null; loopbackIndex: number | null };
+
+/** Each device once, by name (one may be listed under each of its host APIs): the default if it's among them. */
+function uniqueByName(devices: AudioDevice[], defaultIndex: number | null): AudioDevice[] {
+  const byName = new Map<string, AudioDevice>();
+  for (const device of devices) {
+    if (!byName.has(device.name) || device.index === defaultIndex) byName.set(device.name, device);
+  }
+  return [...byName.values()];
+}
+
+/**
+ * The audio source picker's choices: each microphone (the default first), each system-audio device, and both mixed.
+ * Without the devices (the backend couldn't list them) the plain sources, recorded from the backend's defaults.
+ */
+function sourceOptions(devices: AudioDevices | null): SourceOption[] {
+  if (!devices || (!devices.mics.length && !devices.loopbacks.length)) {
+    return SOURCES.map((s) => ({ key: s.value, source: s.value, label: s.label, micIndex: null, loopbackIndex: null }));
+  }
+  const isDefaultMic = (d: AudioDevice) => Number(d.index === devices.default_mic_index);
+  const mics = uniqueByName(devices.mics, devices.default_mic_index).sort((a, b) => isDefaultMic(b) - isDefaultMic(a));
+  const loopbacks = uniqueByName(devices.loopbacks, devices.default_loopback_index);
+  const options: SourceOption[] = [
+    ...mics.map((d) => ({
+      key: `mic:${d.index}`,
+      source: "mic" as const,
+      label: isDefaultMic(d) ? `${d.name} (Default)` : d.name,
+      micIndex: d.index,
+      loopbackIndex: null,
+    })),
+    ...loopbacks.map((d) => ({
+      key: `loopback:${d.index}`,
+      source: "loopback" as const,
+      label: `System Audio: ${d.name} (Teams / calls)`,
+      micIndex: null,
+      loopbackIndex: d.index,
+    })),
+  ];
+  if (mics.length && loopbacks.length) {
+    options.push({ key: "mixed", source: "mixed", label: "Mixed (Microphone + System Audio)", micIndex: null, loopbackIndex: null });
+  }
+  return options;
+}
 
 /** A microphone, in a 16 × 16 box. */
 export function MicIcon({ size = 16 }: { size?: number }) {
@@ -93,9 +151,29 @@ export default function ListenWidget({
   const note = useNoteRef();
   const voice = useVoiceRecording();
   const { status, elapsed, busy, results, stopErrors } = voice;
-  const [source, setSource] = useState<VoiceSource>(() => (data?.source === "loopback" || data?.source === "mixed" ? data.source : "mic"));
+  // The picked choice's key (see sourceOptions), or at first the source the widget last recorded.
+  const [choice, setChoice] = useState<string>(() => (data?.source === "loopback" || data?.source === "mixed" ? data.source : "mic"));
+  const [devices, setDevices] = useState<AudioDevices | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+
+  // The devices to pick from, while there's a recording to make.
+  const canRecord = interactive && Boolean(data) && data?.status !== "completed";
+  useEffect(() => {
+    if (!canRecord) return;
+    let live = true;
+    getJson<AudioDevices>("/api/voice/devices").then(
+      (found) => live && setDevices(found),
+      () => {}, // Not listed: the plain sources, recorded from the backend's defaults.
+    );
+    return () => {
+      live = false;
+    };
+  }, [canRecord]);
+  const options = useMemo(() => sourceOptions(devices), [devices]);
+  // The picked choice, else (a plain source, or a device that's gone) the first of its source, else the first.
+  const picked =
+    options.find((o) => o.key === choice) ?? options.find((o) => o.source === choice.split(":")[0]) ?? options[0];
 
   useEffect(() => {
     setOverride((current) => (current && parsed && JSON.stringify(current) === JSON.stringify(parsed) ? null : current));
@@ -169,8 +247,9 @@ export default function ListenWidget({
     run(async () => {
       if (!note) return;
       voice.clearStopError(id);
+      const { source, micIndex, loopbackIndex } = picked;
       if (data.source !== source && onChange) onChange({ ...data, source });
-      await voice.start({ widgetId: id, source, spaceId: note.spaceId, notePath: note.path });
+      await voice.start({ widgetId: id, source, spaceId: note.spaceId, notePath: note.path, micIndex, loopbackIndex });
     });
 
   return (
@@ -189,7 +268,8 @@ export default function ListenWidget({
         </span>
         {data.recorded_at && <span className="text-xs text-text-muted">{data.recorded_at.replace("T", " ").slice(0, 16)}</span>}
         <span className="flex-1" />
-        {onRemove && interactive && !recording && !processing && (
+        {/* Removing a widget that's recording, or holds a recording, asks first (see ListenRemovalGuard). */}
+        {onRemove && interactive && (
           <button
             type="button"
             title="Remove the listen widget from the note"
@@ -209,7 +289,7 @@ export default function ListenWidget({
           <Listening
             paused={status.is_paused}
             elapsed={elapsed}
-            source={status.source}
+            sourceLabel={picked.source === status.source ? picked.label : SOURCES.find((s) => s.value === status.source)?.label}
             pending={pending}
             onPause={() => run(status.is_paused ? voice.resume : voice.pause)}
             onStop={() => run(voice.stop)}
@@ -227,14 +307,14 @@ export default function ListenWidget({
               <span className="sr-only">Audio source</span>
               <select
                 aria-label="Audio source"
-                value={source}
+                value={picked.key}
                 disabled={!interactive || pending || Boolean(lockedBy)}
-                onChange={(e) => setSource(e.target.value as VoiceSource)}
-                className="field w-auto py-2"
+                onChange={(e) => setChoice(e.target.value)}
+                className="field w-auto max-w-full py-2"
               >
-                {SOURCES.map((s) => (
-                  <option key={s.value} value={s.value}>
-                    {s.label}
+                {options.map((o) => (
+                  <option key={o.key} value={o.key}>
+                    {o.label}
                   </option>
                 ))}
               </select>
@@ -280,14 +360,14 @@ export default function ListenWidget({
 function Listening({
   paused,
   elapsed,
-  source,
+  sourceLabel,
   pending,
   onPause,
   onStop,
 }: {
   paused: boolean;
   elapsed: number;
-  source: string | null;
+  sourceLabel: string | undefined;
   pending: boolean;
   onPause: () => void;
   onStop: () => void;
@@ -312,7 +392,7 @@ function Listening({
           />
         ))}
       </span>
-      <span className="text-xs text-text-muted">{SOURCES.find((s) => s.value === source)?.label}</span>
+      <span className="text-xs text-text-muted">{sourceLabel}</span>
       <span className="flex-1" />
       <button type="button" className="btn min-h-9" disabled={pending} onClick={onPause}>
         {paused ? "Resume" : "Pause"}
@@ -547,6 +627,143 @@ function UntaggedParticipant({
       {participant.sample_text && <p className="pl-1 text-xs italic text-text-muted">“{participant.sample_text}”</p>}
       {error && <p className="text-xs text-accent">{error}</p>}
     </div>
+  );
+}
+
+/** Why removing listen widgets asks first: one is recording or being transcribed, else one holds a recording. */
+export type ListenRemoval = "active" | "recorded";
+
+/** Set on an edit that removes a listen widget, once the removal is confirmed, for ListenRemovalGuard to let it through. */
+export const LISTEN_REMOVAL_CONFIRMED = "listenRemovalConfirmed";
+
+// A listen node's data, parsed once per node (nodes don't change: an edit makes new ones).
+const parsedListenNodes = new WeakMap<ProseMirrorNode, ListenData | null>();
+
+/** The listen widgets in `doc`, by id. */
+function listenWidgets(doc: ProseMirrorNode): Map<string, ListenData> {
+  const found = new Map<string, ListenData>();
+  doc.descendants((node) => {
+    if (node.type.name !== "listen") return !node.isTextblock;
+    let data = parsedListenNodes.get(node);
+    if (data === undefined) {
+      data = typeof node.attrs.data === "string" ? parse(node.attrs.data) : null;
+      parsedListenNodes.set(node, data);
+    }
+    if (data) found.set(data.id, data);
+    return false;
+  });
+  return found;
+}
+
+/**
+ * Holds back an edit that would take a listen widget out of the note while it's recording (or being transcribed), or
+ * once it holds a recording, however it's taken out: Backspace or Delete on it, typing, pasting or cutting over it, its
+ * trash button, an undo. `onBlocked` is given the edit, to ask first, and dispatch it again with
+ * LISTEN_REMOVAL_CONFIRMED set if it should go ahead. `activeWidget` is the id of the widget recording or being
+ * transcribed, if any.
+ */
+export const ListenRemovalGuard = Extension.create<{
+  activeWidget: () => string | null;
+  onBlocked: (tr: Transaction, removal: ListenRemoval) => void;
+}>({
+  name: "listenRemovalGuard",
+
+  addOptions() {
+    return { activeWidget: () => null, onBlocked: () => {} };
+  },
+
+  addProseMirrorPlugins() {
+    const { activeWidget, onBlocked } = this.options;
+    return [
+      new Plugin({
+        key: new PluginKey("listenRemovalGuard"),
+        filterTransaction: (tr) => {
+          if (!tr.docChanged || tr.getMeta(LISTEN_REMOVAL_CONFIRMED)) return true;
+          const before = listenWidgets(tr.before);
+          if (!before.size) return true;
+          const after = listenWidgets(tr.doc);
+          const removed = [...before.values()].filter((data) => !after.has(data.id));
+          const active = activeWidget();
+          const removal: ListenRemoval | null = removed.some((data) => data.id === active)
+            ? "active"
+            : removed.some((data) => data.status === "completed")
+              ? "recorded"
+              : null;
+          if (!removal) return true;
+          onBlocked(tr, removal);
+          return false;
+        },
+      }),
+    ];
+  },
+});
+
+/**
+ * Keeps `widgetRef` on the id of the widget recording or being transcribed (for ListenRemovalGuard's `activeWidget`),
+ * so the editor holding it needn't re-render as the recording's clock ticks.
+ */
+export function ActiveListenWidget({ widgetRef }: { widgetRef: MutableRefObject<string | null> }) {
+  const { status, busy } = useVoiceRecording();
+  widgetRef.current = busy ? status.widget_id : null;
+  return null;
+}
+
+/**
+ * Asks before removing a listen widget that's recording, or holds a recording. Escape (or a click outside) keeps it.
+ * `onRemove` removes it (false if it couldn't be), and a recording it was making is then stopped (its transcript
+ * isn't kept).
+ */
+export function ListenRemovalDialog({
+  removal,
+  onKeep,
+  onRemove,
+}: {
+  removal: ListenRemoval;
+  onKeep: () => void;
+  onRemove: () => boolean;
+}) {
+  const voice = useVoiceRecording();
+  const active = removal === "active";
+  const remove = () => {
+    if (!onRemove() || !active || !voice.status.is_recording) return;
+    void voice.stop().then((result) => result && voice.takeResult(result.id));
+  };
+  return createPortal(
+    <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/50 pt-[15vh]" onMouseDown={onKeep}>
+      <div
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="listen-removal-title"
+        aria-describedby="listen-removal-text"
+        onMouseDown={(e) => e.stopPropagation()}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") {
+            e.preventDefault();
+            onKeep();
+          }
+        }}
+        className="panel flex w-[480px] animate-dialog-in flex-col gap-3"
+      >
+        <h2 id="listen-removal-title" className="flex items-center gap-2 text-base font-semibold">
+          {active && <span className="h-2.5 w-2.5 animate-pulse rounded-full bg-red-500" />}
+          {active ? "Voice recording is currently active" : "Remove recording widget?"}
+        </h2>
+        <p id="listen-removal-text" className="text-[15px] text-text-secondary">
+          {active
+            ? "The widget is still listening. Removing it will interrupt the recording and all recording will be lost. Do you want to proceed?"
+            : "This note contains recorded meeting audio and transcript. Removing it will delete the recording from the note. Do you want to proceed?"}
+        </p>
+        <div className="mt-1 flex flex-wrap justify-end gap-2">
+          <button type="button" className="btn border-red-500/60 text-red-500 hover:bg-red-500/10" onClick={remove}>
+            {active ? "Interrupt & Remove" : "Remove"}
+          </button>
+          <button type="button" className="btn-primary" autoFocus onClick={onKeep}>
+            Keep Widget
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body,
   );
 }
 

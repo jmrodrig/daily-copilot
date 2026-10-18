@@ -9,7 +9,7 @@ from datetime import date, datetime
 from enum import Enum
 from typing import Any, ClassVar, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class AccessMode(str, Enum):
@@ -1372,8 +1372,11 @@ class VoiceStartRequest(BaseModel):
     """`POST /api/voice/recording/start`: what to record, and the listen widget (in its note) that records it."""
 
     source: VoiceSource = "mic"
-    mic_device_index: int | None = None
-    loopback_device_index: int | None = None
+    # The devices (`GET /api/voice/devices` indexes) to record from; the defaults when not given.
+    mic_device_index: int | None = Field(default=None, validation_alias=AliasChoices("mic_device_index", "mic_index"))
+    loopback_device_index: int | None = Field(
+        default=None, validation_alias=AliasChoices("loopback_device_index", "loopback_index")
+    )
     widget_id: str = Field(pattern=_WIDGET_ID)
     space_id: int = 1
     note_path: str | None = None

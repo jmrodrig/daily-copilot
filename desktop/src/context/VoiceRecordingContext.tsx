@@ -86,7 +86,15 @@ export function formatClock(seconds: number): string {
   return h ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
 }
 
-type StartOptions = { widgetId: string; source: VoiceSource; spaceId: number; notePath: string };
+// The devices to record from (`GET /api/voice/devices` indexes): the backend's defaults when not given.
+type StartOptions = {
+  widgetId: string;
+  source: VoiceSource;
+  spaceId: number;
+  notePath: string;
+  micIndex?: number | null;
+  loopbackIndex?: number | null;
+};
 
 type VoiceRecording = {
   status: VoiceStatus;
@@ -205,10 +213,12 @@ export function VoiceRecordingProvider({ children }: { children: ReactNode }) {
   }, [recordingHere]);
 
   const start = useCallback(
-    async ({ widgetId, source, spaceId, notePath }: StartOptions) => {
+    async ({ widgetId, source, spaceId, notePath, micIndex = null, loopbackIndex = null }: StartOptions) => {
       const next = await sendJson<VoiceStatus>("POST", "/api/voice/recording/start", {
         widget_id: widgetId,
         source,
+        mic_index: micIndex,
+        loopback_index: loopbackIndex,
         space_id: spaceId,
         note_path: notePath,
       });
