@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ComponentProps, type ReactNode } from "react";
 import Markdown, { defaultUrlTransform, type Components } from "react-markdown";
 import { createPortal } from "react-dom";
-import { Link, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize from "rehype-sanitize";
@@ -70,6 +70,7 @@ function show(value: unknown): string {
 export default function NotePage() {
   const [params] = useSearchParams();
   const { spaceId: activeSpaceId, refreshTree } = useSpace();
+  const navigate = useNavigate();
   const path = params.get("path") ?? "";
   const spaceId = Number(params.get("space") ?? activeSpaceId);
   const isTemplate = params.get("root") === "templates";
@@ -99,6 +100,10 @@ export default function NotePage() {
   const failedRef = useRef<string | null>(null);
   // The draft's unsaved changes, saved when the page moves to another note (or closes) before auto-save has.
   const unsavedRef = useRef<{ space_id: number; path: string; content: string; title?: string } | null>(null);
+  // The path a save renamed the note to (after its title), followed by the page without loading the note afresh.
+  const followedPathRef = useRef<string | null>(null);
+  // The path the editor was loaded for: it's remounted for another note, not for this one renamed.
+  const [editorPath, setEditorPath] = useState(path);
 
   const [externalChange, setExternalChange] = useState(false);
   useEffect(() => {
@@ -171,8 +176,20 @@ export default function NotePage() {
   });
 
   useEffect(() => {
+    // Leaving the note: keep the edits auto-save hasn't got to yet.
+    const leave = () => {
+      const unsaved = unsavedRef.current;
+      unsavedRef.current = null;
+      if (unsaved) sendJson("PUT", "/api/notes/file", unsaved).then(refreshTree, () => {});
+    };
+    if (followedPathRef.current === path) {
+      followedPathRef.current = null;
+      return leave;
+    }
+    followedPathRef.current = null;
     const controller = new AbortController();
     unsavedRef.current = null;
+    setEditorPath(path);
     setNote({ state: "loading" });
     setSaveError(null);
     setTagError(null);
@@ -189,10 +206,7 @@ export default function NotePage() {
       });
     return () => {
       controller.abort();
-      // Leaving the note: keep the edits auto-save hasn't got to yet.
-      const unsaved = unsavedRef.current;
-      unsavedRef.current = null;
-      if (unsaved) sendJson("PUT", "/api/notes/file", unsaved).then(refreshTree, () => {});
+      leave();
     };
   }, [path, spaceId, isTemplate]);
 
@@ -257,8 +271,14 @@ export default function NotePage() {
       setExternalChange(false);
       // Edits made while it saved are kept, for the next save.
       setBody((current) => (current === content ? saved.content : current));
-      setTitleDraft((current) => (current === draft ? noteTitle(saved.frontmatter, path) : current));
+      setTitleDraft((current) => (current === draft ? noteTitle(saved.frontmatter, saved.path) : current));
       refreshTree(); // the title may have changed
+      if (saved.path !== path) {
+        // A new title renamed the file: follow it, keeping the editor (and edits made while it saved) as they are.
+        unsavedRef.current = null;
+        followedPathRef.current = saved.path;
+        navigate(notePath(spaceId, saved.path, isTemplate ? "templates" : "content"), { replace: true });
+      }
     } catch (err) {
       failedRef.current = `${draft}\n${content}`;
       setSaveError(message(err));
@@ -480,7 +500,7 @@ export default function NotePage() {
         )}
         {details && <div className="flex flex-col gap-3">{details}</div>}
         <WhiteboardView
-          key={`${path}:${restores}`}
+          key={`${editorPath}:${restores}`}
           value={body}
           onChange={setBody}
           editable={editable}
@@ -544,7 +564,7 @@ export default function NotePage() {
       {state === "draft" && note.state === "ok" ? (
         // The editor's toolbar sits above the title, which is edited in place, and the properties.
         <NoteEditor
-          key={`${path}:${restores}`}
+          key={`${editorPath}:${restores}`}
           spaceId={spaceId}
           notePath={path}
           onTaskCreated={(task) => task.note_path === path && setTasks((current) => [...current, task])}

@@ -338,9 +338,13 @@ def test_update_note_sets_the_title(client):
 
     renamed = client.put("/api/notes/file", json={"space_id": 1, "path": "Keel.md", "title": "  Keel layout  "})
     assert renamed.json()["frontmatter"] == {"title": "Keel layout", "state": "draft"}
-    assert file_layer.read_note("Keel.md", notes_dir=spaces.content_dir(1))["content"].strip() == "Body"
-    assert client.get("/api/notes", params={"space_id": 1}).json() == [{"path": "Keel.md", "title": "Keel layout"}]
-    assert client.put("/api/notes/file", json={"space_id": 1, "path": "Keel.md", "title": " "}).status_code == 422
+    # The file is renamed after the title.
+    assert renamed.json()["path"] == "Keel layout.md"
+    assert file_layer.read_note("Keel layout.md", notes_dir=spaces.content_dir(1))["content"].strip() == "Body"
+    assert client.get("/api/notes", params={"space_id": 1}).json() == [
+        {"path": "Keel layout.md", "title": "Keel layout"}
+    ]
+    assert client.put("/api/notes/file", json={"space_id": 1, "path": "Keel layout.md", "title": " "}).status_code == 422
 
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"\0" * 16

@@ -936,10 +936,14 @@ def update_note(request: NoteUpdate, db: Session = Depends(get_db)) -> NoteFile:
         else:
             frontmatter.pop("tags", None)
     content = note["content"] if request.content is None else request.content
-    file_layer.write_note(
-        note["path"], content, frontmatter, AccessMode.WRITE_DIRECTLY, notes_dir=root, source=DESKTOP_SOURCE
-    )
-    return NoteFile(path=note["path"], frontmatter=to_jsonable(frontmatter), content=content)
+    path = note["path"]
+    if request.title is not None:
+        # Keep the file name in step with the title, taking the note's history and task links along.
+        stem = sanitize_note_filename(request.title, fallback=Path(path).stem)
+        target = _unique_note_path(root, path, stem)
+        path = _move_entry(db, request.space_id, root, ContentEntry(kind=ContentKind.NOTE, path=path), target).path
+    file_layer.write_note(path, content, frontmatter, AccessMode.WRITE_DIRECTLY, notes_dir=root, source=DESKTOP_SOURCE)
+    return NoteFile(path=path, frontmatter=to_jsonable(frontmatter), content=content)
 
 
 # --- Note version history ---------------------------------------------------------
@@ -1526,6 +1530,34 @@ def _sibling(path: str, name: str) -> str:
     return f"{parent}/{name}" if parent else name
 
 
+_ILLEGAL_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+_WINDOWS_RESERVED_NAMES = {"CON", "PRN", "AUX", "NUL", *(f"{port}{n}" for port in ("COM", "LPT") for n in range(1, 10))}
+MAX_FILENAME_STEM = 150
+
+
+def sanitize_note_filename(title: str, fallback: str = "Untitled") -> str:
+    """A file name stem for a note titled `title` that is safe on Windows, macOS and Linux: illegal characters
+    become `-`, whitespace is collapsed, and no leading/trailing dots, spaces or hyphens remain."""
+    stem = _ILLEGAL_FILENAME_CHARS.sub("-", re.sub(r"\s+", " ", title))
+    stem = re.sub(r"-{2,}", "-", stem)
+    stem = stem.strip(". -")[:MAX_FILENAME_STEM].rstrip(". -")
+    if stem.split(".")[0].upper() in _WINDOWS_RESERVED_NAMES:
+        stem = f"{stem}_"
+    return stem or fallback
+
+
+def _unique_note_path(root: Path, current_path: str, new_stem: str) -> str:
+    """Where the note at `current_path` goes when renamed to `new_stem`: next to itself, or as `<stem> (2).md`,
+    `<stem> (3).md`, … if that name is taken. Its current path if the name is unchanged, or differs in case only
+    (which a case-insensitive file system sees as taken by the note itself)."""
+    target = _sibling(current_path, f"{new_stem}{file_layer.NOTE_SUFFIX}")
+    n = 1
+    while target.lower() != current_path.lower() and (root / target).exists():
+        n += 1
+        target = _sibling(current_path, f"{new_stem} ({n}){file_layer.NOTE_SUFFIX}")
+    return current_path if target.lower() == current_path.lower() else target
+
+
 def _retitle(root: Path, path: str, old_title: str, new_title: str) -> None:
     """Keep a note's displayed title in step with its new name: its front-matter `title`, or a
     first-line heading that shows `old_title`. Other notes are titled by their file name already."""
@@ -1584,7 +1616,8 @@ def rename_content(request: ContentRename, db: Session = Depends(get_db)) -> Con
     name = request.name
     if entry.kind is ContentKind.NOTE:
         old_title = spaces.note_summary(entry.path, root).title
-        name = name if name.lower().endswith(file_layer.NOTE_SUFFIX) else name + file_layer.NOTE_SUFFIX
+        raw_stem = name[: -len(file_layer.NOTE_SUFFIX)] if name.lower().endswith(file_layer.NOTE_SUFFIX) else name
+        name = sanitize_note_filename(raw_stem, fallback=raw_stem or "Untitled") + file_layer.NOTE_SUFFIX
     moved = _move_entry(db, request.space_id, root, entry, _sibling(entry.path, name))
     if entry.kind is ContentKind.NOTE:
         _retitle(root, moved.path, old_title, request.name.removesuffix(file_layer.NOTE_SUFFIX))

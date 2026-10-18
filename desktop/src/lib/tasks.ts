@@ -90,6 +90,21 @@ export const PRIORITY_LABELS: Record<TaskPriority, string> = { low: "Low", norma
 /** Sort order of priorities, most pressing first (e.g. the cards in a Kanban column). */
 export const PRIORITY_RANK: Record<TaskPriority, number> = { urgent: 0, high: 1, normal: 2, low: 3 };
 
+/**
+ * Sort order of the cards in a Kanban column: most pressing priority first, then the soonest due date (`deadline`,
+ * with tasks that have none last), then the oldest task (lowest id), so the order is the same on every load.
+ */
+export function compareKanbanTasks(a: TaskItem, b: TaskItem): number {
+  const priority = PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority];
+  if (priority !== 0) return priority;
+  if (a.deadline !== b.deadline) {
+    if (!a.deadline) return 1;
+    if (!b.deadline) return -1;
+    return a.deadline < b.deadline ? -1 : 1;
+  }
+  return a.id - b.id;
+}
+
 /** Each status's colour (e.g. the dot on task pills) unless the space picks its own (`Space.status_colors`). */
 export const DEFAULT_STATUS_COLORS: Record<TaskStatus, string> = {
   backlog: "#94a3b8",
