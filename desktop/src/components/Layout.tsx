@@ -215,7 +215,7 @@ export default function Layout() {
       <main ref={mainRef} className="min-w-[320px] flex-1 overflow-auto print:overflow-visible">
         <Outlet />
       </main>
-      <ListeningIndicator chatOpen={chatOpen} />
+      <ListeningIndicator chatOpen={chatOpen} showTask={showTask} />
       {rightOfMain && (
         <Divider
           {...dividerProps}
@@ -271,7 +271,7 @@ export default function Layout() {
  * in every window: `⚪ Listening (01:23)`, linking to the note that's recording, with a Stop button. It sits just left
  * of the chat header's buttons (or of the collapsed chat rail), clear of the note's own title and buttons.
  */
-function ListeningIndicator({ chatOpen }: { chatOpen: boolean }) {
+function ListeningIndicator({ chatOpen, showTask }: { chatOpen: boolean; showTask?: boolean }) {
   const { status, elapsed, stop } = useVoiceRecording();
   if (!status.is_recording && !status.is_processing) return null;
   const label = status.is_recording
@@ -283,7 +283,7 @@ function ListeningIndicator({ chatOpen }: { chatOpen: boolean }) {
       role="status"
       aria-live="polite"
       className={`fixed top-2 z-40 flex items-center gap-2 rounded-full border bg-surface-raised py-1 pl-3 pr-1.5 text-[13px] font-medium text-text-primary shadow-lg print:hidden ${
-        chatOpen ? "right-36" : "right-14"
+        chatOpen || showTask ? "right-36" : "right-14"
       } ${status.is_recording && !status.is_paused ? "border-white/30 hover:border-white/50" : "border-border-strong"}`}
     >
       {to ? (
