@@ -25,7 +25,7 @@ import { notePath, useSpace } from "../lib/space";
 import MediaLightbox, { isPdfUrl } from "./MediaLightbox";
 import { cleanMathForClipboard, copyCleanSelection } from "./noteFormatting";
 import Popover from "./Popover";
-import { IconButton } from "./Sidebar";
+import { AssistantButton } from "./Sidebar";
 
 // Shapes of POST /api/chat(/stream) and POST /api/notes/apply-edit (see ChatResponse etc. in backend/schemas.py).
 type AccessMode = "read_only" | "ask_first" | "write_directly";
@@ -1226,7 +1226,7 @@ export default function CopilotChat({
             )}
           </Popover>
           <PinButton pinned={pinned} onClick={() => onPinnedChange(!pinned)} />
-          <IconButton label="Collapse chat" onClick={onCollapse} direction="right" />
+          <AssistantButton label="Close AI Assistant" onClick={onCollapse} />
         </div>
       </div>
 

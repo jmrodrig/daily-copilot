@@ -325,19 +325,10 @@ export function VoiceRecordingProvider({ children }: { children: ReactNode }) {
 
   const recordingHere = status.is_recording && status.widget_id !== null && (mounted[status.widget_id] ?? 0) > 0;
 
-  // The window's title says it's recording ("⚪ Listening (01:23)"), whichever page is shown.
-  const clock = formatClock(elapsed);
+  // The window's title marks a recording with a single symbol ("⚪", "⏸" or "⏳"), whichever page is shown.
   useEffect(() => {
-    setTitleStatus(
-      status.is_recording
-        ? status.is_paused
-          ? `⏸ Paused (${clock})`
-          : `⚪ Listening (${clock})`
-        : status.is_processing
-          ? "⏳ Transcribing"
-          : "",
-    );
-  }, [status.is_recording, status.is_paused, status.is_processing, clock]);
+    setTitleStatus(status.is_recording ? (status.is_paused ? "⏸" : "⚪") : status.is_processing ? "⏳" : "");
+  }, [status.is_recording, status.is_paused, status.is_processing]);
   useEffect(() => () => setTitleStatus(""), []);
 
   // Closing or reloading the window asks first: this window makes its recording, so closing it loses the recording

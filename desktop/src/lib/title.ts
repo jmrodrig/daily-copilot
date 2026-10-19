@@ -2,7 +2,7 @@ import { useEffect } from "react";
 
 const APP_NAME = "Daily Co-Pilot";
 
-// The page's title, and what's shown before it while something's going on (a recording: "⚪ Listening (01:23)").
+// The page's title, and what's shown before it while something's going on (a recording: "⚪").
 let pageTitle = "";
 let titleStatus = "";
 

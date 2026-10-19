@@ -15,6 +15,7 @@ import { clientAudioUnavailable, listClientAudioInputs, type ClientAudioInput } 
 import { notifyNoteUpdated } from "../lib/notes";
 import { announcePeopleChange, ASSIGNEE_MAX, Avatar, byName, PersonBadge, usePeople, type Person } from "../lib/people";
 import { notePath, useSpace } from "../lib/space";
+import BlippingDot from "./BlippingDot";
 import { ListenBlock } from "./noteFormatting";
 import Popover from "./Popover";
 
@@ -120,6 +121,8 @@ export default function ListenWidget({
   const [inputs, setInputs] = useState<ClientAudioInput[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  // While it records, the widget can fold into a thin bar holding just the blipping dot.
+  const [collapsed, setCollapsed] = useState(false);
 
   // This machine's microphones to pick from, while there's a recording to make: listed again as they're plugged in
   // or out, and once a recording's started (the browser only names them once the page may use the microphone).
@@ -222,15 +225,32 @@ export default function ListenWidget({
       await voice.start({ widgetId: id, source, spaceId: note.spaceId, notePath: note.path, micDeviceId });
     });
 
+  if (recording && collapsed) {
+    return (
+      <button
+        type="button"
+        data-listen-widget
+        title="Recording active (click to expand controls)"
+        aria-label={status.is_paused ? "Recording paused (click to expand controls)" : "Recording active (click to expand controls)"}
+        onClick={() => setCollapsed(false)}
+        className="listen-widget my-4 flex h-9 w-full items-center gap-3 rounded-lg border border-border-default bg-surface-raised/80 px-4 hover:border-white/40 print:hidden"
+      >
+        <span className="h-px flex-1 bg-border-default" />
+        <BlippingDot paused={status.is_paused} />
+        <span className="h-px flex-1 bg-border-default" />
+      </button>
+    );
+  }
+
   return (
     <div
       data-listen-widget
       className={`listen-widget my-4 overflow-hidden rounded-lg border bg-surface-raised text-[15px] text-text-primary print:hidden ${
-        recording ? "border-red-500/60" : selected ? "border-accent" : "border-border-default"
+        recording ? "border-white/30" : selected ? "border-accent" : "border-border-default"
       }`}
     >
       <div className="flex items-center gap-2 border-b border-border-default px-4 py-2">
-        <span className={recording ? "text-red-500" : "text-accent-soft"}>
+        <span className={recording ? "text-white" : "text-accent-soft"}>
           <MicIcon />
         </span>
         <span className="font-mono text-xs uppercase tracking-[0.06em] text-text-muted">
@@ -238,6 +258,19 @@ export default function ListenWidget({
         </span>
         {data.recorded_at && <span className="text-xs text-text-muted">{data.recorded_at.replace("T", " ").slice(0, 16)}</span>}
         <span className="flex-1" />
+        {recording && (
+          <button
+            type="button"
+            title="Collapse the listen widget into a thin bar"
+            aria-label="Collapse the listen widget"
+            onClick={() => setCollapsed(true)}
+            className="rounded p-1 text-text-muted hover:bg-surface-hover hover:text-text-primary"
+          >
+            <svg aria-hidden width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M4 10l4-4 4 4" />
+            </svg>
+          </button>
+        )}
         {/* Removing a widget that's recording, or holds a recording, asks first (see WidgetRemovalGuard). */}
         {onRemove && interactive && (
           <button
@@ -348,10 +381,7 @@ function Listening({
   return (
     <div className="flex flex-wrap items-center gap-4">
       <span className="flex items-center gap-2.5">
-        <span className="relative flex h-3 w-3">
-          {!paused && <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-red-500 opacity-60" />}
-          <span className={`relative inline-flex h-3 w-3 rounded-full ${paused ? "bg-text-muted" : "bg-red-500"}`} />
-        </span>
+        <BlippingDot paused={paused} />
         <span className="font-mono text-[17px] tabular-nums">{formatClock(elapsed)}</span>
         <span className="text-text-secondary">{paused ? "Paused" : "Listening…"}</span>
       </span>
@@ -360,7 +390,7 @@ function Listening({
         {[0, 1, 2, 3, 4, 5, 6].map((i) => (
           <span
             key={i}
-            className={`h-full w-[3px] origin-center rounded-full bg-red-500/70 ${paused ? "scale-y-[0.3]" : "animate-voice-bar"}`}
+            className={`h-full w-[3px] origin-center rounded-full bg-white/70 ${paused ? "scale-y-[0.3]" : "animate-voice-bar"}`}
             style={{ animationDelay: `${(i * 130) % 900}ms` }}
           />
         ))}
