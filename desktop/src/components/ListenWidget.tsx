@@ -305,32 +305,39 @@ export default function ListenWidget({
         ) : data.status === "completed" ? (
           <Completed data={data} interactive={interactive} note={note} onTagged={update} />
         ) : (
-          <div className="flex flex-wrap items-center gap-3">
-            <label className="flex items-center gap-2 text-text-secondary">
-              <span className="sr-only">Audio source</span>
-              <select
-                aria-label="Audio source"
-                value={picked.key}
-                disabled={!interactive || pending || Boolean(lockedBy)}
-                onChange={(e) => setChoice(e.target.value)}
-                className="field w-auto max-w-full py-2"
+          <div className="flex flex-col gap-2">
+            <div className="flex w-full items-center gap-3">
+              <label className="relative min-w-0 flex-1">
+                <span className="sr-only">Audio source</span>
+                <select
+                  aria-label="Audio source"
+                  value={picked.key}
+                  disabled={!interactive || pending || Boolean(lockedBy)}
+                  onChange={(e) => setChoice(e.target.value)}
+                  className="field w-full appearance-none py-2 pr-9 text-sm"
+                >
+                  {options.map((o) => (
+                    <option key={o.key} value={o.key}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
+                <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center pr-3 text-text-muted">
+                  <svg aria-hidden width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M4 6l4 4 4-4" />
+                  </svg>
+                </div>
+              </label>
+              <button
+                type="button"
+                className="btn-primary shrink-0 gap-2"
+                disabled={!interactive || !note || pending || Boolean(lockedBy)}
+                onClick={() => void start()}
               >
-                {options.map((o) => (
-                  <option key={o.key} value={o.key}>
-                    {o.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <button
-              type="button"
-              className="btn-primary gap-2"
-              disabled={!interactive || !note || pending || Boolean(lockedBy)}
-              onClick={() => void start()}
-            >
-              <MicIcon />
-              Start Listening
-            </button>
+                <MicIcon />
+                Start Listening
+              </button>
+            </div>
             {!note && interactive && <span className="text-xs text-text-muted">Open the note itself to record here.</span>}
             {note && interactive && clientAudioUnavailable() && (
               <span className="text-xs text-text-muted">{clientAudioUnavailable()}</span>
@@ -530,7 +537,12 @@ function Completed({
         <div className="flex flex-wrap items-center gap-2 border-t border-border-default pt-3">
           <span className="text-xs text-text-muted">Ask the Co-pilot:</span>
           {AI_ACTIONS.map((action) => (
-            <button key={action.label} type="button" className="btn min-h-8 px-2.5 text-[14px]" onClick={() => promptCopilot(action.prompt(where))}>
+            <button
+              key={action.label}
+              type="button"
+              className="rounded-md border border-border-default/80 bg-surface-panel/40 px-2 py-1 text-xs text-text-secondary transition-colors hover:border-border-strong hover:bg-surface-hover hover:text-text-primary"
+              onClick={() => promptCopilot(action.prompt(where))}
+            >
               {action.label}
             </button>
           ))}
