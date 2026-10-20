@@ -25,6 +25,8 @@ from typing import Any
 from urllib.parse import quote, unquote, urlparse
 
 TEXT_SUFFIXES = {".txt", ".md", ".csv", ".json", ".tsv", ".log", ".xml", ".yaml", ".yml", ".ini"}
+# Read as sheets of cells by `read_spreadsheet` (kept in step with its `SPREADSHEET_SUFFIXES`).
+SPREADSHEET_SUFFIXES = {".xlsx", ".xlsm", ".csv", ".tsv"}
 READ_LIMIT = 20_000  # characters of a file's text returned to the agent
 LIST_LIMIT = 500  # entries of a directory listed for the agent
 STAT_LIMIT = 1_000  # files counted towards a folder's size, so a huge network share can't hang the request
@@ -487,7 +489,8 @@ def search_local_files(path: str, query: str) -> dict[str, Any]:
     return {"path": str(folder), "query": query, "count": len(found), "matches": found, "truncated": truncated}
 
 
-def _truncate(text: str) -> str:
+def truncate(text: str) -> str:
+    """`text` cut to `READ_LIMIT` characters, saying how long it was."""
     if len(text) <= READ_LIMIT:
         return text
     return text[:READ_LIMIT] + f"\n\n[… truncated, {len(text)} characters in total]"
@@ -495,15 +498,24 @@ def _truncate(text: str) -> str:
 
 def read_local_file(path: str) -> dict[str, Any]:
     """A local file's text: plain text files as they are, PDFs' extracted text, Outlook emails (`.msg`) as their
-    headers, attachment list and body, and for other formats (Word, Excel, CAD, Maxsurf, ...) only their metadata."""
+    headers, attachment list and body, spreadsheets (`.xlsx`, `.xlsm`, `.csv`, `.tsv`) as a markdown table per sheet
+    with its formulas, and for other formats (Word, CAD, Maxsurf, ...) only their metadata."""
     file = _existing(path)
     if file.is_dir():
         raise LocalFileError(f"{file} is a folder; use list_local_directory to list it")
     stat = file.stat()
     meta = {"path": str(file), "size": stat.st_size, "created": _iso(stat.st_ctime), "modified": _iso(stat.st_mtime)}
     suffix = file.suffix.lower()
+    if suffix in SPREADSHEET_SUFFIXES:
+        from read_spreadsheet import SpreadsheetReadError, format_spreadsheet, read_spreadsheet
+
+        try:
+            data = read_spreadsheet(file)
+        except SpreadsheetReadError as exc:
+            raise LocalFileError(f"Could not read the spreadsheet {file}: {exc}") from exc
+        return {**meta, "sheets": [s["name"] for s in data["sheets"]], "content": truncate(format_spreadsheet(data))}
     if suffix in TEXT_SUFFIXES:
-        return {**meta, "content": _truncate(file.read_text(encoding="utf-8", errors="replace"))}
+        return {**meta, "content": truncate(file.read_text(encoding="utf-8", errors="replace"))}
     if suffix == ".pdf":
         import pymupdf
 
@@ -512,7 +524,7 @@ def read_local_file(path: str) -> dict[str, Any]:
                 pages = [f"--- Page {i} ---\n{page.get_text()}" for i, page in enumerate(doc, start=1)]
         except Exception as exc:  # pymupdf raises its own types for damaged or encrypted files
             raise LocalFileError(f"Could not read the PDF {file}: {exc}") from exc
-        return {**meta, "pages": len(pages), "content": _truncate("\n".join(pages))}
+        return {**meta, "pages": len(pages), "content": truncate("\n".join(pages))}
     if suffix == ".msg":
         from read_msg import MsgReadError, format_summary, read_msg
 
@@ -525,6 +537,6 @@ def read_local_file(path: str) -> dict[str, Any]:
             "subject": data["subject"],
             "from": data["sender"],
             "attachments": len(data["attachments"]),
-            "content": _truncate(format_summary(data)),
+            "content": truncate(format_summary(data)),
         }
     return {**meta, "message": f"Text extraction for {suffix or 'files without an extension'} is not supported yet; only the metadata is available."}

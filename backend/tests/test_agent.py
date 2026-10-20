@@ -282,6 +282,7 @@ def test_read_only_does_not_offer_or_allow_writes(client, notes_dir, model):
         "search_local_files",
         "list_local_directory",
         "read_local_file",
+        "read_spreadsheet",
         "search_web",
         "fetch_web_page",
     ]

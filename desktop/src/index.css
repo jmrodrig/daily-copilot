@@ -321,6 +321,24 @@ body {
 .note-body [data-whiteboard-frame] p {
   @apply m-0;
 }
+/* A spreadsheet's grid (see SpreadsheetView), in a note or in full view: the note's table styles stay off it, and its
+   sticky headers are opaque, tinted where the selection is. */
+.spreadsheet-grid table,
+.note-body .spreadsheet-grid table {
+  @apply w-auto text-[13px];
+}
+.spreadsheet-grid th,
+.note-body .spreadsheet-grid th {
+  @apply bg-surface-raised font-normal text-text-muted;
+}
+.spreadsheet-grid th[data-active],
+.note-body .spreadsheet-grid th[data-active] {
+  @apply text-accent-soft;
+  background-image: linear-gradient(
+    color-mix(in srgb, var(--dc-accent) 16%, transparent),
+    color-mix(in srgb, var(--dc-accent) 16%, transparent)
+  );
+}
 /*
  * A resized image or table (see noteFormatting): its width is `--media-scale` times its column's, up to the page's
  * (100cqw), centered on the column even when wider than it. Tables sit in a column-wide `note-table` for it.

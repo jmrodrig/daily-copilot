@@ -47,6 +47,8 @@ import {
 import { SlashCommand, SlashMenu, type SlashItem, type SlashMenuState } from "./slashCommand";
 import { WhiteboardIcon } from "./markupUi";
 import { WhiteboardNode } from "./WhiteboardWidget";
+import { SpreadsheetIcon, SpreadsheetNode } from "./SpreadsheetWidget";
+import { isSpreadsheetFile, parseWorkbookBuffer, serializeSpreadsheet } from "./spreadsheet";
 import { ActiveListenWidget, ListenNode, MicIcon } from "./ListenWidget";
 import WidgetRemovalDialog from "./WidgetRemovalDialog";
 import {
@@ -67,6 +69,7 @@ import {
   nearestWidth,
   snapWidths,
   widthLabel,
+  EMPTY_SPREADSHEET_JSON,
   EMPTY_WHITEBOARD_JSON,
   newListenJson,
   InlineMath,
@@ -159,6 +162,8 @@ export default function NoteEditor({
       ResizableImage.configure({ inline: true, allowBase64: false }),
       // A ```whiteboard block, shown as a live board (see WhiteboardWidget).
       WhiteboardNode.configure({ spaceId, onSave: () => onSaveRef.current() }),
+      // A ```spreadsheet block, shown as its grid (see SpreadsheetWidget).
+      SpreadsheetNode.configure({ onSave: () => onSaveRef.current() }),
       // A ```listen block, shown as its recording widget (see ListenWidget).
       ListenNode,
       WidgetRemovalGuard.configure({
@@ -211,7 +216,7 @@ export default function NoteEditor({
         const files = extractFiles(event.clipboardData);
         if (files.length) {
           event.preventDefault();
-          void insertFilesRef.current(files);
+          void dropFilesRef.current(files);
           return true;
         }
         const text = event.clipboardData?.getData("text/plain") ?? "";
@@ -232,7 +237,7 @@ export default function NoteEditor({
         const files = moved ? [] : extractFiles(event.dataTransfer);
         if (!files.length || !view.editable) return false;
         event.preventDefault();
-        void insertFilesRef.current(files, view.posAtCoords({ left: event.clientX, top: event.clientY })?.pos);
+        void dropFilesRef.current(files, view.posAtCoords({ left: event.clientX, top: event.clientY })?.pos);
         return true;
       },
     },
@@ -365,6 +370,28 @@ export default function NoteEditor({
     }
   };
 
+  /**
+   * Files dropped or pasted into the note: spreadsheets (.xlsx, .csv, …) go in as embedded spreadsheets, read in the
+   * browser; the rest are uploaded (see insertFilesRef). A spreadsheet that can't be read is uploaded as a file.
+   */
+  const dropFilesRef = useRef<(files: File[], pos?: number) => Promise<void>>(async () => {});
+  dropFilesRef.current = async (files: File[], pos?: number) => {
+    if (!editor || editor.isDestroyed) return;
+    const others = files.filter((file) => !isSpreadsheetFile(file));
+    for (const file of files.filter(isSpreadsheetFile)) {
+      try {
+        const { data, truncated } = await parseWorkbookBuffer(await file.arrayBuffer(), file.name.replace(/\.[^.]+$/, ""));
+        if (editor.isDestroyed) return;
+        const at = Math.min(Math.max(pos ?? editor.state.selection.to, 0), editor.state.doc.content.size);
+        editor.chain().focus().insertContentAt(at, { type: "spreadsheet", attrs: { data: serializeSpreadsheet(data) } }).run();
+        if (truncated) setUploadError(`${file.name} was bigger than a note can hold: only its first rows and columns were embedded.`);
+      } catch {
+        others.push(file);
+      }
+    }
+    if (others.length) await insertFilesRef.current(others, pos);
+  };
+
   useEffect(() => {
     editor?.setEditable(!disabled);
   }, [editor, disabled]);
@@ -381,6 +408,10 @@ export default function NoteEditor({
     if (!editor) return;
     if (item.id === "whiteboard") {
       editor.chain().focus().deleteRange(range).insertContent({ type: "whiteboard", attrs: { data: EMPTY_WHITEBOARD_JSON } }).run();
+      return;
+    }
+    if (item.id === "spreadsheet") {
+      editor.chain().focus().deleteRange(range).insertContent({ type: "spreadsheet", attrs: { data: EMPTY_SPREADSHEET_JSON } }).run();
       return;
     }
     if (item.id === "listen") {
@@ -1455,6 +1486,14 @@ function Toolbar({
         onClick={() => chain().insertContent({ type: "whiteboard", attrs: { data: EMPTY_WHITEBOARD_JSON } }).run()}
       >
         <WhiteboardIcon />
+      </ToolButton>
+      <ToolButton
+        label="Insert spreadsheet"
+        on={false}
+        disabled={off}
+        onClick={() => chain().insertContent({ type: "spreadsheet", attrs: { data: EMPTY_SPREADSHEET_JSON } }).run()}
+      >
+        <SpreadsheetIcon />
       </ToolButton>
       <ToolButton
         label="Insert listen widget (record and transcribe a meeting)"

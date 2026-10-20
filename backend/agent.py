@@ -10,6 +10,7 @@ The tools the model may call:
 - `write_note`: create or replace a note. Only offered outside `read_only` mode.
 - `search_local_files` / `list_local_directory` / `read_local_file`: search, crawl and read the local file system
   (design data such as PDFs, CAD and Maxsurf files outside the notes; see `local_files`).
+- `read_spreadsheet`: one sheet of a local workbook or CSV, or the cells matching a search (see `read_spreadsheet`).
 - `search_web` / `fetch_web_page`: search the live web (DuckDuckGo) and read web pages, for online research.
 
 Gemini models in `GEMINI_API_MODELS` run on litellm with `COPILOT_GEMINI_API_KEY` (the Gemini API) and the tools
@@ -57,6 +58,7 @@ from sqlalchemy import func, or_, select
 import database
 import file_layer
 import local_files
+import read_spreadsheet
 import spaces
 from config import Settings, get_settings
 from models import FolderMeta, Project, Space, Task
@@ -164,8 +166,10 @@ meeting prep): carry out its instruction with the tools, using any `User input:`
 files with `read_local_file` to find design data outside the notes (PDF drawings and reports, CAD files, Maxsurf \
 models, spreadsheets, ...). To find files on a topic, start with `search_local_files` on the root folder rather than \
 browsing folder by folder. Use absolute paths, e.g. ones linked from a note (`file:///C:/...`, `C:\\...`, \
-`\\\\server\\share\\...`). Text files, PDFs and Outlook emails (`.msg`: headers, attachment names and body) can \
-be read; for other formats you get only their size and dates. Cite the file paths you relied on.
+`\\\\server\\share\\...`). Text files, PDFs, Outlook emails (`.msg`: headers, attachment names and body) and \
+spreadsheets (`.xlsx`, `.xlsm`, `.csv`, `.tsv`: each sheet as a table, with its formulas) can be read; for other \
+formats you get only their size and dates. For a large spreadsheet, use `read_spreadsheet` to read one sheet or \
+search its cells for a line item. Cite the file paths you relied on.
 - You can search the live internet with `search_web` and read web pages with `fetch_web_page` for online technical \
 research: standards, classification rules, vendor and product data, papers and publications. Search first, then \
 read the most relevant pages. Cite the URLs you relied on.
@@ -266,9 +270,25 @@ TOOLS: dict[str, dict[str, Any]] = {
         "parameters": {"type": "object", "properties": {"path": _LOCAL_PATH_PARAM}, "required": ["path"]},
     },
     "read_local_file": {
-        "description": "Read a file on the local file system: text files (.txt, .md, .csv, .json, ...) as they are and "
-        "the text of PDFs and Outlook emails (.msg: subject, sender, recipients, date, attachment names and body); other formats (Word, Excel, CAD, Maxsurf, ...) return only their size and dates.",
+        "description": "Read a file on the local file system: text files (.txt, .md, .json, ...) as they are, "
+        "the text of PDFs and Outlook emails (.msg: subject, sender, recipients, date, attachment names and body), "
+        "and spreadsheets (.xlsx, .xlsm, .csv, .tsv) as a table per sheet with its formulas; other formats (Word, CAD, Maxsurf, ...) return only their size and dates.",
         "parameters": {"type": "object", "properties": {"path": _LOCAL_PATH_PARAM}, "required": ["path"]},
+    },
+    "read_spreadsheet": {
+        "description": "Read a local spreadsheet (.xlsx, .xlsm, .csv, .tsv): its sheets and sizes, then each sheet "
+        "(or only `sheet`) as a table with row numbers and its formulas. With `search`, only the cells whose value or "
+        "formula contains it, each with its sheet, address and whole row: use it to find line items in large workbooks.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": _LOCAL_PATH_PARAM,
+                "sheet": {"type": "string", "description": "Optional sheet name, e.g. `Costs` (default: every sheet)"},
+                "search": {"type": "string", "description": "Optional text to find in cell values and formulas, e.g. `keel`"},
+                "max_rows": {"type": "integer", "description": "Data rows shown per sheet (default 50)"},
+            },
+            "required": ["path"],
+        },
     },
     "search_web": {
         "description": "Search the live web. Returns up to 10 results with title, URL and snippet; read the useful "
@@ -421,6 +441,21 @@ def list_tasks(
         )
     tasks.sort(key=lambda t: (t["project"] or "", t["deadline"] is None, t["deadline"] or "", t["id"]))
     return {"today": today.isoformat(), "count": len(tasks), "tasks": tasks}
+
+
+def read_spreadsheet_tool(
+    path: str, sheet: str | None = None, search: str | None = None, max_rows: int | None = None
+) -> dict[str, Any]:
+    """A local spreadsheet's sheets as tables with their formulas, only `sheet` if given, or the cells matching
+    `search` (see `read_spreadsheet.read_spreadsheet`)."""
+    file = local_files.to_path(path)
+    data = read_spreadsheet.read_spreadsheet(file, sheet=sheet or None, search=search or None)
+    rows = max_rows if max_rows and max_rows > 0 else read_spreadsheet.DEFAULT_MAX_ROWS
+    return {
+        "path": str(file),
+        "sheets": [{"name": s["name"], "rows": s["rows"], "cols": s["cols"]} for s in data["sheets"]],
+        "content": local_files.truncate(read_spreadsheet.format_spreadsheet(data, max_rows=rows)),
+    }
 
 
 # --- Web ----------------------------------------------------------------------
@@ -703,6 +738,7 @@ class _Turn:
             "search_local_files": local_files.search_local_files,
             "list_local_directory": local_files.list_local_directory,
             "read_local_file": local_files.read_local_file,
+            "read_spreadsheet": read_spreadsheet_tool,
             "search_web": search_web,
             "fetch_web_page": fetch_web_page,
         }
@@ -712,7 +748,13 @@ class _Turn:
             return tools[name](**arguments)
         except TypeError as exc:
             raise ToolError(f"Bad arguments for {name}: {exc}") from exc
-        except (file_layer.FileLayerError, local_files.LocalFileError, OSError, UnicodeDecodeError) as exc:
+        except (
+            file_layer.FileLayerError,
+            local_files.LocalFileError,
+            read_spreadsheet.SpreadsheetReadError,
+            OSError,
+            UnicodeDecodeError,
+        ) as exc:
             raise ToolError(str(exc)) from exc
 
 
@@ -824,7 +866,9 @@ tools named above. Map them as follows:
 with Glob and Grep and read them with Read, instead of `search_notes` and `read_note`.
 - Local design files (instead of `search_local_files`, `list_local_directory`, `read_local_file`): Glob, Grep and \
 Read with absolute paths. Outlook emails (`.msg`) are binary and Read can't parse them: ask the user to attach the \
-email to the chat (its text then comes with the message) or to run `python scripts/read_msg.py <path>`.
+email to the chat (its text then comes with the message) or to run `python scripts/read_msg.py <path>`. Excel \
+workbooks (`.xlsx`, `.xlsm`) are binary too: ask the user to attach them or to run \
+`python scripts/read_spreadsheet.py <path> [--sheet NAME] [--search TEXT]`.
 - Online research (instead of `search_web`, `fetch_web_page`): WebSearch and WebFetch. Cite the URLs you relied on.
 - The space's open tasks are listed below (instead of `list_tasks`)."""
 
@@ -836,7 +880,8 @@ with glob and grep_search and read them with read_file, instead of `search_notes
 - Local design files (instead of `search_local_files`, `list_local_directory`, `read_local_file`): glob, \
 grep_search, list_directory and read_file with absolute paths. Outlook emails (`.msg`) are binary and read_file \
 can't parse them: ask the user to attach the email to the chat (its text then comes with the message) or to run \
-`python scripts/read_msg.py <path>`.
+`python scripts/read_msg.py <path>`. Excel workbooks (`.xlsx`, `.xlsm`) are binary too: ask the user to attach \
+them or to run `python scripts/read_spreadsheet.py <path> [--sheet NAME] [--search TEXT]`.
 - Online research (instead of `search_web`, `fetch_web_page`): google_web_search and web_fetch. Cite the URLs you \
 relied on.
 - The space's open tasks are listed below (instead of `list_tasks`).
@@ -889,7 +934,7 @@ def _attachment_block(attachment: ChatAttachment, root: Path) -> str:
     except (file_layer.NotePathError, FileNotFoundError):
         return f'[Attached file: "{attachment.name}" (size: {size}; not found in this space\'s files)]'
     header = f'[Attached file: "{attachment.name}" (size: {size}, local path: {path})]'
-    if path.suffix.lower() not in {*local_files.TEXT_SUFFIXES, ".pdf", ".msg"}:
+    if path.suffix.lower() not in {*local_files.TEXT_SUFFIXES, *local_files.SPREADSHEET_SUFFIXES, ".pdf", ".msg"}:
         return header
     try:
         content = local_files.read_local_file(str(path))["content"]

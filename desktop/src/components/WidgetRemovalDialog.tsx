@@ -11,6 +11,13 @@ function wording(removal: WidgetRemoval): { title: string; text: string; remove:
       remove: "Remove",
     };
   }
+  if (removal.type === "spreadsheet") {
+    return {
+      title: "Remove spreadsheet widget?",
+      text: "This spreadsheet and all its sheets will be deleted from the note. Do you want to proceed?",
+      remove: "Remove",
+    };
+  }
   switch (removal.reason) {
     case "listening":
       return {
@@ -34,7 +41,7 @@ function wording(removal: WidgetRemoval): { title: string; text: string; remove:
 }
 
 /**
- * Asks before an edit removes a listen widget or a whiteboard (see WidgetRemovalGuard). Keep Widget has the focus, so
+ * Asks before an edit removes a listen widget, a whiteboard or a spreadsheet (see WidgetRemovalGuard). Keep Widget has the focus, so
  * Enter keeps it, as do Escape and a click outside. `onRemove` makes the edit (false if it couldn't be made), and a
  * recording the widget was making is then thrown away.
  */

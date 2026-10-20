@@ -69,7 +69,7 @@ import { isLocalHref } from "../lib/localFiles";
  *
  * which the editor shows as a live board (`WhiteboardBlock`) and the read-only view as a read-only one; other
  * markdown renderers show the JSON as code. A voice recording's listen widget is a ```listen block the same way
- * (`ListenBlock`).
+ * (`ListenBlock`), and so is a spreadsheet, a ```spreadsheet block (`SpreadsheetBlock`).
  */
 
 /** The text column a note's title, properties and body sit in, centered on the page (see `.note-body` in index.css). */
@@ -532,6 +532,65 @@ export const WhiteboardBlock = Node.create({
     // On one line, with no backtick in it, so it can't end its fence early (see whiteboard.ts).
     const data = String(node.attrs?.data ?? EMPTY_WHITEBOARD_JSON).replace(/\r?\n/g, " ").replace(/`/g, "\\u0060");
     return "```whiteboard\n" + data + "\n```";
+  },
+});
+
+/** An empty embedded spreadsheet's JSON: one 5 × 5 sheet (see spreadsheet.ts). */
+export const EMPTY_SPREADSHEET_JSON = JSON.stringify({
+  activeSheet: "Sheet1",
+  sheets: [{ name: "Sheet1", rows: Array.from({ length: 5 }, () => Array<string>(5).fill("")) }],
+});
+
+const SPREADSHEET_FENCE = /^ {0,3}```spreadsheet[ \t]*\n([\s\S]*?)\n? {0,3}```[ \t]*(?:\n+|$)/;
+
+/**
+ * An embedded spreadsheet: a block atom holding its JSON in `data` (see spreadsheet.ts), read from and saved as a
+ * ```spreadsheet fenced block on one line, as a whiteboard is:
+ *
+ *   ```spreadsheet
+ *   {"activeSheet":"Sheet1","sheets":[{"name":"Sheet1","rows":[["Item","Cost"],["Keel","=B3*2"]]}]}
+ *   ```
+ *
+ * The grid is a node view, added by the editor (see SpreadsheetWidget).
+ */
+export const SpreadsheetBlock = Node.create({
+  name: "spreadsheet",
+  group: "block",
+  atom: true,
+  selectable: true,
+  draggable: false,
+  addAttributes() {
+    return {
+      data: {
+        default: EMPTY_SPREADSHEET_JSON,
+        parseHTML: (element: HTMLElement) => element.getAttribute("data-spreadsheet") ?? EMPTY_SPREADSHEET_JSON,
+        renderHTML: (attrs: Record<string, unknown>) => ({ "data-spreadsheet": String(attrs.data ?? EMPTY_SPREADSHEET_JSON) }),
+      },
+    };
+  },
+  parseHTML() {
+    return [{ tag: "div[data-spreadsheet]" }];
+  },
+  renderHTML({ HTMLAttributes }) {
+    return ["div", HTMLAttributes];
+  },
+  markdownTokenName: "spreadsheet",
+  markdownTokenizer: {
+    name: "spreadsheet",
+    level: "block",
+    start: (src: string) => src.indexOf("```spreadsheet"),
+    tokenize(src) {
+      const match = SPREADSHEET_FENCE.exec(src);
+      if (!match) return undefined;
+      return { type: "spreadsheet", raw: match[0], text: match[1].trim() };
+    },
+  },
+  parseMarkdown: (token, h) => h.createNode("spreadsheet", { data: (token.text as string | undefined) || EMPTY_SPREADSHEET_JSON }),
+  renderMarkdown: (node) => {
+    // On one line, with no backtick in it, so it can't end its fence early. A cell's line break is `\n` in the JSON
+    // already; a raw one is only JSON's whitespace.
+    const data = String(node.attrs?.data ?? EMPTY_SPREADSHEET_JSON).replace(/\r?\n/g, " ").replace(/`/g, "\\u0060");
+    return "```spreadsheet\n" + data + "\n```";
   },
 });
 

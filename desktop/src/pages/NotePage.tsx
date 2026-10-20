@@ -24,6 +24,7 @@ import { AssigneeTag, PillIcon, refKind, StatusTag, useTaskInfo } from "../compo
 import { NOTE_COLUMN, NOTE_HTML_SCHEMA, copyCleanSelection, layoutMedia, liftCellColors } from "../components/noteFormatting";
 import WhiteboardView from "../components/WhiteboardView";
 import { COLLAPSE_ICON, EXPAND_ICON, WhiteboardFrame } from "../components/WhiteboardWidget";
+import { SpreadsheetFrame } from "../components/SpreadsheetWidget";
 import { Segment, ToolIcon } from "../components/markupUi";
 import ListenWidget from "../components/ListenWidget";
 import { useVoiceRecording } from "../context/VoiceRecordingContext";
@@ -1045,7 +1046,7 @@ function noteUrlTransform(url: string): string {
 
 /**
  * A code block as the read-only note shows it: a ```whiteboard block (see noteFormatting) as its board, read-only, a
- * ```listen block as its widget (which can record and tag speakers here too: the backend saves those into the note,
+ * ```spreadsheet block as its grid, read-only, a ```listen block as its widget (which can record and tag speakers here too: the backend saves those into the note,
  * see ListenWidget), unless `interactive` is false; any other code block as code.
  */
 function notePre(interactive: boolean): Components["pre"] {
@@ -1056,6 +1057,7 @@ function notePre(interactive: boolean): Components["pre"] {
     const text = () =>
       code?.type === "element" ? code.children.map((child) => (child.type === "text" ? child.value : "")).join("").trim() : "";
     if (fence("whiteboard")) return <WhiteboardFrame value={text()} editable={false} />;
+    if (fence("spreadsheet")) return <SpreadsheetFrame value={text()} editable={false} />;
     if (fence("listen")) return <ListenWidget value={text()} interactive={interactive} />;
     return <pre {...props} />;
   };
