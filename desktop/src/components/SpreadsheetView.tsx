@@ -2,23 +2,29 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEve
 
 import { Segment, ToolbarDivider, ToolIcon } from "./markupUi";
 import {
+  IMPORT_MAX_COLS,
+  IMPORT_MAX_ROWS,
   SPREADSHEET_FILE_ACCEPT,
+  awaitsReference,
   cellAddress,
   cellText,
   colLetter,
   createEvaluator,
-  emptyRows,
   exportWorkbook,
+  formatRangeAddress,
+  formulaReferences,
+  functionSuggestions,
+  getEffectiveDisplayRange,
+  parseRangeAddress,
   parseSpreadsheet,
   parseWorkbookBuffer,
-  renameSheet,
   restyle,
   serializeSpreadsheet,
   setCell,
   sheetCols,
   shiftCells,
-  uniqueSheetName,
   type CellPos,
+  type CellRange,
   type SpreadsheetData,
   type SpreadsheetStyle,
 } from "./spreadsheet";
@@ -30,10 +36,12 @@ const ROW_HEADER_W = 46;
 /** Rows drawn beyond the visible ones, above and below, so scrolling doesn't show blanks. */
 const OVERSCAN = 8;
 /** Empty rows and columns shown past an editable sheet's cells, to type into. */
-const SPARE_ROWS = 20;
-const SPARE_COLS = 4;
-const MIN_ROWS = 30;
-const MIN_COLS = 10;
+const SPARE_ROWS = 25;
+const SPARE_COLS = 15;
+const MIN_ROWS = 60;
+const MIN_COLS = 26;
+/** Columns beyond the window's width, so the grid always runs on past the screen's right edge. */
+const OFFSCREEN_COLS = 5;
 const UNDO_LIMIT = 100;
 
 const ALIGN_ICONS: Record<NonNullable<SpreadsheetStyle["align"]>, string> = {
@@ -43,7 +51,9 @@ const ALIGN_ICONS: Record<NonNullable<SpreadsheetStyle["align"]>, string> = {
 };
 
 type Edit = { row: number; col: number; text: string; where: "cell" | "bar" };
-type Range = { r1: number; c1: number; r2: number; c2: number };
+type Range = CellRange;
+/** A cell reference being picked on the grid for a formula: where in its text it is, and the cell the drag began on. */
+type Pick = { start: number; end: number; anchor: CellPos; dragging: boolean };
 
 const rangeOf = (a: CellPos, b: CellPos): Range => ({
   r1: Math.min(a.row, b.row),
@@ -58,25 +68,37 @@ function addressesOf(range: Range): string[] {
   return addresses;
 }
 
+const inside = (range: Range, r: number, c: number) => r >= range.r1 && r <= range.r2 && c >= range.c1 && c <= range.c2;
+
+/** The border classes that outline `range` on cell (r, c): its sides that are the range's edges. */
+function outlineEdges(range: Range, r: number, c: number): string {
+  if (!inside(range, r, c)) return "";
+  return [r === range.r1 && "border-t-2", r === range.r2 && "border-b-2", c === range.c1 && "border-l-2", c === range.c2 && "border-r-2"]
+    .filter(Boolean)
+    .join(" ");
+}
+
 /**
- * A spreadsheet (see spreadsheet.ts): its grid of cells, with formulas worked out, and its sheets' tabs.
+ * A spreadsheet (see spreadsheet.ts): its grid of cells, with formulas worked out. It shows one sheet, the saved
+ * active one (a workbook imported with more keeps them, for the formulas that refer to them).
  *
  * In full (`compact` false) and `editable`, it has a toolbar (title, import and export, bold, italic and alignment,
- * rows and columns), a formula bar, and a grid to type in: arrows, Tab and Enter move, typing or Enter or F2 (or a
- * double click) edits the cell, Escape cancels; Delete clears the selection, Ctrl+B/I format it, Ctrl+C/X/V copy it
- * as tab-separated text, Ctrl+Z/Y undo and redo. Each finished edit goes out through `onChange`, as the whole
- * spreadsheet's JSON.
+ * rows and columns, the display area), a formula bar, and a grid, running on past the screen's edge, to type in:
+ * arrows, Tab and Enter move, typing or Enter or F2 (or a double click) edits the cell, Escape cancels; Delete clears
+ * the selection, Ctrl+B/I format it, Ctrl+C/X/V copy it as tab-separated text, Ctrl+Z/Y undo and redo. Typing a
+ * formula offers its functions (arrows choose, Tab or Enter take one, Escape closes them), and where a cell reference
+ * goes next, clicking a cell writes its address in, and dragging a range's. Each finished edit goes out through
+ * `onChange`, as the whole spreadsheet's JSON.
  *
- * `compact` is the note's preview: the grid at the sheet's own size, which only shows the cells; a double click asks
- * to open it in full (`onExpand`) at that cell.
+ * `compact` is the note's preview: the grid of the sheet's display area (or its cells in use), which only shows the
+ * cells, with their column letters and row numbers if `editable`; a double click asks to open it in full
+ * (`onExpand`) at that cell.
  */
 export default function SpreadsheetView({
   value,
   onChange,
   editable,
   compact = false,
-  sheet,
-  onSheetChange,
   initialCell,
   autoFocus = false,
   onEscape,
@@ -89,9 +111,6 @@ export default function SpreadsheetView({
   onChange?: (json: string) => void;
   editable: boolean;
   compact?: boolean;
-  /** The sheet shown, by name (the saved active sheet if it has none of that name). */
-  sheet: string;
-  onSheetChange: (name: string) => void;
   initialCell?: CellPos;
   autoFocus?: boolean;
   onEscape?: () => void;
@@ -104,26 +123,47 @@ export default function SpreadsheetView({
   const evaluator = useMemo(() => createEvaluator(data), [data]);
   const canEdit = editable && !compact && !!onChange;
 
-  const named = data.sheets.findIndex((s) => s.name === sheet);
-  const sheetIndex = named >= 0 ? named : Math.max(data.sheets.findIndex((s) => s.name === data.activeSheet), 0);
+  const sheetIndex = Math.max(data.sheets.findIndex((s) => s.name === data.activeSheet), 0);
   const current = data.sheets[sheetIndex];
   const usedRows = current.rows.length;
   const usedCols = Math.max(sheetCols(current), 1);
+  const screenCols = Math.ceil((typeof window !== "undefined" ? window.innerWidth : 1920) / COL_W) + OFFSCREEN_COLS;
   const rowCount = canEdit ? Math.max(usedRows + SPARE_ROWS, MIN_ROWS) : usedRows;
-  const colCount = canEdit ? Math.max(usedCols + SPARE_COLS, MIN_COLS) : usedCols;
+  const colCount = canEdit ? Math.max(usedCols + SPARE_COLS, MIN_COLS, screenCols) : usedCols;
+  const displayArea = current.displayArea ? parseRangeAddress(current.displayArea) : null;
+  // The cells drawn: in the note, its display area (cut to what a note could hold); in full, all of them.
+  const bounds: Range = (() => {
+    if (!compact) return { r1: 0, c1: 0, r2: rowCount - 1, c2: colCount - 1 };
+    const area = getEffectiveDisplayRange(current);
+    return { ...area, r2: Math.min(area.r2, area.r1 + IMPORT_MAX_ROWS - 1), c2: Math.min(area.c2, area.c1 + IMPORT_MAX_COLS - 1) };
+  })();
+  // A published note's spreadsheet is just its cells: no column letters or row numbers.
+  const showHeaders = !compact || editable;
+  const rowHeaderW = showHeaders ? ROW_HEADER_W : 0;
+  const headerH = showHeaders ? HEADER_H : 0;
 
-  const [anchor, setAnchor] = useState<CellPos>(initialCell ?? { row: 0, col: 0 });
-  const [focus, setFocus] = useState<CellPos>(initialCell ?? { row: 0, col: 0 });
+  const start = initialCell ?? { row: bounds.r1, col: bounds.c1 };
+  const [anchor, setAnchor] = useState<CellPos>(start);
+  const [focus, setFocus] = useState<CellPos>(start);
   const [edit, setEdit] = useState<Edit | null>(null);
   const editRef = useRef(edit);
   editRef.current = edit;
-  const [renaming, setRenaming] = useState<{ index: number; text: string } | null>(null);
+  // Where the caret is in the edit's text, the functions offered there, and a reference being picked on the grid.
+  const [caret, setCaret] = useState(0);
+  const [suggestIndex, setSuggestIndex] = useState(0);
+  const [suggestOff, setSuggestOff] = useState(false);
+  const [suggestAt, setSuggestAt] = useState<{ left: number; top: number } | null>(null);
+  const pickRef = useRef<Pick | null>(null);
+  // The caret to put in the edit's input once it's drawn, after its text was changed for it.
+  const pendingCaret = useRef<number | null>(null);
   const [titleDraft, setTitleDraft] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [scroll, setScroll] = useState({ top: 0, height: 400 });
   const range = rangeOf(anchor, focus);
 
   const gridRef = useRef<HTMLDivElement>(null);
+  const cellInputRef = useRef<HTMLInputElement>(null);
+  const barInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const undoRef = useRef<{ past: string[]; future: string[] }>({ past: [], future: [] });
   // A drag selecting cells with the mouse.
@@ -134,7 +174,10 @@ export default function SpreadsheetView({
   }, [autoFocus]);
 
   useEffect(() => {
-    const stop = () => (draggingRef.current = false);
+    const stop = () => {
+      draggingRef.current = false;
+      if (pickRef.current) pickRef.current.dragging = false;
+    };
     window.addEventListener("mouseup", stop);
     return () => window.removeEventListener("mouseup", stop);
   }, []);
@@ -150,7 +193,28 @@ export default function SpreadsheetView({
     return () => observer.disconnect();
   }, []);
 
-  // A sheet switched to (or deleted from under us) starts at its first cell.
+  // The functions offered for the name typed at the caret of a formula.
+  const suggestions = edit && !suggestOff ? functionSuggestions(edit.text, caret) : null;
+  const suggesting = !!suggestions;
+
+  // The edit's text changed for it (a function taken, a reference picked): its caret goes where it was meant to.
+  useLayoutEffect(() => {
+    const at = pendingCaret.current;
+    const input = edit?.where === "bar" ? barInputRef.current : cellInputRef.current;
+    if (at === null || !input) return;
+    pendingCaret.current = null;
+    input.setSelectionRange(at, at);
+    setCaret(at);
+  });
+
+  // The functions offered drop down below the input they're typed in.
+  useLayoutEffect(() => {
+    const input = edit?.where === "bar" ? barInputRef.current : cellInputRef.current;
+    const rect = suggesting ? input?.getBoundingClientRect() : undefined;
+    setSuggestAt(rect ? { left: rect.left, top: rect.bottom + 2 } : null);
+  }, [suggesting, edit?.where, edit?.row, edit?.col]);
+
+  // A sheet imported in place of this one starts at its first cell.
   const sheetName = current.name;
   const firstRender = useRef(true);
   useEffect(() => {
@@ -164,10 +228,10 @@ export default function SpreadsheetView({
     gridRef.current?.scrollTo({ top: 0, left: 0 });
   }, [sheetName]);
 
-  /** Save `next` (the active sheet with it), remembering what it replaces for undo. */
+  /** Save `next`, remembering what it replaces for undo. */
   function commit(next: SpreadsheetData) {
     if (!onChange) return;
-    const json = serializeSpreadsheet({ ...next, activeSheet: next.sheets.some((s) => s.name === next.activeSheet) ? next.activeSheet : sheetName });
+    const json = serializeSpreadsheet(next);
     if (json === value) return;
     const undo = undoRef.current;
     undo.past = [...undo.past, value].slice(-UNDO_LIMIT);
@@ -197,10 +261,10 @@ export default function SpreadsheetView({
   function scrollIntoView(cell: CellPos) {
     const grid = gridRef.current;
     if (!grid) return;
-    const top = cell.row * ROW_H;
-    const left = cell.col * COL_W;
-    const viewH = grid.clientHeight - HEADER_H;
-    const viewW = grid.clientWidth - ROW_HEADER_W;
+    const top = (cell.row - bounds.r1) * ROW_H;
+    const left = (cell.col - bounds.c1) * COL_W;
+    const viewH = grid.clientHeight - headerH;
+    const viewW = grid.clientWidth - rowHeaderW;
     if (top < grid.scrollTop) grid.scrollTop = top;
     else if (top + ROW_H > grid.scrollTop + viewH) grid.scrollTop = top + ROW_H - viewH;
     if (left < grid.scrollLeft) grid.scrollLeft = left;
@@ -208,7 +272,7 @@ export default function SpreadsheetView({
   }
 
   function select(cell: CellPos, extend = false) {
-    const clamped = { row: Math.min(Math.max(cell.row, 0), rowCount - 1), col: Math.min(Math.max(cell.col, 0), colCount - 1) };
+    const clamped = { row: Math.min(Math.max(cell.row, bounds.r1), bounds.r2), col: Math.min(Math.max(cell.col, bounds.c1), bounds.c2) };
     if (!extend) setAnchor(clamped);
     setFocus(clamped);
     scrollIntoView(clamped);
@@ -218,8 +282,75 @@ export default function SpreadsheetView({
 
   function startEdit(text?: string, where: Edit["where"] = "cell") {
     if (!canEdit) return;
+    const startText = text ?? cellText(current, focus.row, focus.col);
     setAnchor(focus);
-    setEdit({ row: focus.row, col: focus.col, text: text ?? cellText(current, focus.row, focus.col), where });
+    setEdit({ row: focus.row, col: focus.col, text: startText, where });
+    // The cell's input starts with the caret at its end; the formula bar's, where it was clicked.
+    if (where === "cell") pendingCaret.current = startText.length;
+    pickRef.current = null;
+    setSuggestOff(false);
+    setSuggestIndex(0);
+  }
+
+  const editInput = () => (editRef.current?.where === "bar" ? barInputRef.current : cellInputRef.current);
+
+  /** The edit's text as typed, with the caret at `at`. */
+  function typeEdit(text: string, at: number | null) {
+    const edit = editRef.current;
+    if (!edit) return;
+    pickRef.current = null;
+    setSuggestOff(false);
+    setSuggestIndex(0);
+    if (at !== null) setCaret(at);
+    setEdit({ ...edit, text });
+  }
+
+  /** The edit's text with `start`–`end` replaced by `insert`, and the caret after it. */
+  function spliceEdit(start: number, end: number, insert: string) {
+    const edit = editRef.current;
+    if (!edit) return;
+    const next = { ...edit, text: edit.text.slice(0, start) + insert + edit.text.slice(end) };
+    editRef.current = next;
+    pendingCaret.current = start + insert.length;
+    setEdit(next);
+  }
+
+  function acceptSuggestion(name: string) {
+    if (!suggestions) return;
+    spliceEdit(suggestions.start, caret, `${name}(`);
+    pickRef.current = null;
+    setSuggestIndex(0);
+  }
+
+  /**
+   * A click on `cell` while a formula is edited: if a reference goes at the caret (or the caret is just after one
+   * picked), write the cell's address there and start a drag that makes it a range. Whether it did.
+   */
+  function pickReference(cell: CellPos): boolean {
+    const edit = editRef.current;
+    const input = editInput();
+    if (!edit || !input || !edit.text.startsWith("=")) return false;
+    const from = input.selectionStart ?? edit.text.length;
+    const to = input.selectionEnd ?? from;
+    const pick = pickRef.current;
+    let start: number;
+    let end: number;
+    if (pick && from === pick.end && to === pick.end) [start, end] = [pick.start, pick.end];
+    else if (awaitsReference(edit.text, from)) [start, end] = [from, to];
+    else return false;
+    const address = cellAddress(cell.row, cell.col);
+    spliceEdit(start, end, address);
+    pickRef.current = { start, end: start + address.length, anchor: cell, dragging: true };
+    return true;
+  }
+
+  /** The reference being picked stretched to a range, from where its drag began to `cell`. */
+  function dragPick(cell: CellPos) {
+    const pick = pickRef.current;
+    if (!pick) return;
+    const address = formatRangeAddress(pick.anchor.row, pick.anchor.col, cell.row, cell.col);
+    spliceEdit(pick.start, pick.end, address);
+    pick.end = pick.start + address.length;
   }
 
   /** End the edit, saving it unless `cancel`, then move the selection by `move` and give the grid the keys back. */
@@ -228,6 +359,7 @@ export default function SpreadsheetView({
     const edit = editRef.current;
     if (!edit) return;
     editRef.current = null;
+    pickRef.current = null;
     if (!cancel && edit.text !== cellText(current, edit.row, edit.col)) {
       commit(withSheet((s) => setCell(s, edit.row, edit.col, edit.text)));
     }
@@ -296,45 +428,22 @@ export default function SpreadsheetView({
       select(axis === "row" ? { row: at, col: focus.col } : { row: focus.row, col: at });
       return;
     }
-    commit(shiftCells({ ...data, activeSheet: sheetName }, sheetIndex, axis, at, 1));
+    commit(shiftCells(data, sheetIndex, axis, at, 1));
     select(axis === "row" ? { row: at, col: focus.col } : { row: focus.row, col: at });
   }
 
   function remove(axis: "row" | "col") {
     const from = axis === "row" ? range.r1 : range.c1;
     const count = axis === "row" ? range.r2 - range.r1 + 1 : range.c2 - range.c1 + 1;
-    commit(shiftCells({ ...data, activeSheet: sheetName }, sheetIndex, axis, from, -count));
+    commit(shiftCells(data, sheetIndex, axis, from, -count));
     select(axis === "row" ? { row: from, col: focus.col } : { row: focus.row, col: from });
   }
 
-  // --- Sheets -------------------------------------------------------------------
+  // --- Display area -------------------------------------------------------------
 
-  function addSheet() {
-    const name = uniqueSheetName(data.sheets, `Sheet${data.sheets.length + 1}`);
-    commit({ ...data, activeSheet: name, sheets: [...data.sheets, { name, rows: emptyRows() }] });
-    onSheetChange(name);
-  }
-
-  function finishRename(cancel = false) {
-    if (!renaming) return;
-    const name = renaming.text.trim();
-    const old = data.sheets[renaming.index]?.name;
-    setRenaming(null);
-    if (cancel || !name || name === old) return;
-    if (data.sheets.some((s, i) => i !== renaming.index && s.name.toLowerCase() === name.toLowerCase())) {
-      setNotice(`There's a sheet named "${name}" already.`);
-      return;
-    }
-    commit(renameSheet({ ...data, activeSheet: sheetName }, renaming.index, name));
-    if (old === sheetName) onSheetChange(name);
-  }
-
-  function deleteSheet(index: number) {
-    if (data.sheets.length < 2) return;
-    const sheets = data.sheets.filter((_, i) => i !== index);
-    const next = sheets[Math.min(index, sheets.length - 1)].name;
-    commit({ ...data, activeSheet: next, sheets });
-    onSheetChange(next);
+  /** The note shows only `area` of the sheet (an address, `A1:D8`), or, without one, its cells in use. */
+  function setDisplayArea(area?: string) {
+    commit(withSheet(({ displayArea: _old, ...s }) => (area ? { ...s, displayArea: area } : s)));
   }
 
   // --- Import and export ----------------------------------------------------------
@@ -344,7 +453,6 @@ export default function SpreadsheetView({
     try {
       const { data: imported, truncated } = await parseWorkbookBuffer(await file.arrayBuffer(), file.name.replace(/\.[^.]+$/, ""));
       commit(imported);
-      onSheetChange(imported.activeSheet);
       if (truncated) setNotice(`${file.name} was bigger than a note can hold: only its first rows and columns were imported.`);
     } catch (err) {
       setNotice(`Could not import ${file.name} (${err instanceof Error ? err.message : String(err)}).`);
@@ -353,7 +461,7 @@ export default function SpreadsheetView({
 
   async function exportAs(format: "xlsx" | "csv") {
     try {
-      await exportWorkbook({ ...data, activeSheet: sheetName }, undefined, format);
+      await exportWorkbook(data, undefined, format);
     } catch (err) {
       setNotice(`Could not export the spreadsheet (${err instanceof Error ? err.message : String(err)}).`);
     }
@@ -382,8 +490,8 @@ export default function SpreadsheetView({
     } else if ((key === "Delete" || key === "Backspace") && canEdit) {
       clearRange();
     } else if (mod && key.toLowerCase() === "a") {
-      setAnchor({ row: 0, col: 0 });
-      setFocus({ row: Math.max(usedRows - 1, 0), col: usedCols - 1 });
+      setAnchor({ row: bounds.r1, col: bounds.c1 });
+      setFocus({ row: Math.min(Math.max(usedRows - 1, 0), bounds.r2), col: Math.min(usedCols - 1, bounds.c2) });
     } else if (mod && key.toLowerCase() === "b" && canEdit) {
       toggle("bold");
     } else if (mod && key.toLowerCase() === "i" && canEdit) {
@@ -417,6 +525,19 @@ export default function SpreadsheetView({
   // Inputs (the cell's, the formula bar's) keep their keys from the grid and the editor.
   function onEditKeyDown(event: KeyboardEvent<HTMLInputElement>) {
     event.stopPropagation();
+    if (suggestions) {
+      const count = suggestions.matches.length;
+      let handled = true;
+      if (event.key === "ArrowDown") setSuggestIndex((i) => (i + 1) % count);
+      else if (event.key === "ArrowUp") setSuggestIndex((i) => (i - 1 + count) % count);
+      else if (event.key === "Enter" || event.key === "Tab") acceptSuggestion(suggestions.matches[Math.min(suggestIndex, count - 1)].name);
+      else if (event.key === "Escape") setSuggestOff(true);
+      else handled = false;
+      if (handled) {
+        event.preventDefault();
+        return;
+      }
+    }
     if (event.key === "Enter") {
       event.preventDefault();
       finishEdit(false, { dr: event.shiftKey ? -1 : 1, dc: 0 });
@@ -431,82 +552,23 @@ export default function SpreadsheetView({
 
   // --- Drawing --------------------------------------------------------------------
 
-  const firstRow = Math.max(Math.floor(scroll.top / ROW_H) - OVERSCAN, 0);
-  const lastRow = Math.min(Math.ceil((scroll.top + scroll.height) / ROW_H) + OVERSCAN, rowCount - 1);
-  const cols = Array.from({ length: colCount }, (_, c) => c);
+  const firstRow = bounds.r1 + Math.max(Math.floor(scroll.top / ROW_H) - OVERSCAN, 0);
+  const lastRow = Math.min(bounds.r1 + Math.ceil((scroll.top + scroll.height) / ROW_H) + OVERSCAN, bounds.r2);
+  const cols = Array.from({ length: bounds.c2 - bounds.c1 + 1 }, (_, i) => bounds.c1 + i);
   const shownRows: number[] = [];
   for (let r = firstRow; r <= lastRow; r++) shownRows.push(r);
 
   const focusText = edit ? edit.text : cellText(current, focus.row, focus.col);
+  const refRanges = edit
+    ? formulaReferences(edit.text)
+        .filter((ref) => ref.sheet === null || ref.sheet.toLowerCase() === sheetName.toLowerCase())
+        .map((ref) => ref.range)
+    : [];
   const title = data.title || "Spreadsheet";
-
-  const sheetTabs = (
-    <div className="flex shrink-0 items-center gap-0.5 overflow-x-auto border-t border-border-default bg-surface-raised/60 px-1.5 py-1">
-      {data.sheets.map((s, i) =>
-        renaming?.index === i ? (
-          <input
-            key={s.name}
-            autoFocus
-            aria-label="Sheet name"
-            value={renaming.text}
-            onChange={(e) => setRenaming({ index: i, text: e.target.value })}
-            onBlur={() => finishRename()}
-            onKeyDown={(e) => {
-              e.stopPropagation();
-              if (e.key === "Enter") finishRename();
-              if (e.key === "Escape") finishRename(true);
-            }}
-            className="h-7 w-28 rounded border border-accent bg-background px-2 text-[13px] text-text-primary outline-none"
-          />
-        ) : (
-          <span key={s.name} className="flex items-center">
-            <button
-              type="button"
-              title={canEdit ? "Double-click to rename" : s.name}
-              onClick={() => onSheetChange(s.name)}
-              onDoubleClick={() => canEdit && setRenaming({ index: i, text: s.name })}
-              className={`h-7 max-w-[12rem] truncate rounded px-2.5 text-[13px] ${
-                i === sheetIndex ? "bg-accent/[0.16] font-medium text-accent-soft" : "text-text-secondary hover:bg-surface-hover hover:text-text-primary"
-              }`}
-            >
-              {s.name}
-            </button>
-            {canEdit && i === sheetIndex && data.sheets.length > 1 && (
-              <button
-                type="button"
-                title={`Delete sheet ${s.name}`}
-                aria-label={`Delete sheet ${s.name}`}
-                onClick={() => deleteSheet(i)}
-                className="ml-0.5 flex h-6 w-6 items-center justify-center rounded text-text-muted hover:bg-surface-hover hover:text-text-primary"
-              >
-                ×
-              </button>
-            )}
-          </span>
-        ),
-      )}
-      {canEdit && (
-        <button
-          type="button"
-          title="Add a sheet"
-          aria-label="Add a sheet"
-          onClick={addSheet}
-          className="ml-1 flex h-7 w-7 items-center justify-center rounded text-[16px] text-text-secondary hover:bg-surface-hover hover:text-text-primary"
-        >
-          +
-        </button>
-      )}
-    </div>
-  );
 
   return (
     <div className={`flex min-h-0 flex-col bg-background ${className}`} onKeyDown={onRootKeyDown}>
-      {compact ? (
-        <div className="flex shrink-0 items-center gap-2 border-b border-border-default px-3 py-1">
-          <span className="min-w-0 flex-1 truncate text-[14px] font-medium text-text-primary">{title}</span>
-          {toolbarEnd}
-        </div>
-      ) : (
+      {!compact && (
         <>
           <div role="toolbar" aria-label="Spreadsheet tools" className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-border-default px-3 py-1.5">
             {canEdit ? (
@@ -588,6 +650,28 @@ export default function SpreadsheetView({
                 <Segment on={false} label="Delete the selected columns" onClick={() => remove("col")}>
                   <span className="text-[14px]">− Column</span>
                 </Segment>
+                <ToolbarDivider />
+                <Segment
+                  on={false}
+                  label="Set the display area: the note shows only the selected cells"
+                  onClick={() => setDisplayArea(formatRangeAddress(range.r1, range.c1, range.r2, range.c2))}
+                >
+                  <span className="text-[14px]">Set display area</span>
+                </Segment>
+                {current.displayArea && (
+                  <span className="flex h-7 items-center gap-1 rounded bg-accent/[0.12] pl-2 pr-0.5 font-mono text-[13px] text-accent-soft">
+                    Display: {current.displayArea}
+                    <button
+                      type="button"
+                      title="Clear the display area: the note shows all the cells in use"
+                      aria-label="Clear the display area"
+                      onClick={() => setDisplayArea()}
+                      className="flex h-6 w-6 items-center justify-center rounded text-text-muted hover:bg-surface-hover hover:text-text-primary"
+                    >
+                      ✕
+                    </button>
+                  </span>
+                )}
               </>
             )}
             <span className="ml-auto flex items-center gap-1">{toolbarEnd}</span>
@@ -602,19 +686,47 @@ export default function SpreadsheetView({
               fx
             </span>
             <input
+              ref={barInputRef}
               aria-label="Cell contents"
               readOnly={!canEdit}
               value={focusText}
               onFocus={() => {
                 if (canEdit && !edit) startEdit(undefined, "bar");
               }}
-              onChange={(e) => edit && setEdit({ ...edit, text: e.target.value })}
+              onChange={(e) => typeEdit(e.target.value, e.target.selectionStart)}
+              onSelect={(e) => setCaret(e.currentTarget.selectionStart ?? 0)}
               onBlur={() => edit?.where === "bar" && finishEdit()}
               onKeyDown={onEditKeyDown}
               className="h-7 min-w-0 flex-1 rounded border border-border-default bg-transparent px-2 font-mono text-[13px] text-text-primary outline-none focus:border-accent"
             />
           </div>
         </>
+      )}
+      {suggestions && suggestAt && (
+        <ul
+          role="listbox"
+          aria-label="Functions"
+          className="fixed z-50 w-80 overflow-hidden rounded-md border border-border-default bg-surface-raised py-1 shadow-lg"
+          style={{ left: suggestAt.left, top: suggestAt.top }}
+        >
+          {suggestions.matches.map((f, i) => (
+            <li
+              key={f.name}
+              role="option"
+              aria-selected={i === suggestIndex}
+              onMouseDown={(e) => {
+                // The edit's input keeps the focus.
+                e.preventDefault();
+                acceptSuggestion(f.name);
+              }}
+              onMouseEnter={() => setSuggestIndex(i)}
+              className={`cursor-pointer px-3 py-1.5 ${i === suggestIndex ? "bg-accent/[0.16]" : ""}`}
+            >
+              <div className="font-mono text-[13px] text-text-primary">{f.syntax}</div>
+              <div className="text-[12px] text-text-muted">{f.description}</div>
+            </li>
+          ))}
+        </ul>
       )}
       {notice && (
         <p role="alert" className="flex shrink-0 items-center gap-2 border-b border-border-default px-3 py-1 text-[14px] text-accent">
@@ -653,53 +765,57 @@ export default function SpreadsheetView({
           const text = e.clipboardData.getData("text/plain");
           if (text) pasteTsv(text);
         }}
-        className="spreadsheet-grid relative min-h-0 flex-1 overflow-auto outline-none"
+        className={`spreadsheet-grid relative overflow-auto outline-none ${compact ? "max-h-[480px]" : "min-h-0 flex-1"}`}
       >
-        <table className="border-separate border-spacing-0 text-[13px]" style={{ tableLayout: "fixed", width: ROW_HEADER_W + colCount * COL_W }}>
+        <table className="border-separate border-spacing-0 text-[13px]" style={{ tableLayout: "fixed", width: rowHeaderW + cols.length * COL_W }}>
           <colgroup>
-            <col style={{ width: ROW_HEADER_W }} />
+            {showHeaders && <col style={{ width: ROW_HEADER_W }} />}
             {cols.map((c) => (
               <col key={c} style={{ width: COL_W }} />
             ))}
           </colgroup>
-          <thead>
-            <tr style={{ height: HEADER_H }}>
-              <th className="sticky left-0 top-0 z-30 border-b border-r border-border-default" />
-              {cols.map((c) => (
-                <th
-                  key={c}
-                  scope="col"
-                  onMouseDown={(e) => {
-                    e.preventDefault();
-                    gridRef.current?.focus({ preventScroll: true });
-                    setAnchor({ row: 0, col: e.shiftKey ? anchor.col : c });
-                    setFocus({ row: rowCount - 1, col: c });
-                  }}
-                  data-active={c >= range.c1 && c <= range.c2 ? "" : undefined}
-                  className="sticky top-0 z-20 cursor-default select-none border-b border-r border-border-default"
-                >
-                  {colLetter(c)}
-                </th>
-              ))}
-            </tr>
-          </thead>
+          {showHeaders && (
+            <thead>
+              <tr style={{ height: HEADER_H }}>
+                <th className="sticky left-0 top-0 z-30 border-b border-r border-border-default" />
+                {cols.map((c) => (
+                  <th
+                    key={c}
+                    scope="col"
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      gridRef.current?.focus({ preventScroll: true });
+                      setAnchor({ row: bounds.r1, col: e.shiftKey ? anchor.col : c });
+                      setFocus({ row: bounds.r2, col: c });
+                    }}
+                    data-active={c >= range.c1 && c <= range.c2 ? "" : undefined}
+                    className="sticky top-0 z-20 cursor-default select-none border-b border-r border-border-default"
+                  >
+                    {colLetter(c)}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+          )}
           <tbody>
-            {firstRow > 0 && <tr aria-hidden style={{ height: firstRow * ROW_H }} />}
+            {firstRow > bounds.r1 && <tr aria-hidden style={{ height: (firstRow - bounds.r1) * ROW_H }} />}
             {shownRows.map((r) => (
               <tr key={r} style={{ height: ROW_H }}>
-                <th
-                  scope="row"
-                  onMouseDown={(e) => {
-                    e.preventDefault();
-                    gridRef.current?.focus({ preventScroll: true });
-                    setAnchor({ row: e.shiftKey ? anchor.row : r, col: 0 });
-                    setFocus({ row: r, col: colCount - 1 });
-                  }}
-                  data-active={r >= range.r1 && r <= range.r2 ? "" : undefined}
-                  className="sticky left-0 z-10 cursor-default select-none border-b border-r border-border-default text-center"
-                >
-                  {r + 1}
-                </th>
+                {showHeaders && (
+                  <th
+                    scope="row"
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      gridRef.current?.focus({ preventScroll: true });
+                      setAnchor({ row: e.shiftKey ? anchor.row : r, col: bounds.c1 });
+                      setFocus({ row: r, col: bounds.c2 });
+                    }}
+                    data-active={r >= range.r1 && r <= range.r2 ? "" : undefined}
+                    className="sticky left-0 z-10 cursor-default select-none border-b border-r border-border-default text-center"
+                  >
+                    {r + 1}
+                  </th>
+                )}
                 {cols.map((c) => {
                   const inRange = r >= range.r1 && r <= range.r2 && c >= range.c1 && c <= range.c2;
                   const isFocus = r === focus.row && c === focus.col;
@@ -707,6 +823,9 @@ export default function SpreadsheetView({
                   const style = current.styles?.[cellAddress(r, c)];
                   const kind = evaluator.kind(sheetIndex, r, c);
                   const shown = evaluator.display(sheetIndex, r, c);
+                  // The display area's outline, in full view, and the cells the formula being typed refers to.
+                  const displayEdges = !compact && displayArea ? outlineEdges(displayArea, r, c) : "";
+                  const refEdges = refRanges.map((ref) => outlineEdges(ref, r, c)).filter(Boolean);
                   const textAlign = style?.align ?? (kind === "number" ? "right" : kind === "error" ? "center" : "left");
                   return (
                     <td
@@ -714,13 +833,17 @@ export default function SpreadsheetView({
                       onMouseDown={(e) => {
                         if (editing) return;
                         e.preventDefault();
+                        // While a formula's edited, the click may write a reference into it, the edit going on.
+                        if (canEdit && !e.shiftKey && pickReference({ row: r, col: c })) return;
                         // An edit elsewhere is finished by its input's blur.
                         gridRef.current?.focus({ preventScroll: true });
                         draggingRef.current = true;
                         select({ row: r, col: c }, e.shiftKey);
                       }}
                       onMouseEnter={(e) => {
-                        if (draggingRef.current && e.buttons === 1) setFocus({ row: r, col: c });
+                        if (e.buttons !== 1) return;
+                        if (pickRef.current?.dragging) dragPick({ row: r, col: c });
+                        else if (draggingRef.current) setFocus({ row: r, col: c });
                       }}
                       onDoubleClick={() => {
                         if (compact) onExpand?.({ row: r, col: c });
@@ -741,10 +864,12 @@ export default function SpreadsheetView({
                     >
                       {editing ? (
                         <input
+                          ref={cellInputRef}
                           autoFocus
                           aria-label={`Cell ${cellAddress(r, c)}`}
                           value={edit.text}
-                          onChange={(e) => setEdit({ ...edit, text: e.target.value })}
+                          onChange={(e) => typeEdit(e.target.value, e.target.selectionStart)}
+                          onSelect={(e) => setCaret(e.currentTarget.selectionStart ?? 0)}
                           onBlur={() => finishEdit()}
                           onKeyDown={onEditKeyDown}
                           className="absolute inset-0 z-10 h-full w-full border-2 border-accent bg-background px-1 text-[13px] text-text-primary outline-none"
@@ -754,16 +879,19 @@ export default function SpreadsheetView({
                         shown
                       )}
                       {isFocus && !editing && <span aria-hidden className="pointer-events-none absolute inset-0 border-2 border-accent" />}
+                      {displayEdges && <span aria-hidden className={`pointer-events-none absolute inset-0 border-dashed border-text-muted ${displayEdges}`} />}
+                      {refEdges.map((edges, i) => (
+                        <span key={i} aria-hidden className={`pointer-events-none absolute inset-0 z-[5] border-dashed border-accent-soft ${edges}`} />
+                      ))}
                     </td>
                   );
                 })}
               </tr>
             ))}
-            {lastRow < rowCount - 1 && <tr aria-hidden style={{ height: (rowCount - 1 - lastRow) * ROW_H }} />}
+            {lastRow < bounds.r2 && <tr aria-hidden style={{ height: (bounds.r2 - lastRow) * ROW_H }} />}
           </tbody>
         </table>
       </div>
-      {sheetTabs}
     </div>
   );
 }

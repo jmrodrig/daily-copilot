@@ -8,7 +8,8 @@
  *    "styles":{"A1":{"bold":true}}}]}
  *
  * Every cell is text, as typed: a number is its digits, and a formula starts with `=` (`=SUM(B2:B9)`, `=B2*C2`,
- * `=Costs!D4`). Formulas are worked out when the sheet is shown (`createEvaluator`), never saved.
+ * `=Costs!D4`). Formulas are worked out when the sheet is shown (`createEvaluator`), never saved. A sheet's
+ * `displayArea` (`A1:D8`) is the cells its note shows, like Excel's print area.
  *
  * Formulas know `+ - * / ^`, parentheses, cells (`B2`, `$B$2`), ranges (`B2:B9`), other sheets (`Costs!B2`,
  * `'Hull data'!A1:A5`), and SUM, AVERAGE, COUNT, MIN, MAX, ROUND, ABS. Anything else shows an Excel-style error
@@ -35,12 +36,17 @@ export type SpreadsheetSheet = {
   rows: string[][];
   /** By cell address (`B2`). */
   styles?: Record<string, SpreadsheetStyle>;
+  /** The cells the note shows (`A1:D8`), like Excel's print area; without it, the note shows the cells in use. */
+  displayArea?: string;
 };
 
 export type SpreadsheetData = { activeSheet: string; sheets: SpreadsheetSheet[]; title?: string };
 
 /** A cell's place: 0-based row and column. */
 export type CellPos = { row: number; col: number };
+
+/** A block of cells, 0-based and inclusive: rows `r1`–`r2`, columns `c1`–`c2`. */
+export type CellRange = { r1: number; c1: number; r2: number; c2: number };
 
 /** The size a new sheet starts at. */
 export const NEW_SHEET_ROWS = 5;
@@ -80,6 +86,23 @@ export function parseCellAddress(addr: string): CellPos | null {
   return row >= 1 ? { row: row - 1, col: col - 1 } : null;
 }
 
+/** The cells a range's address names (`B2:D8`, either corner first, or a single cell `B2`), or null. */
+export function parseRangeAddress(range: string): CellRange | null {
+  const [from, to, ...rest] = range.split(":");
+  if (rest.length) return null;
+  const a = parseCellAddress(from);
+  const b = to === undefined ? a : parseCellAddress(to);
+  if (!a || !b) return null;
+  return { r1: Math.min(a.row, b.row), c1: Math.min(a.col, b.col), r2: Math.max(a.row, b.row), c2: Math.max(a.col, b.col) };
+}
+
+/** A range's address: (0, 0, 7, 3) → A1:D8, and a single cell's just its own (A1). */
+export function formatRangeAddress(r1: number, c1: number, r2: number, c2: number): string {
+  const from = cellAddress(Math.min(r1, r2), Math.min(c1, c2));
+  const to = cellAddress(Math.max(r1, r2), Math.max(c1, c2));
+  return from === to ? from : `${from}:${to}`;
+}
+
 // --- Data -----------------------------------------------------------------------
 
 export function emptyRows(rows = NEW_SHEET_ROWS, cols = NEW_SHEET_COLS): string[][] {
@@ -104,7 +127,13 @@ export function parseSpreadsheet(json: string): SpreadsheetData {
       : [];
     const name = typeof sheet.name === "string" && sheet.name.trim() ? sheet.name : `Sheet${sheets.length + 1}`;
     const styles = sheet.styles && typeof sheet.styles === "object" ? (sheet.styles as Record<string, SpreadsheetStyle>) : undefined;
-    sheets.push({ name: uniqueSheetName(sheets, name), rows: rows.length ? rows : emptyRows(), ...(styles ? { styles } : {}) });
+    const displayArea = typeof sheet.displayArea === "string" && parseRangeAddress(sheet.displayArea) ? sheet.displayArea : undefined;
+    sheets.push({
+      name: uniqueSheetName(sheets, name),
+      rows: rows.length ? rows : emptyRows(),
+      ...(styles ? { styles } : {}),
+      ...(displayArea ? { displayArea } : {}),
+    });
   }
   if (!sheets.length) sheets.push({ name: "Sheet1", rows: emptyRows() });
   const active = typeof obj.activeSheet === "string" && sheets.some((s) => s.name === obj.activeSheet) ? obj.activeSheet : sheets[0].name;
@@ -127,6 +156,26 @@ export function uniqueSheetName(sheets: SpreadsheetSheet[], name: string): strin
 /** The sheet's width: its widest row. */
 export function sheetCols(sheet: SpreadsheetSheet): number {
   return sheet.rows.reduce((w, row) => Math.max(w, row.length), 0);
+}
+
+/**
+ * The cells the note shows of `sheet`: its display area if it has one, else from A1 to its last row and column
+ * with anything in them (all of it, if it's empty).
+ */
+export function getEffectiveDisplayRange(sheet: SpreadsheetSheet): CellRange {
+  const area = sheet.displayArea ? parseRangeAddress(sheet.displayArea) : null;
+  if (area) return area;
+  let r2 = -1;
+  let c2 = -1;
+  sheet.rows.forEach((row, r) =>
+    row.forEach((text, c) => {
+      if (!text.trim()) return;
+      r2 = Math.max(r2, r);
+      c2 = Math.max(c2, c);
+    }),
+  );
+  if (r2 < 0) return { r1: 0, c1: 0, r2: Math.max(sheet.rows.length - 1, 0), c2: Math.max(sheetCols(sheet) - 1, 0) };
+  return { r1: 0, c1: 0, r2, c2 };
 }
 
 export function cellText(sheet: SpreadsheetSheet, row: number, col: number): string {
@@ -282,6 +331,18 @@ function tokenize(src: string): Token[] {
   return tokens;
 }
 
+/** The cells a formula (with its `=`) refers to, each as the sheet named (null for its own) and the cells. */
+export function formulaReferences(formula: string): { sheet: string | null; range: CellRange }[] {
+  if (!formula.startsWith("=")) return [];
+  const refs: { sheet: string | null; range: CellRange }[] = [];
+  for (const token of tokenize(formula.slice(1))) {
+    if (token.kind !== "ref") continue;
+    const range = parseRangeAddress(token.to ? `${token.from}:${token.to}` : token.from);
+    if (range) refs.push({ sheet: token.sheet, range });
+  }
+  return refs;
+}
+
 /** A sheet name as a formula writes it: quoted unless it's a plain word. */
 export function quoteSheetName(name: string): string {
   return /^[A-Za-z_][\w.]*$/.test(name) && !parseCellAddress(name) ? name : `'${name.replace(/'/g, "''")}'`;
@@ -382,6 +443,44 @@ export function formatValue(value: Value): string {
     return String(Number(value.toPrecision(12)));
   }
   return value;
+}
+
+export type FormulaFunctionInfo = {
+  name: string;
+  syntax: string;
+  description: string;
+};
+
+/** The functions formulas know, as the formula autocomplete offers them. */
+export const FORMULA_FUNCTIONS: FormulaFunctionInfo[] = [
+  { name: "SUM", syntax: "SUM(number1, [number2], ...)", description: "Adds all numbers in a range." },
+  { name: "AVERAGE", syntax: "AVERAGE(number1, [number2], ...)", description: "Calculates the arithmetic mean of numbers in a range." },
+  { name: "COUNT", syntax: "COUNT(value1, [value2], ...)", description: "Counts cells that contain numbers." },
+  { name: "MIN", syntax: "MIN(number1, [number2], ...)", description: "Returns the smallest number in a range." },
+  { name: "MAX", syntax: "MAX(number1, [number2], ...)", description: "Returns the largest number in a range." },
+  { name: "ROUND", syntax: "ROUND(number, num_digits)", description: "Rounds a number to a specified number of digits." },
+  { name: "ABS", syntax: "ABS(number)", description: "Returns the absolute value of a number." },
+];
+
+/**
+ * The function name being typed at `caret` in a formula (`=SU|`, `=B2+av|`): where it starts, and the functions it
+ * could be. None if the text there isn't a formula's function name.
+ */
+export function functionSuggestions(text: string, caret: number): { start: number; matches: FormulaFunctionInfo[] } | null {
+  if (!text.startsWith("=")) return null;
+  const before = text.slice(0, caret);
+  const match = /[A-Za-z]+$/.exec(before);
+  if (!match || !/[=(,+\-*/^&<> ]/.test(before[match.index - 1] ?? "")) return null;
+  // Not if it's the start of a word that goes on past the caret (`=SU|M`).
+  if (/^[\w(]/.test(text.slice(caret))) return null;
+  const prefix = match[0].toUpperCase();
+  const matches = FORMULA_FUNCTIONS.filter((f) => f.name.startsWith(prefix));
+  return matches.length ? { start: match.index, matches } : null;
+}
+
+/** Whether a formula's caret is where a cell reference goes next: after `=`, `(`, `,` or an operator. */
+export function awaitsReference(text: string, caret: number): boolean {
+  return text.startsWith("=") && /[=(,+\-*/^&<>:]\s*$/.test(text.slice(0, caret));
 }
 
 type Evaluator = {

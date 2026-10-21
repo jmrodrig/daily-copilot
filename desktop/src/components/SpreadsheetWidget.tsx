@@ -4,7 +4,7 @@ import { createPortal } from "react-dom";
 
 import { Segment, ToolIcon } from "./markupUi";
 import { SpreadsheetBlock } from "./noteFormatting";
-import { parseSpreadsheet, type CellPos } from "./spreadsheet";
+import { type CellPos } from "./spreadsheet";
 import SpreadsheetView from "./SpreadsheetView";
 import { COLLAPSE_ICON, EXPAND_ICON } from "./WhiteboardWidget";
 
@@ -21,9 +21,10 @@ export function SpreadsheetIcon({ size = 16 }: { size?: number }) {
 }
 
 /**
- * A spreadsheet embedded in a note: a compact preview of its grid in the text column, which opens in full view (and
- * back, with Escape or the same button) to be edited, with its toolbar and formula bar. While it's in full view, its
- * place in the note says so, so only one copy is ever edited. The sheet shown is shared by both.
+ * A spreadsheet embedded in a note: a compact preview of its grid in the text column, just the size of its cells (its
+ * display area), with buttons to open it in full view (and back, with Escape or the same button) to be edited, with
+ * its toolbar and formula bar, showing on hover. While it's in full view, its place in the note says so, so only one
+ * copy is ever edited.
  */
 export function SpreadsheetFrame({
   value,
@@ -41,7 +42,6 @@ export function SpreadsheetFrame({
   selected?: boolean;
 }) {
   const [fullscreen, setFullscreen] = useState(false);
-  const [sheet, setSheet] = useState(() => parseSpreadsheet(value).activeSheet);
   const [startCell, setStartCell] = useState<CellPos | undefined>(undefined);
 
   const open = (cell?: CellPos) => {
@@ -69,28 +69,28 @@ export function SpreadsheetFrame({
   return (
     <div
       data-spreadsheet-frame
-      className={`spreadsheet-frame relative my-4 h-[300px] overflow-hidden rounded-lg border print:hidden ${
+      className={`spreadsheet-frame group relative my-4 w-fit max-w-full overflow-hidden rounded-lg border print:hidden ${
         selected ? "border-accent" : "border-border-default"
       }`}
     >
       {fullscreen ? (
-        <div className="flex h-full flex-col items-center justify-center gap-3 bg-surface-raised text-[15px] text-text-muted">
+        <div className="flex flex-col items-center justify-center gap-3 bg-surface-raised px-8 py-6 text-[15px] text-text-muted">
           The spreadsheet is open in full view.
           <button type="button" className="btn" onClick={() => setFullscreen(false)}>
             Back to the note
           </button>
         </div>
       ) : (
-        <SpreadsheetView
-          value={value}
-          editable={false}
-          compact
-          sheet={sheet}
-          onSheetChange={setSheet}
-          onExpand={open}
-          toolbarEnd={controls(false)}
-          className="h-full w-full"
-        />
+        <>
+          <SpreadsheetView value={value} editable={editable} compact onExpand={open} className="max-w-full" />
+          <div
+            className={`absolute right-1 top-1 z-40 flex items-center rounded-md border border-border-default bg-surface-raised shadow-sm transition-opacity group-hover:opacity-100 focus-within:opacity-100 ${
+              selected ? "opacity-100" : "opacity-0"
+            }`}
+          >
+            {controls(false)}
+          </div>
+        </>
       )}
       {fullscreen &&
         createPortal(
@@ -99,8 +99,6 @@ export function SpreadsheetFrame({
               value={value}
               onChange={onChange}
               editable={editable}
-              sheet={sheet}
-              onSheetChange={setSheet}
               initialCell={startCell}
               autoFocus
               onEscape={() => setFullscreen(false)}
