@@ -10,6 +10,7 @@ import {
   cellText,
   colLetter,
   createEvaluator,
+  emptyRows,
   exportWorkbook,
   formatRangeAddress,
   formulaReferences,
@@ -18,11 +19,13 @@ import {
   parseRangeAddress,
   parseSpreadsheet,
   parseWorkbookBuffer,
+  renameSheet,
   restyle,
   serializeSpreadsheet,
   setCell,
   sheetCols,
   shiftCells,
+  uniqueSheetName,
   type CellPos,
   type CellRange,
   type SpreadsheetData,
@@ -79,26 +82,39 @@ function outlineEdges(range: Range, r: number, c: number): string {
 }
 
 /**
- * A spreadsheet (see spreadsheet.ts): its grid of cells, with formulas worked out. It shows one sheet, the saved
- * active one (a workbook imported with more keeps them, for the formulas that refer to them).
+ * A spreadsheet (see spreadsheet.ts): its grid of cells, with formulas worked out.
  *
- * In full (`compact` false) and `editable`, it has a toolbar (title, import and export, bold, italic and alignment,
- * rows and columns, the display area), a formula bar, and a grid, running on past the screen's edge, to type in:
- * arrows, Tab and Enter move, typing or Enter or F2 (or a double click) edits the cell, Escape cancels; Delete clears
- * the selection, Ctrl+B/I format it, Ctrl+C/X/V copy it as tab-separated text, Ctrl+Z/Y undo and redo. Typing a
- * formula offers its functions (arrows choose, Tab or Enter take one, Escape closes them), and where a cell reference
- * goes next, clicking a cell writes its address in, and dragging a range's. Each finished edit goes out through
- * `onChange`, as the whole spreadsheet's JSON.
+ * In full (`compact` false) it shows one sheet at a time, with the sheets' tabs at the bottom: click one to switch to
+ * it, and while `editable`, double-click to rename it, × to delete it, + to add one. Without a `sheet` given, the
+ * sheet switched to is saved as the active one, which the note shows. `editable`, it has a toolbar (title, import and
+ * export, bold, italic and alignment, rows and columns, the display area, and opening it in its program with
+ * `onOpenNative`), a formula bar, and a grid, running on past the screen's edge, to type in: arrows, Tab and Enter
+ * move, typing or Enter or F2 (or a double click) edits the cell, Escape cancels; Delete clears the selection,
+ * Ctrl+B/I format it, Ctrl+C/X/V copy it as tab-separated text, Ctrl+Z/Y undo and redo. Typing a formula offers its
+ * functions (arrows choose, Tab or Enter take one, Escape closes them), and where a cell reference goes next, clicking
+ * a cell writes its address in, and dragging a range's. Each finished edit goes out through `onChange`, as the whole
+ * spreadsheet's JSON.
  *
- * `compact` is the note's preview: the grid of the sheet's display area (or its cells in use), which only shows the
- * cells, with their column letters and row numbers if `editable`; a double click asks to open it in full
- * (`onExpand`) at that cell.
+ * The display area (the cells a note shows) is the sheet's own `displayArea`, saved with it, unless `displayArea` is
+ * given (a window onto a workbook file keeps its own, see SpreadsheetWidget): then "Set display area" hands the
+ * selection to `onSetDisplayArea`, as the main action when `selectingArea`.
+ *
+ * `compact` is the note's view: the grid of the display area (or the cells in use) of `sheet` (else the active one),
+ * which only shows the cells, with their column letters and row numbers if `editable`. With `inlineEdit` its cells
+ * are typed in right there, as in full; otherwise a double click asks to open it in full (`onExpand`) at that cell.
  */
 export default function SpreadsheetView({
   value,
   onChange,
   editable,
   compact = false,
+  sheet,
+  displayArea: windowArea,
+  onSetDisplayArea,
+  selectingArea = false,
+  inlineEdit = false,
+  fileName,
+  onOpenNative,
   initialCell,
   autoFocus = false,
   onEscape,
@@ -111,6 +127,16 @@ export default function SpreadsheetView({
   onChange?: (json: string) => void;
   editable: boolean;
   compact?: boolean;
+  /** The sheet shown (at first, in full), by name. */
+  sheet?: string;
+  /** A display area kept outside the spreadsheet: `area` of sheet `sheet`. */
+  displayArea?: { sheet: string; area?: string };
+  onSetDisplayArea?: (sheet: string, area: string | undefined) => void;
+  selectingArea?: boolean;
+  inlineEdit?: boolean;
+  /** The workbook file's name, shown as the title (which then can't be changed). */
+  fileName?: string;
+  onOpenNative?: () => void;
   initialCell?: CellPos;
   autoFocus?: boolean;
   onEscape?: () => void;
@@ -121,20 +147,28 @@ export default function SpreadsheetView({
 }) {
   const data = useMemo(() => parseSpreadsheet(value), [value]);
   const evaluator = useMemo(() => createEvaluator(data), [data]);
-  const canEdit = editable && !compact && !!onChange;
+  const canEdit = editable && !!onChange && (!compact || inlineEdit);
 
-  const sheetIndex = Math.max(data.sheets.findIndex((s) => s.name === data.activeSheet), 0);
+  // The sheet shown in full: switched with its tabs.
+  const [shownSheet, setShownSheet] = useState(sheet ?? data.activeSheet);
+  useEffect(() => {
+    if (sheet !== undefined) setShownSheet(sheet);
+  }, [sheet]);
+  const wanted = compact ? (sheet ?? data.activeSheet) : shownSheet;
+  const named = data.sheets.findIndex((s) => s.name === wanted);
+  const sheetIndex = named >= 0 ? named : Math.max(data.sheets.findIndex((s) => s.name === data.activeSheet), 0);
   const current = data.sheets[sheetIndex];
   const usedRows = current.rows.length;
   const usedCols = Math.max(sheetCols(current), 1);
   const screenCols = Math.ceil((typeof window !== "undefined" ? window.innerWidth : 1920) / COL_W) + OFFSCREEN_COLS;
   const rowCount = canEdit ? Math.max(usedRows + SPARE_ROWS, MIN_ROWS) : usedRows;
   const colCount = canEdit ? Math.max(usedCols + SPARE_COLS, MIN_COLS, screenCols) : usedCols;
-  const displayArea = current.displayArea ? parseRangeAddress(current.displayArea) : null;
+  const areaText = windowArea ? (windowArea.sheet === current.name ? windowArea.area : undefined) : current.displayArea;
+  const displayArea = areaText ? parseRangeAddress(areaText) : null;
   // The cells drawn: in the note, its display area (cut to what a note could hold); in full, all of them.
   const bounds: Range = (() => {
     if (!compact) return { r1: 0, c1: 0, r2: rowCount - 1, c2: colCount - 1 };
-    const area = getEffectiveDisplayRange(current);
+    const area = displayArea ?? getEffectiveDisplayRange({ ...current, displayArea: undefined });
     return { ...area, r2: Math.min(area.r2, area.r1 + IMPORT_MAX_ROWS - 1), c2: Math.min(area.c2, area.c1 + IMPORT_MAX_COLS - 1) };
   })();
   // A published note's spreadsheet is just its cells: no column letters or row numbers.
@@ -157,6 +191,7 @@ export default function SpreadsheetView({
   // The caret to put in the edit's input once it's drawn, after its text was changed for it.
   const pendingCaret = useRef<number | null>(null);
   const [titleDraft, setTitleDraft] = useState<string | null>(null);
+  const [renaming, setRenaming] = useState<{ index: number; text: string } | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [scroll, setScroll] = useState({ top: 0, height: 400 });
   const range = rangeOf(anchor, focus);
@@ -443,7 +478,49 @@ export default function SpreadsheetView({
 
   /** The note shows only `area` of the sheet (an address, `A1:D8`), or, without one, its cells in use. */
   function setDisplayArea(area?: string) {
-    commit(withSheet(({ displayArea: _old, ...s }) => (area ? { ...s, displayArea: area } : s)));
+    if (onSetDisplayArea) onSetDisplayArea(sheetName, area);
+    else commit(withSheet(({ displayArea: _old, ...s }) => (area ? { ...s, displayArea: area } : s)));
+  }
+
+  // --- Sheets -------------------------------------------------------------------
+
+  /** Show sheet `name`; without a `sheet` given, it's saved as the active one, the one the note shows. */
+  function switchSheet(name: string) {
+    if (name === sheetName) return;
+    setShownSheet(name);
+    if (sheet === undefined && onChange && editable) onChange(serializeSpreadsheet({ ...data, activeSheet: name }));
+  }
+
+  function addSheet() {
+    const name = uniqueSheetName(data.sheets, `Sheet${data.sheets.length + 1}`);
+    commit({ ...data, activeSheet: name, sheets: [...data.sheets, { name, rows: emptyRows() }] });
+    setShownSheet(name);
+  }
+
+  function finishRename(cancel = false) {
+    if (!renaming) return;
+    const name = renaming.text.trim();
+    const old = data.sheets[renaming.index]?.name;
+    setRenaming(null);
+    if (cancel || !name || name === old) return;
+    if (data.sheets.some((s, i) => i !== renaming.index && s.name.toLowerCase() === name.toLowerCase())) {
+      setNotice(`There's a sheet named "${name}" already.`);
+      return;
+    }
+    commit(renameSheet({ ...data, activeSheet: sheetName }, renaming.index, name));
+    if (old === sheetName) setShownSheet(name);
+    // A window onto this sheet follows it to its new name.
+    if (windowArea && old === windowArea.sheet) onSetDisplayArea?.(name, windowArea.area);
+  }
+
+  function deleteSheet(index: number) {
+    if (data.sheets.length < 2) return;
+    const name = data.sheets[index].name;
+    if (!window.confirm(`Delete sheet "${name}" and everything in it?`)) return;
+    const sheets = data.sheets.filter((_, i) => i !== index);
+    const next = sheets[Math.min(index, sheets.length - 1)].name;
+    commit({ ...data, activeSheet: next, sheets });
+    setShownSheet(next);
   }
 
   // --- Import and export ----------------------------------------------------------
@@ -453,6 +530,7 @@ export default function SpreadsheetView({
     try {
       const { data: imported, truncated } = await parseWorkbookBuffer(await file.arrayBuffer(), file.name.replace(/\.[^.]+$/, ""));
       commit(imported);
+      setShownSheet(imported.activeSheet);
       if (truncated) setNotice(`${file.name} was bigger than a note can hold: only its first rows and columns were imported.`);
     } catch (err) {
       setNotice(`Could not import ${file.name} (${err instanceof Error ? err.message : String(err)}).`);
@@ -461,7 +539,7 @@ export default function SpreadsheetView({
 
   async function exportAs(format: "xlsx" | "csv") {
     try {
-      await exportWorkbook(data, undefined, format);
+      await exportWorkbook({ ...data, activeSheet: sheetName, ...(fileName ? { title: fileName.replace(/\.[^.]+$/, "") } : {}) }, undefined, format);
     } catch (err) {
       setNotice(`Could not export the spreadsheet (${err instanceof Error ? err.message : String(err)}).`);
     }
@@ -481,7 +559,7 @@ export default function SpreadsheetView({
       select({ row: focus.row + (mod ? (dr ? jump : 0) : dr), col: focus.col + (mod ? (dc ? jump : 0) : dc) }, event.shiftKey);
     } else if (key === "Tab") {
       select({ row: focus.row, col: focus.col + (event.shiftKey ? -1 : 1) });
-    } else if (key === "Enter" && compact) {
+    } else if (key === "Enter" && compact && !canEdit) {
       onExpand?.(focus);
     } else if (key === "Enter" && !canEdit) {
       select({ row: focus.row + (event.shiftKey ? -1 : 1), col: focus.col });
@@ -564,14 +642,17 @@ export default function SpreadsheetView({
         .filter((ref) => ref.sheet === null || ref.sheet.toLowerCase() === sheetName.toLowerCase())
         .map((ref) => ref.range)
     : [];
-  const title = data.title || "Spreadsheet";
+  const title = fileName || data.title || "Spreadsheet";
+  // A workbook file has no display area of its own: only a window onto it (`onSetDisplayArea`) does.
+  const areaTools = !fileName || !!onSetDisplayArea;
+  const selection = formatRangeAddress(range.r1, range.c1, range.r2, range.c2);
 
   return (
     <div className={`flex min-h-0 flex-col bg-background ${className}`} onKeyDown={onRootKeyDown}>
       {!compact && (
         <>
           <div role="toolbar" aria-label="Spreadsheet tools" className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-border-default px-3 py-1.5">
-            {canEdit ? (
+            {canEdit && !fileName ? (
               <input
                 aria-label="Spreadsheet title"
                 value={titleDraft ?? data.title ?? ""}
@@ -599,7 +680,7 @@ export default function SpreadsheetView({
               <span className="px-2 text-[15px] font-medium text-text-primary">{title}</span>
             )}
             <ToolbarDivider />
-            {canEdit && (
+            {canEdit && !fileName && (
               <>
                 <Segment on={false} label="Import a workbook (.xlsx, .csv, …), replacing this spreadsheet" onClick={() => fileInputRef.current?.click()}>
                   <span className="text-[14px]">Import</span>
@@ -623,6 +704,11 @@ export default function SpreadsheetView({
             <Segment on={false} label="Export this sheet as .csv" onClick={() => void exportAs("csv")}>
               <span className="text-[14px]">.csv</span>
             </Segment>
+            {onOpenNative && (
+              <Segment on={false} label="Open in its program on this machine (Excel, …)" onClick={onOpenNative}>
+                <span className="text-[14px]">Open in Excel</span>
+              </Segment>
+            )}
             {canEdit && (
               <>
                 <ToolbarDivider />
@@ -650,27 +736,42 @@ export default function SpreadsheetView({
                 <Segment on={false} label="Delete the selected columns" onClick={() => remove("col")}>
                   <span className="text-[14px]">− Column</span>
                 </Segment>
-                <ToolbarDivider />
-                <Segment
-                  on={false}
-                  label="Set the display area: the note shows only the selected cells"
-                  onClick={() => setDisplayArea(formatRangeAddress(range.r1, range.c1, range.r2, range.c2))}
-                >
-                  <span className="text-[14px]">Set display area</span>
-                </Segment>
-                {current.displayArea && (
-                  <span className="flex h-7 items-center gap-1 rounded bg-accent/[0.12] pl-2 pr-0.5 font-mono text-[13px] text-accent-soft">
-                    Display: {current.displayArea}
-                    <button
-                      type="button"
-                      title="Clear the display area: the note shows all the cells in use"
-                      aria-label="Clear the display area"
-                      onClick={() => setDisplayArea()}
-                      className="flex h-6 w-6 items-center justify-center rounded text-text-muted hover:bg-surface-hover hover:text-text-primary"
-                    >
-                      ✕
-                    </button>
-                  </span>
+                {areaTools && (
+                  <>
+                    <ToolbarDivider />
+                    {selectingArea ? (
+                      <button
+                        type="button"
+                        title="Show the selected cells in the note"
+                        onClick={() => setDisplayArea(selection)}
+                        className="btn-primary min-h-0 px-3 py-1 text-[14px]"
+                      >
+                        Set note display area ({selection})
+                      </button>
+                    ) : (
+                      <Segment
+                        on={false}
+                        label="Set the display area: the note shows only the selected cells"
+                        onClick={() => setDisplayArea(selection)}
+                      >
+                        <span className="text-[14px]">Set display area</span>
+                      </Segment>
+                    )}
+                    {areaText && (
+                      <span className="flex h-7 items-center gap-1 rounded bg-accent/[0.12] pl-2 pr-0.5 font-mono text-[13px] text-accent-soft">
+                        Display: {areaText}
+                        <button
+                          type="button"
+                          title="Clear the display area: the note shows all the cells in use"
+                          aria-label="Clear the display area"
+                          onClick={() => setDisplayArea()}
+                          className="flex h-6 w-6 items-center justify-center rounded text-text-muted hover:bg-surface-hover hover:text-text-primary"
+                        >
+                          ✕
+                        </button>
+                      </span>
+                    )}
+                  </>
                 )}
               </>
             )}
@@ -846,7 +947,7 @@ export default function SpreadsheetView({
                         else if (draggingRef.current) setFocus({ row: r, col: c });
                       }}
                       onDoubleClick={() => {
-                        if (compact) onExpand?.({ row: r, col: c });
+                        if (compact && !canEdit) onExpand?.({ row: r, col: c });
                         else startEdit();
                       }}
                       title={shown.length > 14 ? shown : undefined}
@@ -892,6 +993,66 @@ export default function SpreadsheetView({
           </tbody>
         </table>
       </div>
+      {!compact && (
+        <div role="tablist" aria-label="Sheets" className="flex shrink-0 items-center gap-0.5 overflow-x-auto border-t border-border-default bg-surface-raised/60 px-1.5 py-1">
+          {data.sheets.map((s, i) =>
+            renaming?.index === i ? (
+              <input
+                key={s.name}
+                autoFocus
+                aria-label="Sheet name"
+                value={renaming.text}
+                onChange={(e) => setRenaming({ index: i, text: e.target.value })}
+                onBlur={() => finishRename()}
+                onKeyDown={(e) => {
+                  e.stopPropagation();
+                  if (e.key === "Enter") finishRename();
+                  if (e.key === "Escape") finishRename(true);
+                }}
+                className="h-7 w-28 rounded border border-accent bg-background px-2 text-[13px] text-text-primary outline-none"
+              />
+            ) : (
+              <span key={s.name} className="flex items-center">
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={i === sheetIndex}
+                  title={canEdit ? `${s.name} (double-click to rename)` : s.name}
+                  onClick={() => switchSheet(s.name)}
+                  onDoubleClick={() => canEdit && setRenaming({ index: i, text: s.name })}
+                  className={`h-7 max-w-[12rem] truncate rounded px-2.5 text-[13px] ${
+                    i === sheetIndex ? "bg-accent/[0.16] font-medium text-accent-soft" : "text-text-secondary hover:bg-surface-hover hover:text-text-primary"
+                  }`}
+                >
+                  {s.name}
+                </button>
+                {canEdit && i === sheetIndex && data.sheets.length > 1 && (
+                  <button
+                    type="button"
+                    title={`Delete sheet ${s.name}`}
+                    aria-label={`Delete sheet ${s.name}`}
+                    onClick={() => deleteSheet(i)}
+                    className="ml-0.5 flex h-6 w-6 items-center justify-center rounded text-text-muted hover:bg-surface-hover hover:text-text-primary"
+                  >
+                    ×
+                  </button>
+                )}
+              </span>
+            ),
+          )}
+          {canEdit && (
+            <button
+              type="button"
+              title="Add a sheet"
+              aria-label="Add a sheet"
+              onClick={addSheet}
+              className="ml-1 flex h-7 w-7 items-center justify-center rounded text-[16px] text-text-secondary hover:bg-surface-hover hover:text-text-primary"
+            >
+              +
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }

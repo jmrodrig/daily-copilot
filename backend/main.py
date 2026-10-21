@@ -1,6 +1,7 @@
 """FastAPI entry point. Run with `uvicorn main:app --reload` from backend/."""
 
 import html
+import io
 import json
 import os
 import re
@@ -53,7 +54,11 @@ from schemas import (
     GanttResponse,
     GanttTask,
     FolderCreate,
+    AssetOpened,
+    AssetWritten,
     ImageUpload,
+    NewSpreadsheet,
+    NewSpreadsheetRequest,
     LocalFileCheck,
     LocalFileStat,
     LocalPathRequest,
@@ -1078,6 +1083,18 @@ MAX_ASSET_BYTES = 50 * 1024 * 1024
 # Assets shown in the app rather than downloaded. Anything else (an HTML or SVG file, say) could run script on the
 # app's origin if opened in place.
 _INLINE_ASSET_SUFFIXES = {*file_layer.IMAGE_SUFFIXES.values(), ".pdf"}
+# Assets edited in the app (spreadsheets, saved back with PUT): fetched afresh each time, never cached for good.
+_EDITABLE_ASSET_SUFFIXES = {".xlsx", ".xlsm", ".xls", ".ods", ".csv", ".tsv"}
+
+
+def _asset_or_error(name: str, root: Path) -> Path:
+    """A stored asset's file, or the HTTP error for a malformed or missing name."""
+    try:
+        return file_layer.asset_path(name, notes_dir=root)
+    except file_layer.NotePathError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"No file {name}") from exc
 
 
 # Named for images, which came first; it stores any file attached to a note, so links in saved notes keep working.
@@ -1096,19 +1113,66 @@ async def upload_image(
 
 @app.get("/api/notes/image/{name}")
 def get_image(name: str, root: Path = Depends(space_content)) -> FileResponse:
-    """A stored image or file; its name is random and never reused, so it can be cached for good."""
-    try:
-        path = file_layer.asset_path(name, notes_dir=root)
-    except file_layer.NotePathError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=f"No file {name}") from exc
+    """A stored image or file; its name is random and never reused, so it can be cached for good, unless it's a
+    spreadsheet, which the app edits in place."""
+    path = _asset_or_error(name, root)
+    editable = path.suffix.lower() in _EDITABLE_ASSET_SUFFIXES
     headers = {
-        "Cache-Control": "public, max-age=31536000, immutable",
+        "Cache-Control": "no-cache" if editable else "public, max-age=31536000, immutable",
         "Content-Disposition": "inline" if path.suffix in _INLINE_ASSET_SUFFIXES else "attachment",
         "X-Content-Type-Options": "nosniff",
     }
     return FileResponse(path, headers=headers)
+
+
+@app.put("/api/notes/image/{name}")
+async def put_image(name: str, http: Request, root: Path = Depends(space_content)) -> AssetWritten:
+    """Replace a stored spreadsheet with the bytes of the request's body: the workbook as edited in the app. Other
+    assets stay as they were uploaded."""
+    path = _asset_or_error(name, root)
+    if path.suffix.lower() not in _EDITABLE_ASSET_SUFFIXES:
+        raise HTTPException(status_code=400, detail=f"{name} is not a spreadsheet: only spreadsheets can be replaced")
+    data = await http.body()
+    if len(data) > MAX_ASSET_BYTES:
+        raise HTTPException(status_code=413, detail=f"Files are limited to {MAX_ASSET_BYTES // (1024 * 1024)} MB")
+    if not data:
+        raise HTTPException(status_code=400, detail="The file is empty")
+    try:
+        file_layer.write_asset(name, data, notes_dir=root)
+    except PermissionError as exc:
+        # Excel holds a workbook it has open locked.
+        raise HTTPException(status_code=409, detail=f"{name} is open in another program; close it and try again") from exc
+    return AssetWritten(name=name, size=len(data))
+
+
+@app.post("/api/notes/image/{name}/open")
+def open_image(name: str, http: Request, root: Path = Depends(space_content)) -> AssetOpened:
+    """Open a stored file with its default program (a workbook in Excel, say); only for a client on this machine."""
+    if http.client is None or not local_files.is_local_host(http.client.host):
+        raise HTTPException(status_code=403, detail="Files can only be opened on the machine running Co-Pilot")
+    path = _asset_or_error(name, root)
+    try:
+        local_files.open_path(str(path))
+    except (local_files.LocalFileError, OSError) as exc:
+        raise _local_file_errors(exc) from exc
+    return AssetOpened(path=str(path))
+
+
+@app.post("/api/notes/spreadsheet/new")
+def new_spreadsheet(request: NewSpreadsheetRequest, db: Session = Depends(get_db)) -> NewSpreadsheet:
+    """A blank workbook (one empty sheet, `Sheet1`) attached to the space, to link from a note or show in a window."""
+    import openpyxl
+
+    root = spaces.content_dir(_space_id_or_404(db, request.space_id))
+    title = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", request.title).strip() or "Spreadsheet.xlsx"
+    if not title.lower().endswith(".xlsx"):
+        title += ".xlsx"
+    book = openpyxl.Workbook()
+    book.active.title = "Sheet1"
+    buffer = io.BytesIO()
+    book.save(buffer)
+    name = file_layer.save_asset(buffer.getvalue(), "", title, notes_dir=root)
+    return NewSpreadsheet(url=f"/api/notes/image/{name}?space_id={request.space_id}", name=name, title=title)
 
 
 @app.get("/api/notes/image/{name}/markup")

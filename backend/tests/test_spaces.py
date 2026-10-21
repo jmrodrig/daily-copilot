@@ -389,6 +389,57 @@ def test_attached_files_keep_their_suffix(client):
     assert upload("odd.tar.g z", "application/octet-stream")[1].endswith(".bin")
 
 
+def test_new_spreadsheets_are_blank_workbooks_saved_back_in_place(client):
+    import io
+
+    import openpyxl
+
+    made = client.post("/api/notes/spreadsheet/new", json={"space_id": 1, "title": "Budget"})
+    assert made.status_code == 200
+    body = made.json()
+    assert body["title"] == "Budget.xlsx" and body["name"].endswith(".xlsx")
+    assert body["url"] == f"/api/notes/image/{body['name']}?space_id=1"
+    served = client.get(body["url"])
+    assert served.headers["cache-control"] == "no-cache"
+    book = openpyxl.load_workbook(io.BytesIO(served.content))
+    assert book.sheetnames == ["Sheet1"]
+
+    # Saved back as edited in the app.
+    book.active["A1"] = "Keel"
+    buffer = io.BytesIO()
+    book.save(buffer)
+    put = client.put(f"/api/notes/image/{body['name']}", params={"space_id": 1}, content=buffer.getvalue())
+    assert put.json() == {"status": "ok", "name": body["name"], "size": len(buffer.getvalue())}
+    assert openpyxl.load_workbook(io.BytesIO(client.get(body["url"]).content)).active["A1"].value == "Keel"
+
+    assert client.put(f"/api/notes/image/{body['name']}", params={"space_id": 1}, content=b"").status_code == 400
+    assert client.put(f"/api/notes/image/{'0' * 32}.xlsx", params={"space_id": 1}, content=b"x").status_code == 404
+    assert client.post("/api/notes/spreadsheet/new", json={"space_id": 999}).status_code == 404
+
+
+def test_only_spreadsheets_can_be_replaced(client):
+    url = client.post("/api/notes/image", data={"space_id": 1}, files={"file": ("image.png", PNG, "image/png")}).json()["url"]
+    name = url.removeprefix("/api/notes/image/").removesuffix("?space_id=1")
+    assert client.put(f"/api/notes/image/{name}", params={"space_id": 1}, content=b"x").status_code == 400
+    assert client.get(url).content == PNG
+    assert client.get(url).headers["cache-control"] == "public, max-age=31536000, immutable"
+
+
+def test_attachments_open_in_their_program_only_on_this_machine(client, monkeypatch):
+    name = client.post("/api/notes/spreadsheet/new", json={"space_id": 1}).json()["name"]
+    opened = []
+    monkeypatch.setattr(main.local_files, "open_path", opened.append)
+
+    # The test client isn't on this machine.
+    assert client.post(f"/api/notes/image/{name}/open", params={"space_id": 1}).status_code == 403
+
+    monkeypatch.setattr(main.local_files, "is_local_host", lambda host: True)
+    body = client.post(f"/api/notes/image/{name}/open", params={"space_id": 1}).json()
+    assert body["status"] == "ok" and body["path"].endswith(name)
+    assert opened == [body["path"]]
+    assert client.post(f"/api/notes/image/{'0' * 32}.xlsx/open", params={"space_id": 1}).status_code == 404
+
+
 def test_markup_is_kept_in_a_sidecar_beside_the_file(client):
     url = client.post("/api/notes/image", data={"space_id": 1}, files={"file": ("image.png", PNG, "image/png")}).json()["url"]
     name = url.removeprefix("/api/notes/image/").removesuffix("?space_id=1")

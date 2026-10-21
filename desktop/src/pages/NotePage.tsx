@@ -24,7 +24,8 @@ import { AssigneeTag, PillIcon, refKind, StatusTag, useTaskInfo } from "../compo
 import { NOTE_COLUMN, NOTE_HTML_SCHEMA, copyCleanSelection, layoutMedia, liftCellColors } from "../components/noteFormatting";
 import WhiteboardView from "../components/WhiteboardView";
 import { COLLAPSE_ICON, EXPAND_ICON, WhiteboardFrame } from "../components/WhiteboardWidget";
-import { SpreadsheetFrame } from "../components/SpreadsheetWidget";
+import { SpreadsheetBlockView, SpreadsheetModal } from "../components/SpreadsheetWidget";
+import { isSpreadsheetFile } from "../components/spreadsheet";
 import { Segment, ToolIcon } from "../components/markupUi";
 import ListenWidget from "../components/ListenWidget";
 import { useVoiceRecording } from "../context/VoiceRecordingContext";
@@ -1046,7 +1047,7 @@ function noteUrlTransform(url: string): string {
 
 /**
  * A code block as the read-only note shows it: a ```whiteboard block (see noteFormatting) as its board, read-only, a
- * ```spreadsheet block as its grid, read-only, a ```listen block as its widget (which can record and tag speakers here too: the backend saves those into the note,
+ * ```spreadsheet block as its grid (a window onto a workbook file, or an embedded spreadsheet), read-only, a ```listen block as its widget (which can record and tag speakers here too: the backend saves those into the note,
  * see ListenWidget), unless `interactive` is false; any other code block as code.
  */
 function notePre(interactive: boolean): Components["pre"] {
@@ -1057,7 +1058,7 @@ function notePre(interactive: boolean): Components["pre"] {
     const text = () =>
       code?.type === "element" ? code.children.map((child) => (child.type === "text" ? child.value : "")).join("").trim() : "";
     if (fence("whiteboard")) return <WhiteboardFrame value={text()} editable={false} />;
-    if (fence("spreadsheet")) return <SpreadsheetFrame value={text()} editable={false} />;
+    if (fence("spreadsheet")) return <SpreadsheetBlockView value={text()} editable={false} />;
     if (fence("listen")) return <ListenWidget value={text()} interactive={interactive} />;
     return <pre {...props} />;
   };
@@ -1123,6 +1124,8 @@ const NOTE_COMPONENTS: Components = {
         </a>
       );
     if (props.href?.includes("/api/notes/image/") && isPdfUrl(props.href)) return <PdfLink href={props.href}>{props.children}</PdfLink>;
+    if (props.href?.includes("/api/notes/image/") && isSpreadsheetFile(props.href))
+      return <SpreadsheetLink href={props.href}>{props.children}</SpreadsheetLink>;
     return <a {...props} target={props.href?.startsWith("#") ? undefined : "_blank"} rel="noopener noreferrer" />;
   },
 };
@@ -1168,6 +1171,31 @@ function PdfLink({ href, children }: { href: string; children: ReactNode }) {
         {children}
       </a>
       {open && <MediaLightbox src={href} title={ref.current?.textContent || null} onClose={() => setOpen(false)} />}
+    </>
+  );
+}
+
+/** A spreadsheet attached to the read-only note: its link opens it in full view, read-only. */
+function SpreadsheetLink({ href, children }: { href: string; children: ReactNode }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLAnchorElement>(null);
+  return (
+    <>
+      <a
+        ref={ref}
+        href={href}
+        target="_blank"
+        rel="noopener noreferrer"
+        onClick={(e) => {
+          // Ctrl/Cmd-click still downloads it.
+          if (e.ctrlKey || e.metaKey || e.shiftKey) return;
+          e.preventDefault();
+          setOpen(true);
+        }}
+      >
+        {children}
+      </a>
+      {open && <SpreadsheetModal src={href} title={ref.current?.textContent || null} editable={false} onClose={() => setOpen(false)} />}
     </>
   );
 }

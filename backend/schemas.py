@@ -628,6 +628,36 @@ class ImageUpload(BaseModel):
     url: str
 
 
+class NewSpreadsheetRequest(BaseModel):
+    """`POST /api/notes/spreadsheet/new`: a blank workbook attached to the space, named `title` (`.xlsx` added)."""
+
+    space_id: int
+    title: str = Field(default="Spreadsheet.xlsx", max_length=200)
+
+
+class NewSpreadsheet(BaseModel):
+    """The blank workbook made: the URL it's served from, its stored name, and the file name to link it under."""
+
+    url: str
+    name: str
+    title: str
+
+
+class AssetWritten(BaseModel):
+    """`PUT /api/notes/image/{name}`: the asset replaced, and its new size in bytes."""
+
+    status: str = "ok"
+    name: str
+    size: int
+
+
+class AssetOpened(BaseModel):
+    """`POST /api/notes/image/{name}/open`: the asset opened with its default program, and where it is on disk."""
+
+    status: str = "ok"
+    path: str
+
+
 class MarkupComment(BaseModel):
     """A sticky-note comment pinned to a point on an image or a PDF's page (counted from 0), in its pixels."""
 

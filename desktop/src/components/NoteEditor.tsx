@@ -47,8 +47,8 @@ import {
 import { SlashCommand, SlashMenu, type SlashItem, type SlashMenuState } from "./slashCommand";
 import { WhiteboardIcon } from "./markupUi";
 import { WhiteboardNode } from "./WhiteboardWidget";
-import { SpreadsheetIcon, SpreadsheetNode } from "./SpreadsheetWidget";
-import { isSpreadsheetFile, parseWorkbookBuffer, serializeSpreadsheet } from "./spreadsheet";
+import { SpreadsheetIcon, SpreadsheetModal, SpreadsheetNode } from "./SpreadsheetWidget";
+import { isSpreadsheetFile } from "./spreadsheet";
 import { ActiveListenWidget, ListenNode, MicIcon } from "./ListenWidget";
 import WidgetRemovalDialog from "./WidgetRemovalDialog";
 import {
@@ -69,7 +69,7 @@ import {
   nearestWidth,
   snapWidths,
   widthLabel,
-  EMPTY_SPREADSHEET_JSON,
+  EMPTY_SPREADSHEET_WINDOW_JSON,
   EMPTY_WHITEBOARD_JSON,
   newListenJson,
   InlineMath,
@@ -162,8 +162,8 @@ export default function NoteEditor({
       ResizableImage.configure({ inline: true, allowBase64: false }),
       // A ```whiteboard block, shown as a live board (see WhiteboardWidget).
       WhiteboardNode.configure({ spaceId, onSave: () => onSaveRef.current() }),
-      // A ```spreadsheet block, shown as its grid (see SpreadsheetWidget).
-      SpreadsheetNode.configure({ onSave: () => onSaveRef.current() }),
+      // A ```spreadsheet block, shown as its grid: a window onto a workbook file, or an embedded one (see SpreadsheetWidget).
+      SpreadsheetNode.configure({ spaceId, onSave: () => onSaveRef.current() }),
       // A ```listen block, shown as its recording widget (see ListenWidget).
       ListenNode,
       WidgetRemovalGuard.configure({
@@ -371,25 +371,13 @@ export default function NoteEditor({
   };
 
   /**
-   * Files dropped or pasted into the note: spreadsheets (.xlsx, .csv, …) go in as embedded spreadsheets, read in the
-   * browser; the rest are uploaded (see insertFilesRef). A spreadsheet that can't be read is uploaded as a file.
+   * Files dropped or pasted into the note: uploaded and linked (see insertFilesRef). A spreadsheet (.xlsx, .csv, …)
+   * is a file like any other: its link opens it in full view, and a spreadsheet window can show part of it.
    */
   const dropFilesRef = useRef<(files: File[], pos?: number) => Promise<void>>(async () => {});
   dropFilesRef.current = async (files: File[], pos?: number) => {
     if (!editor || editor.isDestroyed) return;
-    const others = files.filter((file) => !isSpreadsheetFile(file));
-    for (const file of files.filter(isSpreadsheetFile)) {
-      try {
-        const { data, truncated } = await parseWorkbookBuffer(await file.arrayBuffer(), file.name.replace(/\.[^.]+$/, ""));
-        if (editor.isDestroyed) return;
-        const at = Math.min(Math.max(pos ?? editor.state.selection.to, 0), editor.state.doc.content.size);
-        editor.chain().focus().insertContentAt(at, { type: "spreadsheet", attrs: { data: serializeSpreadsheet(data) } }).run();
-        if (truncated) setUploadError(`${file.name} was bigger than a note can hold: only its first rows and columns were embedded.`);
-      } catch {
-        others.push(file);
-      }
-    }
-    if (others.length) await insertFilesRef.current(others, pos);
+    await insertFilesRef.current(files, pos);
   };
 
   useEffect(() => {
@@ -411,7 +399,7 @@ export default function NoteEditor({
       return;
     }
     if (item.id === "spreadsheet") {
-      editor.chain().focus().deleteRange(range).insertContent({ type: "spreadsheet", attrs: { data: EMPTY_SPREADSHEET_JSON } }).run();
+      editor.chain().focus().deleteRange(range).insertContent({ type: "spreadsheet", attrs: { data: EMPTY_SPREADSHEET_WINDOW_JSON } }).run();
       return;
     }
     if (item.id === "listen") {
@@ -758,13 +746,14 @@ function PencilIcon() {
 }
 
 /** True for a link to a file uploaded to the space (shown as a pill, see index.css). */
-function isAttachmentHref(href: string | undefined): boolean {
+function isAttachmentHref(href: string | undefined): href is string {
   return !!href && href.includes("/api/notes/image/");
 }
 
 /**
  * The menu under a link: open it, and for an uploaded file in an editable note, remove it. A linked PDF opens in the
- * lightbox, to be marked up while the note is editable, as does a click on its pill. A link to a local file or folder
+ * lightbox, to be marked up while the note is editable, as does a click on its pill; a linked spreadsheet (.xlsx,
+ * .csv, …) in full view, to be edited while the note is (see SpreadsheetModal), as does a click on its link. A link to a local file or folder
  * opens on this machine, or from the network share through a shortcut on a remote one (see openLocalFile), from the
  * Open button. Extracted so its props memoize
  * without cluttering NoteEditor's top-level hooks.
@@ -776,20 +765,26 @@ function BubbleMenuWrapper({ editor }: { editor: Editor }) {
     editor,
     selector: ({ editor: e }) => ({ href: e.getAttributes("link").href as string | undefined, editable: e.isEditable }),
   });
-  // The PDF open in the lightbox: its link and name.
+  // The PDF open in the lightbox, or the spreadsheet in full view: its link and name.
   const [pdf, setPdf] = useState<{ href: string; name: string } | null>(null);
+  const [sheet, setSheet] = useState<{ href: string; name: string } | null>(null);
 
   useEffect(() => {
     const dom = editor.view.dom;
     // A click on a link (or a local file's pill) only selects it, to open or edit from its menu; an uploaded PDF's pill
-    // opens it in the lightbox.
+    // opens it in the lightbox, and an uploaded spreadsheet's link in full view.
     const click = (event: MouseEvent) => {
       if (event.ctrlKey || event.metaKey || event.shiftKey) return;
       const anchor = event.target instanceof Element ? event.target.closest("a[href]") : null;
       const href = anchor?.getAttribute("href") ?? undefined;
-      if (!anchor || !isAttachmentHref(href) || !isPdfUrl(href!)) return;
-      event.preventDefault();
-      setPdf({ href: href!, name: anchor.textContent ?? "" });
+      if (!anchor || !isAttachmentHref(href)) return;
+      if (isPdfUrl(href)) {
+        event.preventDefault();
+        setPdf({ href, name: anchor.textContent ?? "" });
+      } else if (isSpreadsheetFile(href)) {
+        event.preventDefault();
+        setSheet({ href, name: anchor.textContent ?? "" });
+      }
     };
     dom.addEventListener("click", click);
     return () => dom.removeEventListener("click", click);
@@ -828,11 +823,13 @@ function BubbleMenuWrapper({ editor }: { editor: Editor }) {
               void openLocalFile(link.href);
               return;
             }
-            if (!isAttachmentHref(link.href) || !isPdfUrl(link.href!)) return;
+            if (!isAttachmentHref(link.href) || !(isPdfUrl(link.href) || isSpreadsheetFile(link.href))) return;
             event.preventDefault();
             const { state } = editor;
             const range = getMarkRange(state.selection.$from, state.schema.marks.link);
-            setPdf({ href: link.href!, name: range ? state.doc.textBetween(range.from, range.to) : "" });
+            const opened = { href: link.href, name: range ? state.doc.textBetween(range.from, range.to) : "" };
+            if (isPdfUrl(link.href)) setPdf(opened);
+            else setSheet(opened);
           }}
           className="px-4 py-2 text-xs font-bold uppercase tracking-wider text-accent hover:bg-surface-hover focus:outline-none"
         >
@@ -854,6 +851,7 @@ function BubbleMenuWrapper({ editor }: { editor: Editor }) {
         )}
       </BubbleMenu>
       {pdf && <MediaLightbox src={pdf.href} title={pdf.name || null} onClose={() => setPdf(null)} editable={link.editable} />}
+      {sheet && <SpreadsheetModal src={sheet.href} title={sheet.name || null} editable={link.editable} onClose={() => setSheet(null)} />}
     </>
   );
 }
@@ -1491,7 +1489,7 @@ function Toolbar({
         label="Insert spreadsheet"
         on={false}
         disabled={off}
-        onClick={() => chain().insertContent({ type: "spreadsheet", attrs: { data: EMPTY_SPREADSHEET_JSON } }).run()}
+        onClick={() => chain().insertContent({ type: "spreadsheet", attrs: { data: EMPTY_SPREADSHEET_WINDOW_JSON } }).run()}
       >
         <SpreadsheetIcon />
       </ToolButton>

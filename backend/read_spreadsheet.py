@@ -1,5 +1,5 @@
 """Read spreadsheets (`.xlsx`, `.xlsm`, `.csv`, `.tsv`): their sheets, headers, cells and formulas, for the agent or a
-person at a shell.
+person at a shell; and change their cells, for the agent (`edit_spreadsheet`).
 
     python read_spreadsheet.py budget.xlsx                       # every sheet's size, then each as a markdown table
     python read_spreadsheet.py budget.xlsx --sheet Costs         # just one sheet
@@ -15,6 +15,7 @@ the file holds no saved value for it (as a file written by a script, not Excel, 
 import argparse
 import csv
 import json
+import re
 import sys
 from datetime import date, datetime, time
 from pathlib import Path
@@ -159,6 +160,159 @@ def read_spreadsheet(
         data["search"] = search
         data["matches"] = find_cells(sheets, search)
     return data
+
+
+# --- Editing ------------------------------------------------------------------------
+
+_NUMBER_RE = re.compile(r"\A[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?\Z")
+
+
+def cell_value(value: Any) -> Any:
+    """What a cell is set to from a value given as text or JSON: a number for digits (`"150"`, `12.5`), TRUE and
+    FALSE as booleans, a formula (`"=SUM(B2:B9)"`) or any other text as it is, and nothing for `""` or None."""
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    text = str(value)
+    stripped = text.strip()
+    if not stripped:
+        return None
+    if _NUMBER_RE.match(stripped):
+        number = float(stripped)
+        return int(number) if number.is_integer() and "." not in stripped and "e" not in stripped.lower() else number
+    if stripped.upper() in {"TRUE", "FALSE"}:
+        return stripped.upper() == "TRUE"
+    return text
+
+
+def _cells_of(range_text: str) -> tuple[int, int, int, int]:
+    """(min_col, min_row, max_col, max_row), 1-based, of a range (`A1:C10`) or a single cell (`B2`)."""
+    from openpyxl.utils.cell import range_boundaries
+
+    try:
+        min_col, min_row, max_col, max_row = range_boundaries(range_text.strip().replace("$", "").upper())
+    except (ValueError, TypeError) as exc:
+        raise SpreadsheetReadError(f"Not a cell or range: {range_text!r} (e.g. `B2` or `A1:C10`)") from exc
+    if None in (min_col, min_row, max_col, max_row):
+        raise SpreadsheetReadError(f"Not a cell or range: {range_text!r} (e.g. `B2` or `A1:C10`)")
+    return min_col, min_row, max_col, max_row  # type: ignore[return-value]
+
+
+def _edit_csv(path: Path, updates: dict[str, Any], clear_range: str | None, add_sheet: str | None) -> list[str]:
+    if add_sheet:
+        raise SpreadsheetReadError(f"{path.name} is a {path.suffix} file: it has one sheet, and can't take another")
+    text = path.read_text(encoding="utf-8-sig", errors="replace") if path.exists() else ""
+    if path.suffix.lower() == ".tsv":
+        dialect: Any = csv.excel_tab
+    else:
+        try:
+            dialect = csv.Sniffer().sniff(text[:8192], delimiters=",;\t|")
+        except csv.Error:
+            dialect = csv.excel
+    rows = [list(row) for row in csv.reader(text.splitlines(), dialect)]
+
+    def put(row: int, col: int, value: str) -> None:
+        while len(rows) < row:
+            rows.append([])
+        while len(rows[row - 1]) < col:
+            rows[row - 1].append("")
+        rows[row - 1][col - 1] = value
+
+    changed = []
+    if clear_range:
+        min_col, min_row, max_col, max_row = _cells_of(clear_range)
+        for r in range(min_row, min(max_row, len(rows)) + 1):
+            for c in range(min_col, min(max_col, len(rows[r - 1])) + 1):
+                rows[r - 1][c - 1] = ""
+        changed.append(clear_range.upper())
+    for address, value in updates.items():
+        min_col, min_row, max_col, max_row = _cells_of(address)
+        if (min_col, min_row) != (max_col, max_row):
+            raise SpreadsheetReadError(f"Updates take single cells, not a range: {address}")
+        put(min_row, min_col, cell_text(cell_value(value)))
+        changed.append(f"{col_letter(min_col)}{min_row}")
+    with path.open("w", encoding="utf-8", newline="") as fh:
+        csv.writer(fh, delimiter=dialect.delimiter, lineterminator="\r\n").writerows(_trimmed(rows))
+    return changed
+
+
+def edit_spreadsheet(
+    file_path: str | Path,
+    *,
+    sheet: str | None = None,
+    updates: dict[str, Any] | None = None,
+    add_sheet: str | None = None,
+    clear_range: str | None = None,
+    create: bool = False,
+) -> dict[str, Any]:
+    """Change cells of the spreadsheet in `file_path` and save it: add a sheet named `add_sheet`, empty the cells of
+    `clear_range` (`A1:C10`), then set each cell of `updates` (`{"B2": 150, "B4": "=SUM(B2:B3)"}`; see `cell_value`),
+    on `sheet` (matched case-insensitively), else the sheet just added, else the workbook's active one. With
+    `create`, a missing file is made, as a workbook with one empty sheet (or an empty CSV).
+
+    Returns `path`, the `sheet` edited, the `sheets` the file has and the cells `changed`. Raises
+    `SpreadsheetReadError` as `read_spreadsheet` does, and for a bad address or a sheet name that's taken.
+    """
+    path = Path(file_path)
+    suffix = path.suffix.lower()
+    if suffix == ".xls":
+        raise SpreadsheetReadError(f"Old-style .xls workbooks aren't supported: save {path.name} as .xlsx first")
+    if suffix not in SPREADSHEET_SUFFIXES:
+        raise SpreadsheetReadError(f"Not a spreadsheet ({', '.join(sorted(SPREADSHEET_SUFFIXES))}): {path}")
+    if not path.is_file() and not create:
+        raise SpreadsheetReadError(f"File not found: {path}")
+    updates = dict(updates or {})
+
+    if suffix in CSV_SUFFIXES:
+        if sheet and sheet.strip().lower() != path.stem.lower():
+            raise SpreadsheetReadError(f'No sheet named "{sheet}" in {path.name} (its sheets: {path.stem})')
+        changed = _edit_csv(path, updates, clear_range, add_sheet)
+        return {"path": str(path), "sheet": path.stem, "sheets": [path.stem], "changed": changed}
+
+    try:
+        import openpyxl
+    except ImportError as exc:  # pragma: no cover - depends on the environment
+        raise SpreadsheetReadError("openpyxl is not installed (pip install openpyxl)") from exc
+
+    if path.is_file():
+        try:
+            book = openpyxl.load_workbook(path, keep_vba=suffix == ".xlsm")
+        except Exception as exc:  # openpyxl raises zipfile, XML and its own errors for files it can't read
+            raise SpreadsheetReadError(f"Not a readable Excel workbook: {path} ({exc})") from exc
+    else:
+        book = openpyxl.Workbook()
+        book.active.title = "Sheet1"
+
+    target = None
+    if add_sheet and add_sheet.strip():
+        name = add_sheet.strip()
+        if any(ws.title.lower() == name.lower() for ws in book.worksheets):
+            raise SpreadsheetReadError(f'{path.name} has a sheet named "{name}" already')
+        target = book.create_sheet(name[:31])
+    if sheet and sheet.strip():
+        chosen = [ws for ws in book.worksheets if ws.title.lower() == sheet.strip().lower()]
+        if not chosen:
+            names = ", ".join(ws.title for ws in book.worksheets)
+            raise SpreadsheetReadError(f'No sheet named "{sheet}" in {path.name} (its sheets: {names})')
+        target = chosen[0]
+    ws = target or book.active
+
+    changed = []
+    if clear_range:
+        min_col, min_row, max_col, max_row = _cells_of(clear_range)
+        for row in ws.iter_rows(min_row=min_row, max_row=max_row, min_col=min_col, max_col=max_col):
+            for cell in row:
+                cell.value = None
+        changed.append(clear_range.strip().upper())
+    for address, value in updates.items():
+        min_col, min_row, max_col, max_row = _cells_of(address)
+        if (min_col, min_row) != (max_col, max_row):
+            raise SpreadsheetReadError(f"Updates take single cells, not a range: {address}")
+        ws.cell(row=min_row, column=min_col).value = cell_value(value)
+        changed.append(f"{col_letter(min_col)}{min_row}")
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    book.save(path)
+    return {"path": str(path), "sheet": ws.title, "sheets": [s.title for s in book.worksheets], "changed": changed}
 
 
 def find_cells(sheets: list[dict[str, Any]], query: str) -> list[dict[str, Any]]:

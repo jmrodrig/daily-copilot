@@ -14,7 +14,7 @@ function wording(removal: WidgetRemoval): { title: string; text: string; remove:
   if (removal.type === "spreadsheet") {
     return {
       title: "Remove spreadsheet widget?",
-      text: "This spreadsheet and all its sheets will be deleted from the note. Do you want to proceed?",
+      text: "This spreadsheet will be removed from the note (a spreadsheet window's file stays attached to the space). Do you want to proceed?",
       remove: "Remove",
     };
   }

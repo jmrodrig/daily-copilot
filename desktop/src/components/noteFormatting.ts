@@ -541,11 +541,19 @@ export const EMPTY_SPREADSHEET_JSON = JSON.stringify({
   sheets: [{ name: "Sheet1", rows: Array.from({ length: 5 }, () => Array<string>(5).fill("")) }],
 });
 
+/** A spreadsheet window not yet pointed at a workbook file: it offers to pick one (see SpreadsheetWidget). */
+export const EMPTY_SPREADSHEET_WINDOW_JSON = "{}";
+
 const SPREADSHEET_FENCE = /^ {0,3}```spreadsheet[ \t]*\n([\s\S]*?)\n? {0,3}```[ \t]*(?:\n+|$)/;
 
 /**
- * An embedded spreadsheet: a block atom holding its JSON in `data` (see spreadsheet.ts), read from and saved as a
- * ```spreadsheet fenced block on one line, as a whiteboard is:
+ * A spreadsheet in the note: a block atom holding its JSON in `data`, read from and saved as a ```spreadsheet fenced
+ * block on one line, as a whiteboard is. Either a window onto a workbook file attached to the note, showing some of
+ * its cells (see SpreadsheetWidget), or, as notes saved them before, a whole spreadsheet embedded (see spreadsheet.ts):
+ *
+ *   ```spreadsheet
+ *   {"src":"/api/notes/image/<name>.xlsx?space_id=1","sheet":"Costs","displayArea":"A1:E8","title":"Budget.xlsx"}
+ *   ```
  *
  *   ```spreadsheet
  *   {"activeSheet":"Sheet1","sheets":[{"name":"Sheet1","rows":[["Item","Cost"],["Keel","=B3*2"]]}]}

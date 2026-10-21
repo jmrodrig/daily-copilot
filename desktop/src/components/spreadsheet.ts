@@ -15,6 +15,9 @@
  * `'Hull data'!A1:A5`), and SUM, AVERAGE, COUNT, MIN, MAX, ROUND, ABS. Anything else shows an Excel-style error
  * (`#NAME?`, `#REF!`, `#DIV/0!`, `#VALUE!`, `#CYCLE!`).
  *
+ * A spreadsheet may also be a workbook file attached to the note (see workbookStore): read into the same data, and
+ * written back to the file (`writeWorkbookBuffer`) as it's edited.
+ *
  * The `xlsx` package, which reads and writes workbooks, is loaded only when one is imported or exported.
  */
 
@@ -58,8 +61,18 @@ export const IMPORT_MAX_COLS = 52;
 export const SPREADSHEET_FILE_ACCEPT = ".xlsx,.xlsm,.xls,.ods,.csv,.tsv";
 const SPREADSHEET_FILE = /\.(xlsx|xlsm|xls|ods|csv|tsv)$/i;
 
-export function isSpreadsheetFile(file: File): boolean {
-  return SPREADSHEET_FILE.test(file.name);
+/** Whether a file, a file name or a link (`/api/notes/image/….xlsx?space_id=1`) is a spreadsheet's. */
+export function isSpreadsheetFile(file: File | string): boolean {
+  const name = typeof file === "string" ? file.split(/[?#]/)[0] : file.name;
+  return SPREADSHEET_FILE.test(name);
+}
+
+/** The formats a workbook file is written back in, as its name's suffix says. */
+export type WorkbookFormat = "xlsx" | "xlsm" | "xls" | "ods" | "csv" | "tsv";
+
+export function workbookFormatOf(nameOrUrl: string): WorkbookFormat {
+  const match = /\.(xlsx|xlsm|xls|ods|csv|tsv)$/i.exec(nameOrUrl.split(/[?#]/)[0]);
+  return (match ? match[1].toLowerCase() : "xlsx") as WorkbookFormat;
 }
 
 // --- Addresses ------------------------------------------------------------------
@@ -804,19 +817,15 @@ export function exportFileName(data: SpreadsheetData, format: "xlsx" | "csv"): s
   return `${base}.${format}`;
 }
 
-/**
- * Download the spreadsheet as an Excel workbook (every sheet, formulas kept with their values worked out) or as a
- * CSV of the active sheet's values.
- */
-export async function exportWorkbook(data: SpreadsheetData, filename?: string, format: "xlsx" | "csv" = "xlsx"): Promise<void> {
-  const XLSX = await loadXlsx();
+/** A workbook of the spreadsheet: every sheet (or only the active one), formulas kept with their values worked out. */
+function buildWorkbook(XLSX: XlsxModule, data: SpreadsheetData, formulas: boolean, onlyActive: boolean): import("xlsx").WorkBook {
   const evaluator = createEvaluator(data);
   const book = XLSX.utils.book_new();
   const activeIndex = Math.max(
     data.sheets.findIndex((s) => s.name === data.activeSheet),
     0,
   );
-  const indices = format === "csv" ? [activeIndex] : data.sheets.map((_, i) => i);
+  const indices = onlyActive ? [activeIndex] : data.sheets.map((_, i) => i);
   for (const index of indices) {
     const sheet = data.sheets[index];
     const ws: import("xlsx").WorkSheet = {};
@@ -831,7 +840,7 @@ export async function exportWorkbook(data: SpreadsheetData, filename?: string, f
         const kind = evaluator.kind(index, r, c);
         const shown = evaluator.display(index, r, c);
         const cell: import("xlsx").CellObject = kind === "number" ? { t: "n", v: Number(shown) } : { t: "s", v: shown };
-        if (text.startsWith("=") && format === "xlsx") cell.f = text.slice(1);
+        if (text.startsWith("=") && formulas) cell.f = text.slice(1);
         ws[addr] = cell;
       }),
     );
@@ -844,5 +853,32 @@ export async function exportWorkbook(data: SpreadsheetData, filename?: string, f
     }
     XLSX.utils.book_append_sheet(book, ws, name);
   }
+  return book;
+}
+
+/**
+ * Download the spreadsheet as an Excel workbook (every sheet, formulas kept with their values worked out) or as a
+ * CSV of the active sheet's values.
+ */
+export async function exportWorkbook(data: SpreadsheetData, filename?: string, format: "xlsx" | "csv" = "xlsx"): Promise<void> {
+  const XLSX = await loadXlsx();
+  const book = buildWorkbook(XLSX, data, format === "xlsx", format === "csv");
   XLSX.writeFile(book, filename ?? exportFileName(data, format), { bookType: format });
+}
+
+/**
+ * The spreadsheet as a workbook file's bytes, to save back in place: a workbook (`xlsx`, `xlsm`, `xls`, `ods`) has
+ * every sheet, its formulas kept with their values worked out; a CSV or TSV only the active sheet's values.
+ */
+export async function writeWorkbookBuffer(data: SpreadsheetData, format: WorkbookFormat = "xlsx"): Promise<Uint8Array> {
+  const XLSX = await loadXlsx();
+  const text = format === "csv" || format === "tsv";
+  const book = buildWorkbook(XLSX, data, !text, text);
+  if (format === "tsv") {
+    const tsv = XLSX.utils.sheet_to_csv(book.Sheets[book.SheetNames[0]], { FS: "\t" });
+    return new TextEncoder().encode(tsv);
+  }
+  const bookType = format === "xls" ? "biff8" : format;
+  const out = XLSX.write(book, { type: "array", bookType }) as ArrayBuffer;
+  return new Uint8Array(out);
 }
