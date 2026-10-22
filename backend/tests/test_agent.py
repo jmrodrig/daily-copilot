@@ -1585,3 +1585,40 @@ def test_chat_edits_a_spreadsheet(client, model, budget):
     assert tool_results(model.calls[1])[0]["changed"] == ["B2"]
     assert body["reply"] == "B2 is now 999."
     assert cells(path)[1] == ["Keel bolts", 999]
+
+
+def test_edit_spreadsheet_defines_and_removes_names(budget):
+    url, path = budget
+    turn = agent._Turn(AccessMode.WRITE_DIRECTLY)
+
+    result = turn.call(
+        "edit_spreadsheet",
+        {"path": url, "names": {"KeelWeight": "B2", "Prices": "Costs!A1:B2", "Remarks": "'Notes'!A1"}, "updates": {"C2": "=KeelWeight*2"}},
+    )
+    assert result["changed"] == ["C2", "KeelWeight", "Prices", "Remarks"]
+    assert result["names"] == {"KeelWeight": "Costs!$B$2", "Prices": "Costs!$A$1:$B$2", "Remarks": "Notes!$A$1"}
+    read = turn.call("read_spreadsheet", {"path": url})
+    assert read["names"]["KeelWeight"] == "Costs!$B$2"
+    assert "  - KeelWeight: Costs!$B$2" in read["content"]
+
+    # A name is matched whatever its case: redefined, then removed.
+    turn.call("edit_spreadsheet", {"path": url, "names": {"keelweight": "Notes!B5"}})
+    removed = turn.call("edit_spreadsheet", {"path": url, "names": {"Prices": None, "Remarks": ""}})
+    assert removed["changed"] == ["-Prices", "-Remarks"]
+    assert removed["names"] == {"keelweight": "Notes!$B$5"}
+
+    with pytest.raises(agent.ToolError, match="Not a name a cell can have"):
+        turn.call("edit_spreadsheet", {"path": url, "names": {"B2": "C3"}})
+    with pytest.raises(agent.ToolError, match="No sheet named"):
+        turn.call("edit_spreadsheet", {"path": url, "names": {"Mast": "Rig!A1"}})
+    with pytest.raises(agent.ToolError, match="Not a cell or range"):
+        turn.call("edit_spreadsheet", {"path": url, "names": {"Mast": "nope"}})
+
+
+def test_edit_spreadsheet_names_need_a_workbook(tmp_path):
+    turn = agent._Turn(AccessMode.WRITE_DIRECTLY)
+    csv_file = tmp_path / "parts.csv"
+    csv_file.write_text("Part,Mass\nKeel,8200\n", encoding="utf-8")
+
+    with pytest.raises(agent.ToolError, match="can't have defined names"):
+        turn.call("edit_spreadsheet", {"path": str(csv_file), "names": {"KeelMass": "B2"}})

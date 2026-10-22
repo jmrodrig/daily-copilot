@@ -302,7 +302,8 @@ TOOLS: dict[str, dict[str, Any]] = {
     "edit_spreadsheet": {
         "description": "Change a spreadsheet (.xlsx, .xlsm, .csv, .tsv) and save it: a local file, or one attached to "
         "a note (its `/api/notes/image/...` URL). Sets cells (`cell` and `value`, or several with `updates`) to "
-        "numbers, text or formulas, empties a range (`clear_range`, applied first), or adds a sheet (`add_sheet`). "
+        "numbers, text or formulas, empties a range (`clear_range`, applied first), adds a sheet (`add_sheet`), or "
+        "defines names for cells or ranges (`names`, as Excel's Name Box: formulas may then use them, `=KeelWeight*2`). "
         "With `create`, makes a new workbook: at a local path, or, given just a file name (`Budget.xlsx`), attached to "
         "the space, returning the URL and markdown link to put in a note. Read the spreadsheet first.",
         "parameters": {
@@ -326,6 +327,12 @@ TOOLS: dict[str, dict[str, Any]] = {
                 },
                 "add_sheet": {"type": "string", "description": "Name of a new sheet to add"},
                 "clear_range": {"type": "string", "description": "Cells to empty, e.g. `A1:C10`"},
+                "names": {
+                    "type": "object",
+                    "description": "Defined names to set, name to cells, e.g. `{\"KeelWeight\": \"B2\", \"Prices\": \"Costs!A1:A10\"}` "
+                    "(without a sheet: on the sheet edited); `null` or `\"\"` removes a name",
+                    "additionalProperties": {"type": ["string", "null"]},
+                },
                 "create": {"type": "boolean", "description": "Create the workbook if it doesn't exist (default false)"},
             },
             "required": ["path"],
@@ -514,11 +521,12 @@ def read_spreadsheet_tool(
     file, attached = spreadsheet_file(path, notes_dir)
     data = read_spreadsheet.read_spreadsheet(file, sheet=sheet or None, search=search or None)
     rows = max_rows if max_rows and max_rows > 0 else read_spreadsheet.DEFAULT_MAX_ROWS
-    return {
+    result = {
         "path": path.strip() if attached else str(file),
         "sheets": [{"name": s["name"], "rows": s["rows"], "cols": s["cols"]} for s in data["sheets"]],
         "content": local_files.truncate(read_spreadsheet.format_spreadsheet(data, max_rows=rows)),
     }
+    return {**result, "names": data["names"]} if data.get("names") else result
 
 
 # --- Web ----------------------------------------------------------------------
@@ -802,6 +810,7 @@ class _Turn:
         add_sheet: str | None = None,
         clear_range: str | None = None,
         create: bool = False,
+        names: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Change a spreadsheet (see `read_spreadsheet.edit_spreadsheet`): a local file, or one attached to a note.
         With `create` and just a file name, a new workbook attached to the space."""
@@ -814,11 +823,13 @@ class _Turn:
             )
         if updates is not None and not isinstance(updates, dict):
             raise ToolError("updates must be an object of cell addresses to values")
+        if names is not None and not isinstance(names, dict):
+            raise ToolError("names must be an object of names to cells, e.g. {\"KeelWeight\": \"B2\"}")
         changes = dict(updates or {})
         if cell:
             changes[cell] = value
-        if not changes and not add_sheet and not clear_range and not create:
-            raise ToolError("Nothing to change: give `cell` and `value`, `updates`, `clear_range` or `add_sheet`")
+        if not changes and not add_sheet and not clear_range and not names and not create:
+            raise ToolError("Nothing to change: give `cell` and `value`, `updates`, `clear_range`, `add_sheet` or `names`")
 
         text = path.strip()
         if create and not _ASSET_URL_RE.search(text) and not re.search(r"[\\/:]", text):
@@ -830,14 +841,14 @@ class _Turn:
             file = file_layer.asset_path(name, notes_dir=self.root)
             file.unlink()
             result = read_spreadsheet.edit_spreadsheet(
-                file, sheet=sheet, updates=changes, add_sheet=add_sheet, clear_range=clear_range, create=True
+                file, sheet=sheet, updates=changes, add_sheet=add_sheet, clear_range=clear_range, create=True, names=names
             )
             url = f"/api/notes/image/{name}?space_id={self.space_id}"
             return {**result, "path": url, "url": url, "link": f"[{text}]({url})"}
 
         file, attached = spreadsheet_file(text, self.root)
         result = read_spreadsheet.edit_spreadsheet(
-            file, sheet=sheet, updates=changes, add_sheet=add_sheet, clear_range=clear_range, create=create
+            file, sheet=sheet, updates=changes, add_sheet=add_sheet, clear_range=clear_range, create=create, names=names
         )
         return {**result, "path": text if attached else result["path"]}
 

@@ -9,11 +9,12 @@
  *
  * Every cell is text, as typed: a number is its digits, and a formula starts with `=` (`=SUM(B2:B9)`, `=B2*C2`,
  * `=Costs!D4`). Formulas are worked out when the sheet is shown (`createEvaluator`), never saved. A sheet's
- * `displayArea` (`A1:D8`) is the cells its note shows, like Excel's print area.
+ * `displayArea` (`A1:D8`) is the cells its note shows, like Excel's print area. The spreadsheet's `names` are Excel's
+ * defined names: a label for a cell or range (`{"KeelWeight":"Costs!B2"}`), which formulas may use in its place.
  *
  * Formulas know `+ - * / ^`, parentheses, cells (`B2`, `$B$2`), ranges (`B2:B9`), other sheets (`Costs!B2`,
- * `'Hull data'!A1:A5`), and SUM, AVERAGE, COUNT, MIN, MAX, ROUND, ABS. Anything else shows an Excel-style error
- * (`#NAME?`, `#REF!`, `#DIV/0!`, `#VALUE!`, `#CYCLE!`).
+ * `'Hull data'!A1:A5`), defined names (`=KeelWeight*1.2`, `=SUM(Prices)`), and SUM, AVERAGE, COUNT, MIN, MAX, ROUND,
+ * ABS. Anything else shows an Excel-style error (`#NAME?`, `#REF!`, `#DIV/0!`, `#VALUE!`, `#CYCLE!`).
  *
  * A spreadsheet may also be a workbook file attached to the note (see workbookStore): read into the same data, and
  * written back to the file (`writeWorkbookBuffer`) as it's edited.
@@ -43,7 +44,16 @@ export type SpreadsheetSheet = {
   displayArea?: string;
 };
 
-export type SpreadsheetData = { activeSheet: string; sheets: SpreadsheetSheet[]; title?: string };
+export type SpreadsheetData = {
+  activeSheet: string;
+  sheets: SpreadsheetSheet[];
+  title?: string;
+  /**
+   * Defined names, each to the cells it labels: `Costs!B2`, `'Hull data'!A1:A5`, or without a sheet (`B2`) the cells
+   * of the sheet whose formula uses it.
+   */
+  names?: Record<string, string>;
+};
 
 /** A cell's place: 0-based row and column. */
 export type CellPos = { row: number; col: number };
@@ -151,7 +161,13 @@ export function parseSpreadsheet(json: string): SpreadsheetData {
   if (!sheets.length) sheets.push({ name: "Sheet1", rows: emptyRows() });
   const active = typeof obj.activeSheet === "string" && sheets.some((s) => s.name === obj.activeSheet) ? obj.activeSheet : sheets[0].name;
   const title = typeof obj.title === "string" && obj.title.trim() ? obj.title : undefined;
-  return { activeSheet: active, sheets, ...(title ? { title } : {}) };
+  const names: Record<string, string> = {};
+  if (obj.names && typeof obj.names === "object") {
+    for (const [name, ref] of Object.entries(obj.names as Record<string, unknown>)) {
+      if (typeof ref === "string" && isValidDefinedName(name) && parseNameRef(ref)) names[name] = ref;
+    }
+  }
+  return { activeSheet: active, sheets, ...(title ? { title } : {}), ...(Object.keys(names).length ? { names } : {}) };
 }
 
 export function serializeSpreadsheet(data: SpreadsheetData): string {
@@ -268,7 +284,13 @@ export function shiftCells(data: SpreadsheetData, sheetIndex: number, axis: "row
     }
     return { ...sheet, rows: shifted, styles };
   });
-  return { ...data, sheets };
+  // A name's cells move too; a name whose cells are all deleted is gone.
+  const names = mapNames(data.names, (ref) => {
+    const moved = shiftFormula(`=${ref}`, target.name, false, axis, shiftIndex);
+    return moved.includes("#REF!") ? null : moved.slice(1);
+  });
+  const { names: _old, ...rest } = data;
+  return { ...rest, sheets, ...(names ? { names } : {}) };
 }
 
 // --- Formulas -------------------------------------------------------------------
@@ -344,21 +366,158 @@ function tokenize(src: string): Token[] {
   return tokens;
 }
 
-/** The cells a formula (with its `=`) refers to, each as the sheet named (null for its own) and the cells. */
-export function formulaReferences(formula: string): { sheet: string | null; range: CellRange }[] {
+/** The colors a formula's references are told apart by, in its text and on the grid, as Excel does: in turn. */
+export type FormulaColor = {
+  id: string;
+  border: string;
+  bg: string;
+  text: string;
+  hex: string;
+};
+
+export const FORMULA_PALETTE: FormulaColor[] = [
+  { id: "blue", border: "border-blue-500", bg: "bg-blue-500/10", text: "text-blue-500", hex: "#3b82f6" },
+  { id: "rose", border: "border-rose-500", bg: "bg-rose-500/10", text: "text-rose-500", hex: "#f43f5e" },
+  { id: "purple", border: "border-purple-500", bg: "bg-purple-500/10", text: "text-purple-500", hex: "#a855f7" },
+  { id: "emerald", border: "border-emerald-500", bg: "bg-emerald-500/10", text: "text-emerald-500", hex: "#10b981" },
+  { id: "amber", border: "border-amber-500", bg: "bg-amber-500/10", text: "text-amber-500", hex: "#f59e0b" },
+  { id: "cyan", border: "border-cyan-500", bg: "bg-cyan-500/10", text: "text-cyan-500", hex: "#06b6d4" },
+];
+
+/**
+ * A reference in a formula's text: the sheet it's on (null for the formula's own), its cells, its text and where
+ * that is in the formula (`start`–`end`, counting the `=`), and its color in `FORMULA_PALETTE`.
+ */
+export type ColoredFormulaRef = {
+  sheet: string | null;
+  range: CellRange;
+  rawText: string;
+  start: number;
+  end: number;
+  colorIndex: number;
+};
+
+/**
+ * The references in a formula (with its `=`) of sheet `currentSheet`: its cells and ranges, and the defined names
+ * (of `names`) it uses, each with its color. The same cells written twice keep one color.
+ */
+export function formulaColoredReferences(formula: string, currentSheet: string, names?: Record<string, string>): ColoredFormulaRef[] {
   if (!formula.startsWith("=")) return [];
-  const refs: { sheet: string | null; range: CellRange }[] = [];
-  for (const token of tokenize(formula.slice(1))) {
-    if (token.kind !== "ref") continue;
-    const range = parseRangeAddress(token.to ? `${token.from}:${token.to}` : token.from);
-    if (range) refs.push({ sheet: token.sheet, range });
-  }
+  const tokens = tokenize(formula.slice(1));
+  const defined = new Map(Object.entries(names ?? {}).map(([name, ref]) => [name.toUpperCase(), ref]));
+  const colors = new Map<string, number>();
+  const refs: ColoredFormulaRef[] = [];
+  tokens.forEach((token, i) => {
+    let target: { sheet: string | null; range: CellRange } | null = null;
+    if (token.kind === "ref") {
+      const range = parseRangeAddress(token.to ? `${token.from}:${token.to}` : token.from);
+      if (range) target = { sheet: token.sheet, range };
+    } else if (token.kind === "name") {
+      const next = tokens[i + 1];
+      // A function's name, not a defined one.
+      if (next?.kind === "op" && next.value === "(") return;
+      const ref = defined.get(token.value);
+      target = ref ? parseNameRef(ref) : null;
+    }
+    if (!target) return;
+    const sheet = target.sheet !== null && target.sheet.toLowerCase() === currentSheet.toLowerCase() ? null : target.sheet;
+    const rawText = formula.slice(token.start + 1, token.end + 1);
+    const { r1, c1, r2, c2 } = target.range;
+    const key = `${sheet?.toLowerCase() ?? ""}!${r1}:${c1}:${r2}:${c2}`;
+    let colorIndex = colors.get(key);
+    if (colorIndex === undefined) {
+      colorIndex = colors.size % FORMULA_PALETTE.length;
+      colors.set(key, colorIndex);
+    }
+    refs.push({ sheet, range: target.range, rawText, start: token.start + 1, end: token.end + 1, colorIndex });
+  });
   return refs;
 }
 
 /** A sheet name as a formula writes it: quoted unless it's a plain word. */
 export function quoteSheetName(name: string): string {
   return /^[A-Za-z_][\w.]*$/.test(name) && !parseCellAddress(name) ? name : `'${name.replace(/'/g, "''")}'`;
+}
+
+// --- Defined names --------------------------------------------------------------
+
+/**
+ * Whether `name` may be a defined name, as in Excel: a letter or `_`, then letters, digits, `_` and `.`; not a cell's
+ * address (`B2`), TRUE or FALSE, or one of Excel's own (`_xlnm.Print_Area`).
+ */
+export function isValidDefinedName(name: string): boolean {
+  return (
+    name.length <= 255 &&
+    /^[A-Za-z_][A-Za-z0-9_.]*$/.test(name) &&
+    !parseCellAddress(name) &&
+    !/^(TRUE|FALSE)$/i.test(name) &&
+    !/^_xlnm\./i.test(name)
+  );
+}
+
+/** The cells a defined name's reference labels (`Costs!$B$2`, `'Hull data'!A1:A5`, `B2`): their sheet (null if none) and range. */
+export function parseNameRef(ref: string): { sheet: string | null; range: CellRange } | null {
+  const text = ref.trim().replace(/^=/, "");
+  const match = REF.exec(text);
+  if (!match || match[0].length !== text.length) return null;
+  const sheet = match[1] !== undefined ? match[1].replace(/''/g, "'") : (match[2] ?? null);
+  const range = parseRangeAddress(match[4] ? `${match[3]}:${match[4]}` : match[3]);
+  return range ? { sheet, range } : null;
+}
+
+/** A defined name's reference to `range` of sheet `sheet`, as the Name Box writes it: `Costs!B2`, `'Hull data'!A1:A5`. */
+export function nameRef(sheet: string, range: CellRange): string {
+  return `${quoteSheetName(sheet)}!${formatRangeAddress(range.r1, range.c1, range.r2, range.c2)}`;
+}
+
+/** The defined name `name` (ignoring case): as the spreadsheet writes it, and the sheet (null if none) and cells it labels. */
+export function resolveDefinedName(data: SpreadsheetData, name: string): { name: string; sheet: string | null; range: CellRange } | null {
+  const key = name.trim().toLowerCase();
+  for (const [defined, ref] of Object.entries(data.names ?? {})) {
+    if (defined.toLowerCase() !== key) continue;
+    const target = parseNameRef(ref);
+    return target ? { name: defined, ...target } : null;
+  }
+  return null;
+}
+
+/** The first defined name that labels exactly `range` of sheet `sheetName`, or null. */
+export function findDefinedNameForRange(data: SpreadsheetData, sheetName: string, range: CellRange): string | null {
+  for (const [name, ref] of Object.entries(data.names ?? {})) {
+    const target = parseNameRef(ref);
+    if (!target || (target.sheet !== null && target.sheet.toLowerCase() !== sheetName.toLowerCase())) continue;
+    const r = target.range;
+    if (r.r1 === range.r1 && r.c1 === range.c1 && r.r2 === range.r2 && r.c2 === range.c2) return name;
+  }
+  return null;
+}
+
+/** The spreadsheet with defined name `name` (ignoring case) labelling `ref`, or, with `ref` null, without it. */
+export function setDefinedName(data: SpreadsheetData, name: string, ref: string | null): SpreadsheetData {
+  const names = Object.fromEntries(Object.entries(data.names ?? {}).filter(([n]) => n.toLowerCase() !== name.toLowerCase()));
+  if (ref !== null) names[name] = ref;
+  const { names: _old, ...rest } = data;
+  return Object.keys(names).length ? { ...rest, names } : rest;
+}
+
+/** `names` with each reference changed by `change` (null drops the name), or undefined if none are left. */
+function mapNames(names: Record<string, string> | undefined, change: (ref: string) => string | null): Record<string, string> | undefined {
+  if (!names) return undefined;
+  const changed: Record<string, string> = {};
+  for (const [name, ref] of Object.entries(names)) {
+    const next = change(ref);
+    if (next !== null) changed[name] = next;
+  }
+  return Object.keys(changed).length ? changed : undefined;
+}
+
+/** The spreadsheet without sheet `index`, and without the defined names of its cells. */
+export function removeSheet(data: SpreadsheetData, index: number): SpreadsheetData {
+  const name = data.sheets[index].name.toLowerCase();
+  const sheets = data.sheets.filter((_, i) => i !== index);
+  const names = mapNames(data.names, (ref) => (parseNameRef(ref)?.sheet?.toLowerCase() === name ? null : ref));
+  const { names: _old, ...rest } = data;
+  return { ...rest, sheets, ...(names ? { names } : {}) };
 }
 
 /** `formula` (in a sheet that is `inTarget` or not) with its references to sheet `target` moved by `shift`. */
@@ -425,7 +584,8 @@ export function renameSheet(data: SpreadsheetData, index: number, name: string):
     name: i === index ? name : sheet.name,
     rows: sheet.rows.map((row) => row.map((text) => (text.startsWith("=") ? rename(text) : text))),
   }));
-  return { ...data, sheets, activeSheet: data.activeSheet === old ? name : data.activeSheet };
+  const names = mapNames(data.names, (ref) => rename(`=${ref}`).slice(1));
+  return { ...data, sheets, activeSheet: data.activeSheet === old ? name : data.activeSheet, ...(names ? { names } : {}) };
 }
 
 /** A worked-out value: a number, text, or an error (`#REF!`, …). */
@@ -475,19 +635,32 @@ export const FORMULA_FUNCTIONS: FormulaFunctionInfo[] = [
   { name: "ABS", syntax: "ABS(number)", description: "Returns the absolute value of a number." },
 ];
 
+/** What the formula autocomplete offers: a function (taken with its `(`) or a defined name. */
+export type FormulaSuggestion = FormulaFunctionInfo & { kind: "function" | "name" };
+
 /**
- * The function name being typed at `caret` in a formula (`=SU|`, `=B2+av|`): where it starts, and the functions it
- * could be. None if the text there isn't a formula's function name.
+ * The function or defined name (of `names`) being typed at `caret` in a formula (`=SU|`, `=B2+av|`, `=Ke|`): where
+ * it starts, and the functions and names it could be. None if the text there isn't a formula's name.
  */
-export function functionSuggestions(text: string, caret: number): { start: number; matches: FormulaFunctionInfo[] } | null {
+export function functionSuggestions(
+  text: string,
+  caret: number,
+  names?: Record<string, string>,
+): { start: number; matches: FormulaSuggestion[] } | null {
   if (!text.startsWith("=")) return null;
   const before = text.slice(0, caret);
-  const match = /[A-Za-z]+$/.exec(before);
+  const match = /[A-Za-z_][\w.]*$/.exec(before);
   if (!match || !/[=(,+\-*/^&<> ]/.test(before[match.index - 1] ?? "")) return null;
   // Not if it's the start of a word that goes on past the caret (`=SU|M`).
   if (/^[\w(]/.test(text.slice(caret))) return null;
   const prefix = match[0].toUpperCase();
-  const matches = FORMULA_FUNCTIONS.filter((f) => f.name.startsWith(prefix));
+  const matches: FormulaSuggestion[] = [
+    ...FORMULA_FUNCTIONS.filter((f) => f.name.startsWith(prefix)).map((f) => ({ ...f, kind: "function" as const })),
+    ...Object.entries(names ?? {})
+      .filter(([name]) => name.toUpperCase().startsWith(prefix))
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([name, ref]) => ({ name, syntax: name, description: `Defined name: ${ref}`, kind: "name" as const })),
+  ];
   return matches.length ? { start: match.index, matches } : null;
 }
 
@@ -511,6 +684,12 @@ export function createEvaluator(data: SpreadsheetData): Evaluator {
   const cache = new Map<string, Value>();
   const visiting = new Set<string>();
   const sheetIndexByName = new Map(data.sheets.map((s, i) => [s.name.toLowerCase(), i]));
+  // The defined names, by their name in capitals (as formulas' names are tokenized).
+  const definedNames = new Map<string, { sheet: string | null; range: CellRange }>();
+  for (const [name, ref] of Object.entries(data.names ?? {})) {
+    const target = parseNameRef(ref);
+    if (target) definedNames.set(name.toUpperCase(), target);
+  }
 
   function cellValue(sheetIndex: number, row: number, col: number): Value {
     const key = `${sheetIndex}:${row}:${col}`;
@@ -560,6 +739,15 @@ export function createEvaluator(data: SpreadsheetData): Evaluator {
       };
     };
 
+    // The cells a defined name labels (a name without a sheet: of the formula's), or null if it isn't one.
+    const resolveName = (name: string): Range | null => {
+      const target = definedNames.get(name);
+      if (!target) return null;
+      const index = target.sheet === null ? sheetIndex : sheetIndexByName.get(target.sheet.toLowerCase());
+      if (index === undefined) throw new FormulaError("#REF!");
+      return { sheetIndex: index, ...target.range };
+    };
+
     const rangeValues = (range: Range): Value[] => {
       const values: Value[] = [];
       const sheet = data.sheets[range.sheetIndex];
@@ -586,10 +774,18 @@ export function createEvaluator(data: SpreadsheetData): Evaluator {
     const argument = (): { values: Value[]; fromRange: boolean } => {
       const token = peek();
       const next = tokens[pos + 1];
-      if (token?.kind === "ref" && (!next || (next.kind === "op" && (next.value === "," || next.value === ")")))) {
+      const alone = !next || (next.kind === "op" && (next.value === "," || next.value === ")"));
+      if (token?.kind === "ref" && alone) {
         pos++;
         const range = resolveRange(token);
         return { values: token.to ? rangeValues(range) : [cellValue(range.sheetIndex, range.r1, range.c1)], fromRange: true };
+      }
+      if (token?.kind === "name" && alone) {
+        const range = resolveName(token.value);
+        if (range) {
+          pos++;
+          return { values: rangeValues(range), fromRange: true };
+        }
       }
       return { values: [expression()], fromRange: false };
     };
@@ -671,10 +867,19 @@ export function createEvaluator(data: SpreadsheetData): Evaluator {
           if (isError(value)) throw new FormulaError(value.error);
           return value;
         }
-        case "name":
+        case "name": {
           if (isOp("(")) return call(token.value);
+          const range = resolveName(token.value);
+          if (range) {
+            // A range's name, where one value goes, is Excel's #VALUE!.
+            if (range.r1 !== range.r2 || range.c1 !== range.c2) throw new FormulaError("#VALUE!");
+            const value = cellValue(range.sheetIndex, range.r1, range.c1);
+            if (isError(value)) throw new FormulaError(value.error);
+            return value;
+          }
           if (token.value === "TRUE" || token.value === "FALSE") return token.value;
           throw new FormulaError("#NAME?");
+        }
         case "op":
           if (token.value === "(") {
             const value = expression();
@@ -792,7 +997,17 @@ export async function parseWorkbookBuffer(buffer: ArrayBuffer, title?: string): 
     sheets.push({ name: uniqueSheetName(sheets, name), rows: rows.length ? rows : emptyRows() });
   }
   if (!sheets.length) sheets.push({ name: "Sheet1", rows: emptyRows() });
-  return { data: { activeSheet: sheets[0].name, sheets, ...(title ? { title } : {}) }, truncated };
+  // The workbook's defined names (not those of one sheet, nor Excel's own).
+  const names: Record<string, string> = {};
+  for (const defined of book.Workbook?.Names ?? []) {
+    if (defined.Sheet != null || (defined as { Hidden?: boolean }).Hidden || !isValidDefinedName(defined.Name)) continue;
+    const target = defined.Ref ? parseNameRef(defined.Ref) : null;
+    if (!target) continue;
+    const { r1, c1, r2, c2 } = target.range;
+    names[defined.Name] = target.sheet !== null ? nameRef(target.sheet, target.range) : formatRangeAddress(r1, c1, r2, c2);
+  }
+  const data: SpreadsheetData = { activeSheet: sheets[0].name, sheets, ...(title ? { title } : {}) };
+  return { data: Object.keys(names).length ? { ...data, names } : data, truncated };
 }
 
 function workbookCellText(XLSX: XlsxModule, cell: import("xlsx").CellObject): string {
@@ -826,6 +1041,8 @@ function buildWorkbook(XLSX: XlsxModule, data: SpreadsheetData, formulas: boolea
     0,
   );
   const indices = onlyActive ? [activeIndex] : data.sheets.map((_, i) => i);
+  // Each sheet's name in the workbook (made one Excel takes), for the defined names.
+  const bookNames = new Map<string, string>();
   for (const index of indices) {
     const sheet = data.sheets[index];
     const ws: import("xlsx").WorkSheet = {};
@@ -852,7 +1069,20 @@ function buildWorkbook(XLSX: XlsxModule, data: SpreadsheetData, formulas: boolea
       name = `${base.slice(0, 28)} ${n}`;
     }
     XLSX.utils.book_append_sheet(book, ws, name);
+    bookNames.set(sheet.name.toLowerCase(), name);
   }
+  // The defined names, as absolute references (`Costs!$B$2`); one without a sheet, to the active sheet.
+  const absolute = (r: number, c: number) => `$${colLetter(c)}$${r + 1}`;
+  const names: import("xlsx").DefinedName[] = [];
+  for (const [name, ref] of Object.entries(data.names ?? {})) {
+    const target = parseNameRef(ref);
+    const sheetName = target && bookNames.get((target.sheet ?? data.sheets[activeIndex].name).toLowerCase());
+    if (!target || !sheetName) continue;
+    const { r1, c1, r2, c2 } = target.range;
+    const cells = r1 === r2 && c1 === c2 ? absolute(r1, c1) : `${absolute(r1, c1)}:${absolute(r2, c2)}`;
+    names.push({ Name: name, Ref: `${quoteSheetName(sheetName)}!${cells}` });
+  }
+  if (names.length) book.Workbook = { ...(book.Workbook ?? {}), Names: names };
   return book;
 }
 

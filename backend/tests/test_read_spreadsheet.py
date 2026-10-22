@@ -143,3 +143,19 @@ def test_agent_tool_errors_become_tool_errors(tmp_path):
     turn = agent._Turn(AccessMode.READ_ONLY)
     with pytest.raises(agent.ToolError, match="File not found"):
         turn.call("read_spreadsheet", {"path": str(tmp_path / "missing.xlsx")})
+
+
+def test_reads_defined_names(workbook, tmp_path):
+    from openpyxl.workbook.defined_name import DefinedName
+
+    book = openpyxl.load_workbook(workbook)
+    book.defined_names["Totals"] = DefinedName("Totals", attr_text="Costs!$D$2:$D$3")
+    book.save(workbook)
+
+    data = read_spreadsheet.read_spreadsheet(workbook)
+    assert data["names"] == {"Totals": "Costs!$D$2:$D$3"}
+    assert "Defined names (1):\n  - Totals: Costs!$D$2:$D$3" in read_spreadsheet.format_spreadsheet(data)
+
+    csv_file = tmp_path / "parts.csv"
+    csv_file.write_text("Part,Mass\nKeel,8200\n", encoding="utf-8")
+    assert "names" not in read_spreadsheet.read_spreadsheet(csv_file)

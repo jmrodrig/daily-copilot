@@ -9,7 +9,8 @@ person at a shell; and change their cells, for the agent (`edit_spreadsheet`).
 
 A sheet's first row is taken as its headers. Cells show their saved values; a formula's cell shows its formula when
 the file holds no saved value for it (as a file written by a script, not Excel, may not), and `--json` (or the
-"Formulas" list under each table) gives every formula. Uses `openpyxl` (imported when a workbook is read).
+"Formulas" list under each table) gives every formula. A workbook's defined names (`KeelWeight` → `Costs!$B$2`) are
+listed with its sheets. Uses `openpyxl` (imported when a workbook is read).
 """
 
 import argparse
@@ -89,7 +90,12 @@ def _read_csv(path: Path) -> list[dict[str, Any]]:
     return [_sheet(path.stem, rows, {})]
 
 
-def _read_excel(path: Path) -> list[dict[str, Any]]:
+def _defined_names(book: Any) -> dict[str, str]:
+    """A workbook's defined names (not those of one sheet), each to the cells it labels (`Costs!$B$2`)."""
+    return {name: defined.attr_text for name, defined in book.defined_names.items() if defined.attr_text and not defined.hidden}
+
+
+def _read_excel(path: Path) -> tuple[list[dict[str, Any]], dict[str, str]]:
     try:
         import openpyxl
     except ImportError as exc:  # pragma: no cover - depends on the environment
@@ -117,7 +123,7 @@ def _read_excel(path: Path) -> list[dict[str, Any]]:
                     row.append(cell_text(raw if is_formula and value is None else value))
                 rows.append(row)
             sheets.append(_sheet(values_sheet.title, rows, formulas))
-        return sheets
+        return sheets, _defined_names(formulas_book)
     except Exception as exc:
         raise SpreadsheetReadError(f"Could not read {path}: {exc}") from exc
     finally:
@@ -132,8 +138,9 @@ def read_spreadsheet(
     search: str | None = None,
 ) -> dict[str, Any]:
     """The spreadsheet in `file_path` as a dict: `path` and `sheets`, each with its `name`, `rows` and `cols` (its
-    used size), `cells` (every row, as text) and `formulas` (cell → formula, for workbooks). With `sheet`, only that
-    sheet (matched case-insensitively); with `search`, also `matches`: the cells whose value or formula contains it.
+    used size), `cells` (every row, as text) and `formulas` (cell → formula, for workbooks), and a workbook's defined
+    `names` (name → cells, `{"KeelWeight": "Costs!$B$2"}`) if it has any. With `sheet`, only that sheet (matched
+    case-insensitively); with `search`, also `matches`: the cells whose value or formula contains it.
 
     Raises `SpreadsheetReadError` if the file is missing, isn't a supported spreadsheet, couldn't be read, or has
     no sheet named `sheet`.
@@ -147,7 +154,7 @@ def read_spreadsheet(
     if suffix not in SPREADSHEET_SUFFIXES:
         raise SpreadsheetReadError(f"Not a spreadsheet ({', '.join(sorted(SPREADSHEET_SUFFIXES))}): {path}")
 
-    sheets = _read_csv(path) if suffix in CSV_SUFFIXES else _read_excel(path)
+    sheets, names = (_read_csv(path), {}) if suffix in CSV_SUFFIXES else _read_excel(path)
     if sheet is not None:
         chosen = [s for s in sheets if s["name"].lower() == sheet.strip().lower()]
         if not chosen:
@@ -156,6 +163,8 @@ def read_spreadsheet(
         sheets = chosen
 
     data: dict[str, Any] = {"path": str(path), "sheets": sheets}
+    if names:
+        data["names"] = names
     if search is not None:
         data["search"] = search
         data["matches"] = find_cells(sheets, search)
@@ -195,6 +204,64 @@ def _cells_of(range_text: str) -> tuple[int, int, int, int]:
     if None in (min_col, min_row, max_col, max_row):
         raise SpreadsheetReadError(f"Not a cell or range: {range_text!r} (e.g. `B2` or `A1:C10`)")
     return min_col, min_row, max_col, max_row  # type: ignore[return-value]
+
+
+_NAME_RE = re.compile(r"\A[A-Za-z_][A-Za-z0-9_.]*\Z")
+_CELL_RE = re.compile(r"\A\$?[A-Za-z]{1,3}\$?\d+\Z")
+_SHEET_REF_RE = re.compile(r"\A(?:'((?:[^']|'')+)'|([A-Za-z_][\w.]*))!(.+)\Z")
+
+
+def _check_name(name: str) -> str:
+    """`name` if a defined name may be it, as in Excel: a letter or `_`, then letters, digits, `_` and `.`, and not a
+    cell's address (`B2`), TRUE or FALSE."""
+    text = name.strip()
+    if not _NAME_RE.match(text) or _CELL_RE.match(text) or text.upper() in {"TRUE", "FALSE"} or text.lower().startswith("_xlnm."):
+        raise SpreadsheetReadError(
+            f"Not a name a cell can have: {name!r} (a letter or _, then letters, digits, _ or ., and not a cell's address)"
+        )
+    return text
+
+
+def _quote_sheet(title: str) -> str:
+    """A sheet's name as a reference writes it: quoted unless it's a plain word."""
+    plain = re.match(r"\A[A-Za-z_][\w.]*\Z", title) and not _CELL_RE.match(title)
+    return title if plain else "'" + title.replace("'", "''") + "'"
+
+
+def _name_ref(book: Any, default_sheet: str, ref: str) -> str:
+    """A defined name's reference (`B2`, `A1:A10`, `Costs!B2`, `'Hull data'!A1:A5`) as the workbook keeps it: on its
+    sheet (else `default_sheet`), absolute (`Costs!$B$2`)."""
+    text = ref.strip().lstrip("=")
+    match = _SHEET_REF_RE.match(text)
+    sheet_name, cells = default_sheet, text
+    if match:
+        sheet_name = match.group(1).replace("''", "'") if match.group(1) else match.group(2)
+        cells = match.group(3)
+    sheet = next((ws.title for ws in book.worksheets if ws.title.lower() == sheet_name.lower()), None)
+    if sheet is None:
+        names = ", ".join(ws.title for ws in book.worksheets)
+        raise SpreadsheetReadError(f'No sheet named "{sheet_name}" for the name\'s cells {ref!r} (its sheets: {names})')
+    min_col, min_row, max_col, max_row = _cells_of(cells)
+    start = f"${col_letter(min_col)}${min_row}"
+    end = f"${col_letter(max_col)}${max_row}"
+    return f"{_quote_sheet(sheet)}!{start}" + ("" if start == end else f":{end}")
+
+
+def _set_names(book: Any, default_sheet: str, names: dict[str, Any]) -> list[str]:
+    """Define (or, given `""` or None, remove) each of `names` in `book`, matching an existing name whatever its case."""
+    from openpyxl.workbook.defined_name import DefinedName
+
+    changed = []
+    for name, ref in names.items():
+        text = _check_name(name)
+        for existing in [n for n in book.defined_names if n.lower() == text.lower()]:
+            del book.defined_names[existing]
+        if ref is None or not str(ref).strip():
+            changed.append(f"-{text}")
+            continue
+        book.defined_names[text] = DefinedName(text, attr_text=_name_ref(book, default_sheet, str(ref)))
+        changed.append(text)
+    return changed
 
 
 def _edit_csv(path: Path, updates: dict[str, Any], clear_range: str | None, add_sheet: str | None) -> list[str]:
@@ -243,14 +310,18 @@ def edit_spreadsheet(
     add_sheet: str | None = None,
     clear_range: str | None = None,
     create: bool = False,
+    names: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Change cells of the spreadsheet in `file_path` and save it: add a sheet named `add_sheet`, empty the cells of
     `clear_range` (`A1:C10`), then set each cell of `updates` (`{"B2": 150, "B4": "=SUM(B2:B3)"}`; see `cell_value`),
     on `sheet` (matched case-insensitively), else the sheet just added, else the workbook's active one. With
-    `create`, a missing file is made, as a workbook with one empty sheet (or an empty CSV).
+    `create`, a missing file is made, as a workbook with one empty sheet (or an empty CSV). A workbook's defined
+    `names` are set too (`{"KeelWeight": "B2", "Prices": "Costs!A1:A10"}`, a reference without a sheet being on the
+    sheet edited), or removed (`{"KeelWeight": None}`).
 
-    Returns `path`, the `sheet` edited, the `sheets` the file has and the cells `changed`. Raises
-    `SpreadsheetReadError` as `read_spreadsheet` does, and for a bad address or a sheet name that's taken.
+    Returns `path`, the `sheet` edited, the `sheets` the file has, the cells `changed` (and the names, a removed one
+    as `-Name`), and the workbook's defined `names` if it has any. Raises `SpreadsheetReadError` as
+    `read_spreadsheet` does, and for a bad address, name or sheet name, or a sheet name that's taken.
     """
     path = Path(file_path)
     suffix = path.suffix.lower()
@@ -265,6 +336,8 @@ def edit_spreadsheet(
     if suffix in CSV_SUFFIXES:
         if sheet and sheet.strip().lower() != path.stem.lower():
             raise SpreadsheetReadError(f'No sheet named "{sheet}" in {path.name} (its sheets: {path.stem})')
+        if names:
+            raise SpreadsheetReadError(f"{path.name} is a {path.suffix} file: it can't have defined names")
         changed = _edit_csv(path, updates, clear_range, add_sheet)
         return {"path": str(path), "sheet": path.stem, "sheets": [path.stem], "changed": changed}
 
@@ -309,10 +382,14 @@ def edit_spreadsheet(
             raise SpreadsheetReadError(f"Updates take single cells, not a range: {address}")
         ws.cell(row=min_row, column=min_col).value = cell_value(value)
         changed.append(f"{col_letter(min_col)}{min_row}")
+    if names:
+        changed += _set_names(book, ws.title, names)
 
     path.parent.mkdir(parents=True, exist_ok=True)
     book.save(path)
-    return {"path": str(path), "sheet": ws.title, "sheets": [s.title for s in book.worksheets], "changed": changed}
+    result = {"path": str(path), "sheet": ws.title, "sheets": [s.title for s in book.worksheets], "changed": changed}
+    defined = _defined_names(book)
+    return {**result, "names": defined} if defined else result
 
 
 def find_cells(sheets: list[dict[str, Any]], query: str) -> list[dict[str, Any]]:
@@ -368,6 +445,9 @@ def format_spreadsheet(data: dict[str, Any], max_rows: int = DEFAULT_MAX_ROWS, m
     for sheet in sheets:
         formulas = f", {len(sheet['formulas'])} formulas" if sheet["formulas"] else ""
         lines.append(f"  - {sheet['name']}: {sheet['rows']} rows × {sheet['cols']} columns{formulas}")
+    if data.get("names"):
+        lines.append(f"Defined names ({len(data['names'])}):")
+        lines += [f"  - {name}: {ref}" for name, ref in data["names"].items()]
 
     if "matches" in data:
         matches = data["matches"]

@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEve
 
 import { Segment, ToolbarDivider, ToolIcon } from "./markupUi";
 import {
+  FORMULA_PALETTE,
   IMPORT_MAX_COLS,
   IMPORT_MAX_ROWS,
   SPREADSHEET_FILE_ACCEPT,
@@ -12,22 +13,31 @@ import {
   createEvaluator,
   emptyRows,
   exportWorkbook,
+  findDefinedNameForRange,
   formatRangeAddress,
-  formulaReferences,
+  formulaColoredReferences,
   functionSuggestions,
   getEffectiveDisplayRange,
+  isValidDefinedName,
+  nameRef,
+  parseNameRef,
   parseRangeAddress,
   parseSpreadsheet,
   parseWorkbookBuffer,
+  removeSheet,
   renameSheet,
+  resolveDefinedName,
   restyle,
   serializeSpreadsheet,
   setCell,
+  setDefinedName,
   sheetCols,
   shiftCells,
   uniqueSheetName,
   type CellPos,
   type CellRange,
+  type ColoredFormulaRef,
+  type FormulaSuggestion,
   type SpreadsheetData,
   type SpreadsheetStyle,
 } from "./spreadsheet";
@@ -82,6 +92,29 @@ function outlineEdges(range: Range, r: number, c: number): string {
 }
 
 /**
+ * A formula's text with each reference in its color (see `formulaColoredReferences`): drawn under the input it's
+ * typed in, whose own text is then see-through, so the caret and selection stay the input's.
+ */
+function FormulaText({ text, refs }: { text: string; refs: ColoredFormulaRef[] }) {
+  const parts: ReactNode[] = [];
+  let last = 0;
+  for (const ref of refs) {
+    parts.push(text.slice(last, ref.start));
+    parts.push(
+      <span key={ref.start} style={{ color: FORMULA_PALETTE[ref.colorIndex].hex }}>
+        {ref.rawText}
+      </span>,
+    );
+    last = ref.end;
+  }
+  parts.push(text.slice(last));
+  return <>{parts}</>;
+}
+
+/** The classes of an input drawn over its `FormulaText`: its text see-through, its caret and selection not. */
+const OVER_FORMULA = "text-transparent caret-text-primary selection:bg-accent/25";
+
+/**
  * A spreadsheet (see spreadsheet.ts): its grid of cells, with formulas worked out.
  *
  * In full (`compact` false) it shows one sheet at a time, with the sheets' tabs at the bottom: click one to switch to
@@ -91,9 +124,14 @@ function outlineEdges(range: Range, r: number, c: number): string {
  * `onOpenNative`), a formula bar, and a grid, running on past the screen's edge, to type in: arrows, Tab and Enter
  * move, typing or Enter or F2 (or a double click) edits the cell, Escape cancels; Delete clears the selection,
  * Ctrl+B/I format it, Ctrl+C/X/V copy it as tab-separated text, Ctrl+Z/Y undo and redo. Typing a formula offers its
- * functions (arrows choose, Tab or Enter take one, Escape closes them), and where a cell reference goes next, clicking
- * a cell writes its address in, and dragging a range's. Each finished edit goes out through `onChange`, as the whole
+ * functions and defined names (arrows choose, Tab or Enter take one, Escape closes them), and where a cell reference
+ * goes next, clicking a cell writes its address in, and dragging a range's. A formula's references are each in a color
+ * of their own, in its text and outlined on the grid. Each finished edit goes out through `onChange`, as the whole
  * spreadsheet's JSON.
+ *
+ * In full, the Name Box (left of the formula bar) shows the selection's address, or its defined name: type a new name
+ * there and Enter to name the selected cells, or a name or an address (`D15`, `Costs!A1:B4`) to go to it. Its list
+ * shows the defined names, to go to one or delete it.
  *
  * The display area (the cells a note shows) is the sheet's own `displayArea`, saved with it, unless `displayArea` is
  * given (a window onto a workbook file keeps its own, see SpreadsheetWidget): then "Set display area" hands the
@@ -194,11 +232,19 @@ export default function SpreadsheetView({
   const [renaming, setRenaming] = useState<{ index: number; text: string } | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [scroll, setScroll] = useState({ top: 0, height: 400 });
+  // The Name Box's text while it's typed in, and whether its list of defined names is open.
+  const [nameDraft, setNameDraft] = useState<string | null>(null);
+  const [namesOpen, setNamesOpen] = useState(false);
+  // The cells to select once the sheet switched to (for a name or address on another sheet) is shown.
+  const pendingSelection = useRef<Range | null>(null);
   const range = rangeOf(anchor, focus);
 
   const gridRef = useRef<HTMLDivElement>(null);
   const cellInputRef = useRef<HTMLInputElement>(null);
   const barInputRef = useRef<HTMLInputElement>(null);
+  // The colored formula text drawn under each input, scrolled along with it.
+  const cellOverlayRef = useRef<HTMLDivElement>(null);
+  const barOverlayRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const undoRef = useRef<{ past: string[]; future: string[] }>({ past: [], future: [] });
   // A drag selecting cells with the mouse.
@@ -228,8 +274,8 @@ export default function SpreadsheetView({
     return () => observer.disconnect();
   }, []);
 
-  // The functions offered for the name typed at the caret of a formula.
-  const suggestions = edit && !suggestOff ? functionSuggestions(edit.text, caret) : null;
+  // The functions and defined names offered for the name typed at the caret of a formula.
+  const suggestions = edit && !suggestOff ? functionSuggestions(edit.text, caret, data.names) : null;
   const suggesting = !!suggestions;
 
   // The edit's text changed for it (a function taken, a reference picked): its caret goes where it was meant to.
@@ -242,6 +288,13 @@ export default function SpreadsheetView({
     setCaret(at);
   });
 
+  // The colored text under each input follows it as it scrolls sideways.
+  function syncOverlays() {
+    if (barOverlayRef.current && barInputRef.current) barOverlayRef.current.scrollLeft = barInputRef.current.scrollLeft;
+    if (cellOverlayRef.current && cellInputRef.current) cellOverlayRef.current.scrollLeft = cellInputRef.current.scrollLeft;
+  }
+  useLayoutEffect(syncOverlays);
+
   // The functions offered drop down below the input they're typed in.
   useLayoutEffect(() => {
     const input = edit?.where === "bar" ? barInputRef.current : cellInputRef.current;
@@ -249,7 +302,7 @@ export default function SpreadsheetView({
     setSuggestAt(rect ? { left: rect.left, top: rect.bottom + 2 } : null);
   }, [suggesting, edit?.where, edit?.row, edit?.col]);
 
-  // A sheet imported in place of this one starts at its first cell.
+  // A sheet imported in place of this one starts at its first cell; one gone to by a name, at the name's cells.
   const sheetName = current.name;
   const firstRender = useRef(true);
   useEffect(() => {
@@ -257,10 +310,16 @@ export default function SpreadsheetView({
       firstRender.current = false;
       return;
     }
-    setAnchor({ row: 0, col: 0 });
-    setFocus({ row: 0, col: 0 });
+    const pending = pendingSelection.current;
+    pendingSelection.current = null;
     setEdit(null);
     gridRef.current?.scrollTo({ top: 0, left: 0 });
+    if (pending) {
+      selectRange(pending);
+      return;
+    }
+    setAnchor({ row: 0, col: 0 });
+    setFocus({ row: 0, col: 0 });
   }, [sheetName]);
 
   /** Save `next`, remembering what it replaces for undo. */
@@ -306,11 +365,40 @@ export default function SpreadsheetView({
     else if (left + COL_W > grid.scrollLeft + viewW) grid.scrollLeft = left + COL_W - viewW;
   }
 
+  const clamp = (cell: CellPos): CellPos => ({
+    row: Math.min(Math.max(cell.row, bounds.r1), bounds.r2),
+    col: Math.min(Math.max(cell.col, bounds.c1), bounds.c2),
+  });
+
   function select(cell: CellPos, extend = false) {
-    const clamped = { row: Math.min(Math.max(cell.row, bounds.r1), bounds.r2), col: Math.min(Math.max(cell.col, bounds.c1), bounds.c2) };
+    const clamped = clamp(cell);
     if (!extend) setAnchor(clamped);
     setFocus(clamped);
     scrollIntoView(clamped);
+  }
+
+  /** Select the cells `target`, and give the grid the keys. */
+  function selectRange(target: Range) {
+    const from = clamp({ row: target.r1, col: target.c1 });
+    setAnchor(from);
+    setFocus(clamp({ row: target.r2, col: target.c2 }));
+    scrollIntoView(from);
+    gridRef.current?.focus({ preventScroll: true });
+  }
+
+  /** Go to the cells `target` of sheet `sheet` (null for the one shown), switching to it. */
+  function goTo(sheet: string | null, target: Range) {
+    const other = sheet === null ? current : data.sheets.find((s) => s.name.toLowerCase() === sheet.toLowerCase());
+    if (!other) {
+      setNotice(`There's no sheet named "${sheet}".`);
+      return;
+    }
+    if (other.name === sheetName) {
+      selectRange(target);
+      return;
+    }
+    pendingSelection.current = target;
+    switchSheet(other.name);
   }
 
   // --- Editing ----------------------------------------------------------------
@@ -350,9 +438,9 @@ export default function SpreadsheetView({
     setEdit(next);
   }
 
-  function acceptSuggestion(name: string) {
+  function acceptSuggestion(item: FormulaSuggestion) {
     if (!suggestions) return;
-    spliceEdit(suggestions.start, caret, `${name}(`);
+    spliceEdit(suggestions.start, caret, item.kind === "name" ? item.name : `${item.name}(`);
     pickRef.current = null;
     setSuggestIndex(0);
   }
@@ -482,6 +570,40 @@ export default function SpreadsheetView({
     else commit(withSheet(({ displayArea: _old, ...s }) => (area ? { ...s, displayArea: area } : s)));
   }
 
+  // --- Defined names --------------------------------------------------------------
+
+  /**
+   * The Name Box's text, on Enter: a defined name or an address (`D15`, `Costs!A1:B4`) goes to its cells; a new name
+   * names the selected cells.
+   */
+  function submitNameBox() {
+    const text = (nameDraft ?? "").trim();
+    setNameDraft(null);
+    setNamesOpen(false);
+    if (!text) {
+      gridRef.current?.focus({ preventScroll: true });
+      return;
+    }
+    const defined = resolveDefinedName(data, text);
+    if (defined) return goTo(defined.sheet, defined.range);
+    const place = parseNameRef(text);
+    if (place) return goTo(place.sheet, place.range);
+    if (!isValidDefinedName(text)) {
+      setNotice(`"${text}" can't be a name: start it with a letter or _, then use letters, digits, _ or . (and not a cell's address).`);
+      return;
+    }
+    if (!canEdit) {
+      setNotice("This spreadsheet can't be changed here, so its cells can't be named.");
+      return;
+    }
+    commit(setDefinedName({ ...data, activeSheet: sheetName }, text, nameRef(sheetName, range)));
+    gridRef.current?.focus({ preventScroll: true });
+  }
+
+  function deleteName(name: string) {
+    commit(setDefinedName({ ...data, activeSheet: sheetName }, name, null));
+  }
+
   // --- Sheets -------------------------------------------------------------------
 
   /** Show sheet `name`; without a `sheet` given, it's saved as the active one, the one the note shows. */
@@ -517,9 +639,9 @@ export default function SpreadsheetView({
     if (data.sheets.length < 2) return;
     const name = data.sheets[index].name;
     if (!window.confirm(`Delete sheet "${name}" and everything in it?`)) return;
-    const sheets = data.sheets.filter((_, i) => i !== index);
-    const next = sheets[Math.min(index, sheets.length - 1)].name;
-    commit({ ...data, activeSheet: next, sheets });
+    const rest = removeSheet(data, index);
+    const next = rest.sheets[Math.min(index, rest.sheets.length - 1)].name;
+    commit({ ...rest, activeSheet: next });
     setShownSheet(next);
   }
 
@@ -608,7 +730,7 @@ export default function SpreadsheetView({
       let handled = true;
       if (event.key === "ArrowDown") setSuggestIndex((i) => (i + 1) % count);
       else if (event.key === "ArrowUp") setSuggestIndex((i) => (i - 1 + count) % count);
-      else if (event.key === "Enter" || event.key === "Tab") acceptSuggestion(suggestions.matches[Math.min(suggestIndex, count - 1)].name);
+      else if (event.key === "Enter" || event.key === "Tab") acceptSuggestion(suggestions.matches[Math.min(suggestIndex, count - 1)]);
       else if (event.key === "Escape") setSuggestOff(true);
       else handled = false;
       if (handled) {
@@ -637,15 +759,17 @@ export default function SpreadsheetView({
   for (let r = firstRow; r <= lastRow; r++) shownRows.push(r);
 
   const focusText = edit ? edit.text : cellText(current, focus.row, focus.col);
-  const refRanges = edit
-    ? formulaReferences(edit.text)
-        .filter((ref) => ref.sheet === null || ref.sheet.toLowerCase() === sheetName.toLowerCase())
-        .map((ref) => ref.range)
-    : [];
+  // The references of the formula shown (in the formula bar, and the cell edited), each in its color; while it's
+  // edited, those on this sheet are outlined on the grid in it too.
+  const isFormula = focusText.startsWith("=");
+  const textRefs = formulaColoredReferences(focusText, sheetName, data.names);
+  const gridRefs = edit ? textRefs.filter((ref) => ref.sheet === null) : [];
   const title = fileName || data.title || "Spreadsheet";
   // A workbook file has no display area of its own: only a window onto it (`onSetDisplayArea`) does.
   const areaTools = !fileName || !!onSetDisplayArea;
   const selection = formatRangeAddress(range.r1, range.c1, range.r2, range.c2);
+  const selectionName = findDefinedNameForRange(data, sheetName, range);
+  const definedNames = Object.entries(data.names ?? {}).sort(([a], [b]) => a.localeCompare(b));
 
   return (
     <div className={`flex min-h-0 flex-col bg-background ${className}`} onKeyDown={onRootKeyDown}>
@@ -778,47 +902,135 @@ export default function SpreadsheetView({
             <span className="ml-auto flex items-center gap-1">{toolbarEnd}</span>
           </div>
           <div className="flex shrink-0 items-center gap-2 border-b border-border-default px-3 py-1">
-            <span className="w-16 shrink-0 font-mono text-[13px] text-text-secondary">
-              {range.r1 === range.r2 && range.c1 === range.c2
-                ? cellAddress(focus.row, focus.col)
-                : `${cellAddress(range.r1, range.c1)}:${cellAddress(range.r2, range.c2)}`}
-            </span>
+            <div className="relative flex shrink-0 items-center">
+              <input
+                aria-label="Name Box: the selected cells' address or name; type a name to name them, or an address or name to go to it"
+                title="Type a name and press Enter to name the selected cells, or an address or name to go to it"
+                value={nameDraft ?? selectionName ?? selection}
+                onFocus={(e) => {
+                  setNameDraft(selectionName ?? selection);
+                  e.currentTarget.select();
+                }}
+                onChange={(e) => setNameDraft(e.target.value)}
+                onBlur={() => setNameDraft(null)}
+                onKeyDown={(e) => {
+                  e.stopPropagation();
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    submitNameBox();
+                  } else if (e.key === "Escape") {
+                    e.preventDefault();
+                    setNameDraft(null);
+                    gridRef.current?.focus({ preventScroll: true });
+                  }
+                }}
+                className="h-7 w-32 rounded-l border border-border-default bg-transparent px-2 font-mono text-[13px] text-text-secondary outline-none focus:border-accent focus:text-text-primary"
+              />
+              <button
+                type="button"
+                title="Defined names"
+                aria-label="Defined names"
+                aria-expanded={namesOpen}
+                onClick={() => setNamesOpen((open) => !open)}
+                className="flex h-7 w-6 items-center justify-center rounded-r border border-l-0 border-border-default text-[11px] text-text-muted hover:bg-surface-hover hover:text-text-primary"
+              >
+                ▾
+              </button>
+              {namesOpen && (
+                <>
+                  <div aria-hidden className="fixed inset-0 z-40" onMouseDown={() => setNamesOpen(false)} />
+                  <ul
+                    aria-label="Defined names"
+                    className="absolute left-0 top-full z-50 mt-1 max-h-72 w-72 overflow-auto rounded-md border border-border-default bg-surface-raised py-1 shadow-lg"
+                  >
+                    {definedNames.length === 0 && (
+                      <li className="px-3 py-1.5 text-[13px] text-text-muted">No names yet: type one in the box to name the selected cells.</li>
+                    )}
+                    {definedNames.map(([name, ref]) => (
+                      <li key={name} className="flex items-center hover:bg-surface-hover">
+                        <button
+                          type="button"
+                          title={`Go to ${name} (${ref})`}
+                          onClick={() => {
+                            setNamesOpen(false);
+                            const target = parseNameRef(ref);
+                            if (target) goTo(target.sheet, target.range);
+                          }}
+                          className="flex min-w-0 flex-1 items-baseline gap-2 px-3 py-1.5 text-left"
+                        >
+                          <span className="truncate font-mono text-[13px] text-text-primary">{name}</span>
+                          <span className="ml-auto shrink-0 font-mono text-[12px] text-text-muted">{ref}</span>
+                        </button>
+                        {canEdit && (
+                          <button
+                            type="button"
+                            title={`Delete the name ${name}`}
+                            aria-label={`Delete the name ${name}`}
+                            onClick={() => deleteName(name)}
+                            className="mr-1 flex h-6 w-6 shrink-0 items-center justify-center rounded text-text-muted hover:bg-surface-hover hover:text-text-primary"
+                          >
+                            ✕
+                          </button>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              )}
+            </div>
             <span aria-hidden className="font-serif text-[14px] italic text-text-muted">
               fx
             </span>
-            <input
-              ref={barInputRef}
-              aria-label="Cell contents"
-              readOnly={!canEdit}
-              value={focusText}
-              onFocus={() => {
-                if (canEdit && !edit) startEdit(undefined, "bar");
-              }}
-              onChange={(e) => typeEdit(e.target.value, e.target.selectionStart)}
-              onSelect={(e) => setCaret(e.currentTarget.selectionStart ?? 0)}
-              onBlur={() => edit?.where === "bar" && finishEdit()}
-              onKeyDown={onEditKeyDown}
-              className="h-7 min-w-0 flex-1 rounded border border-border-default bg-transparent px-2 font-mono text-[13px] text-text-primary outline-none focus:border-accent"
-            />
+            <div className="relative h-7 min-w-0 flex-1">
+              {isFormula && (
+                <div
+                  ref={barOverlayRef}
+                  aria-hidden
+                  className="pointer-events-none absolute inset-0 flex items-center overflow-hidden whitespace-pre rounded border border-transparent px-2 font-mono text-[13px] text-text-primary"
+                >
+                  <FormulaText text={focusText} refs={textRefs} />
+                </div>
+              )}
+              <input
+                ref={barInputRef}
+                aria-label="Cell contents"
+                readOnly={!canEdit}
+                value={focusText}
+                onFocus={() => {
+                  if (canEdit && !edit) startEdit(undefined, "bar");
+                }}
+                onChange={(e) => typeEdit(e.target.value, e.target.selectionStart)}
+                onSelect={(e) => {
+                  setCaret(e.currentTarget.selectionStart ?? 0);
+                  syncOverlays();
+                }}
+                onScroll={syncOverlays}
+                onBlur={() => edit?.where === "bar" && finishEdit()}
+                onKeyDown={onEditKeyDown}
+                className={`absolute inset-0 h-full w-full rounded border border-border-default bg-transparent px-2 font-mono text-[13px] outline-none focus:border-accent ${
+                  isFormula ? OVER_FORMULA : "text-text-primary"
+                }`}
+              />
+            </div>
           </div>
         </>
       )}
       {suggestions && suggestAt && (
         <ul
           role="listbox"
-          aria-label="Functions"
+          aria-label="Functions and names"
           className="fixed z-50 w-80 overflow-hidden rounded-md border border-border-default bg-surface-raised py-1 shadow-lg"
           style={{ left: suggestAt.left, top: suggestAt.top }}
         >
           {suggestions.matches.map((f, i) => (
             <li
-              key={f.name}
+              key={`${f.kind}:${f.name}`}
               role="option"
               aria-selected={i === suggestIndex}
               onMouseDown={(e) => {
                 // The edit's input keeps the focus.
                 e.preventDefault();
-                acceptSuggestion(f.name);
+                acceptSuggestion(f);
               }}
               onMouseEnter={() => setSuggestIndex(i)}
               className={`cursor-pointer px-3 py-1.5 ${i === suggestIndex ? "bg-accent/[0.16]" : ""}`}
@@ -926,7 +1138,9 @@ export default function SpreadsheetView({
                   const shown = evaluator.display(sheetIndex, r, c);
                   // The display area's outline, in full view, and the cells the formula being typed refers to.
                   const displayEdges = !compact && displayArea ? outlineEdges(displayArea, r, c) : "";
-                  const refEdges = refRanges.map((ref) => outlineEdges(ref, r, c)).filter(Boolean);
+                  const refMarks = gridRefs
+                    .map((ref) => ({ edges: outlineEdges(ref.range, r, c), hex: FORMULA_PALETTE[ref.colorIndex].hex, inside: inside(ref.range, r, c) }))
+                    .filter((mark) => mark.inside);
                   const textAlign = style?.align ?? (kind === "number" ? "right" : kind === "error" ? "center" : "left");
                   return (
                     <td
@@ -964,25 +1178,46 @@ export default function SpreadsheetView({
                       }}
                     >
                       {editing ? (
-                        <input
-                          ref={cellInputRef}
-                          autoFocus
-                          aria-label={`Cell ${cellAddress(r, c)}`}
-                          value={edit.text}
-                          onChange={(e) => typeEdit(e.target.value, e.target.selectionStart)}
-                          onSelect={(e) => setCaret(e.currentTarget.selectionStart ?? 0)}
-                          onBlur={() => finishEdit()}
-                          onKeyDown={onEditKeyDown}
-                          className="absolute inset-0 z-10 h-full w-full border-2 border-accent bg-background px-1 text-[13px] text-text-primary outline-none"
-                          style={{ minWidth: COL_W * 2 }}
-                        />
+                        <div className="absolute inset-0 z-10 border-2 border-accent bg-background" style={{ minWidth: COL_W * 2 }}>
+                          {isFormula && (
+                            <div
+                              ref={cellOverlayRef}
+                              aria-hidden
+                              className="pointer-events-none absolute inset-0 flex items-center overflow-hidden whitespace-pre px-1 text-left text-[13px] text-text-primary"
+                            >
+                              <FormulaText text={edit.text} refs={textRefs} />
+                            </div>
+                          )}
+                          <input
+                            ref={cellInputRef}
+                            autoFocus
+                            aria-label={`Cell ${cellAddress(r, c)}`}
+                            value={edit.text}
+                            onChange={(e) => typeEdit(e.target.value, e.target.selectionStart)}
+                            onSelect={(e) => {
+                              setCaret(e.currentTarget.selectionStart ?? 0);
+                              syncOverlays();
+                            }}
+                            onScroll={syncOverlays}
+                            onBlur={() => finishEdit()}
+                            onKeyDown={onEditKeyDown}
+                            className={`absolute inset-0 h-full w-full bg-transparent px-1 text-left text-[13px] outline-none ${
+                              isFormula ? OVER_FORMULA : "text-text-primary"
+                            }`}
+                          />
+                        </div>
                       ) : (
                         shown
                       )}
                       {isFocus && !editing && <span aria-hidden className="pointer-events-none absolute inset-0 border-2 border-accent" />}
                       {displayEdges && <span aria-hidden className={`pointer-events-none absolute inset-0 border-dashed border-text-muted ${displayEdges}`} />}
-                      {refEdges.map((edges, i) => (
-                        <span key={i} aria-hidden className={`pointer-events-none absolute inset-0 z-[5] border-dashed border-accent-soft ${edges}`} />
+                      {refMarks.map((mark, i) => (
+                        <span
+                          key={i}
+                          aria-hidden
+                          className={`pointer-events-none absolute inset-0 z-[5] ${mark.edges}`}
+                          style={{ borderColor: mark.hex, backgroundColor: `${mark.hex}1a` }}
+                        />
                       ))}
                     </td>
                   );
