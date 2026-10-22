@@ -500,6 +500,24 @@ export function setDefinedName(data: SpreadsheetData, name: string, ref: string 
   return Object.keys(names).length ? { ...rest, names } : rest;
 }
 
+/** The defined names that label a single cell of sheet `sheetName`, by the cell's `"row:col"`: the cells' labels. */
+export function cellLabels(names: Record<string, string> | undefined, sheetName: string): Map<string, string> {
+  const labels = new Map<string, string>();
+  for (const [name, ref] of Object.entries(names ?? {})) {
+    const target = parseNameRef(ref);
+    if (!target || (target.sheet !== null && target.sheet.toLowerCase() !== sheetName.toLowerCase())) continue;
+    const r = target.range;
+    if (r.r1 === r.r2 && r.c1 === r.c2) labels.set(`${r.r1}:${r.c1}`, name);
+  }
+  return labels;
+}
+
+/** The spreadsheet with cell `cell` of sheet `sheetName` labelled `label` in place of `old` (null for none), or with `label` null, unlabelled. */
+export function setCellLabel(data: SpreadsheetData, sheetName: string, cell: CellPos, old: string | null, label: string | null): SpreadsheetData {
+  const without = old ? setDefinedName(data, old, null) : data;
+  return label ? setDefinedName(without, label, nameRef(sheetName, { r1: cell.row, c1: cell.col, r2: cell.row, c2: cell.col })) : without;
+}
+
 /** `names` with each reference changed by `change` (null drops the name), or undefined if none are left. */
 function mapNames(names: Record<string, string> | undefined, change: (ref: string) => string | null): Record<string, string> | undefined {
   if (!names) return undefined;

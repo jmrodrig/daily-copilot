@@ -8,6 +8,7 @@ import {
   SPREADSHEET_FILE_ACCEPT,
   awaitsReference,
   cellAddress,
+  cellLabels,
   cellText,
   colLetter,
   createEvaluator,
@@ -30,6 +31,7 @@ import {
   restyle,
   serializeSpreadsheet,
   setCell,
+  setCellLabel,
   setDefinedName,
   sheetCols,
   shiftCells,
@@ -133,6 +135,10 @@ const OVER_FORMULA = "text-transparent caret-text-primary selection:bg-accent/25
  * there and Enter to name the selected cells, or a name or an address (`D15`, `Costs!A1:B4`) to go to it. Its list
  * shows the defined names, to go to one or delete it.
  *
+ * A cell a defined name labels on its own shows that name as a badge left of its value, in the note too. While the
+ * cells can be changed, right-clicking a cell, or clicking its badge, asks for its label: a name to give it, or
+ * nothing to take it away.
+ *
  * The display area (the cells a note shows) is the sheet's own `displayArea`, saved with it, unless `displayArea` is
  * given (a window onto a workbook file keeps its own, see SpreadsheetWidget): then "Set display area" hands the
  * selection to `onSetDisplayArea`, as the main action when `selectingArea`.
@@ -235,6 +241,8 @@ export default function SpreadsheetView({
   // The Name Box's text while it's typed in, and whether its list of defined names is open.
   const [nameDraft, setNameDraft] = useState<string | null>(null);
   const [namesOpen, setNamesOpen] = useState(false);
+  // The label being given to a cell (its name before, null if none), asked for in a box at `left`, `top`.
+  const [labeling, setLabeling] = useState<{ cell: CellPos; old: string | null; text: string; left: number; top: number } | null>(null);
   // The cells to select once the sheet switched to (for a name or address on another sheet) is shown.
   const pendingSelection = useRef<Range | null>(null);
   const range = rangeOf(anchor, focus);
@@ -604,6 +612,36 @@ export default function SpreadsheetView({
     commit(setDefinedName({ ...data, activeSheet: sheetName }, name, null));
   }
 
+  /** Ask for the label of `cell` (labelled `old`, or null), in a box under `under` (the cell). */
+  function askLabel(cell: CellPos, old: string | null, under: Element) {
+    if (!canEdit || (labeling?.cell.row === cell.row && labeling.cell.col === cell.col)) return;
+    const rect = under.getBoundingClientRect();
+    // A label already asked for (its box keeping the focus through a badge's click) is saved first.
+    finishLabel();
+    select(cell);
+    setLabeling({ cell, old, text: old ?? "", left: rect.left, top: rect.bottom + 2 });
+  }
+
+  /** The label asked for, saved unless `cancel`: a new name for the cell, or none to take its label away. */
+  function finishLabel(cancel = false) {
+    const asked = labeling;
+    if (!asked) return;
+    setLabeling(null);
+    gridRef.current?.focus({ preventScroll: true });
+    const text = asked.text.trim();
+    if (cancel || text === (asked.old ?? "")) return;
+    if (text && !isValidDefinedName(text)) {
+      setNotice(`"${text}" can't be a name: start it with a letter or _, then use letters, digits, _ or . (and not a cell's address).`);
+      return;
+    }
+    const taken = text ? resolveDefinedName(data, text) : null;
+    if (taken && taken.name.toLowerCase() !== asked.old?.toLowerCase()) {
+      setNotice(`"${taken.name}" already names ${data.names?.[taken.name] ?? "other cells"}.`);
+      return;
+    }
+    commit(setCellLabel({ ...data, activeSheet: sheetName }, sheetName, asked.cell, asked.old, text || null));
+  }
+
   // --- Sheets -------------------------------------------------------------------
 
   /** Show sheet `name`; without a `sheet` given, it's saved as the active one, the one the note shows. */
@@ -770,6 +808,7 @@ export default function SpreadsheetView({
   const selection = formatRangeAddress(range.r1, range.c1, range.r2, range.c2);
   const selectionName = findDefinedNameForRange(data, sheetName, range);
   const definedNames = Object.entries(data.names ?? {}).sort(([a], [b]) => a.localeCompare(b));
+  const labels = useMemo(() => cellLabels(data.names, sheetName), [data.names, sheetName]);
 
   return (
     <div className={`flex min-h-0 flex-col bg-background ${className}`} onKeyDown={onRootKeyDown}>
@@ -1041,6 +1080,56 @@ export default function SpreadsheetView({
           ))}
         </ul>
       )}
+      {labeling && (
+        <div
+          // Drawn anew for each cell, so its input takes the focus.
+          key={`${labeling.cell.row}:${labeling.cell.col}`}
+          role="dialog"
+          aria-label={`Label of cell ${cellAddress(labeling.cell.row, labeling.cell.col)}`}
+          className="fixed z-50 flex w-64 flex-col gap-1 rounded-md border border-border-default bg-surface-raised p-2 shadow-lg"
+          style={{ left: labeling.left, top: labeling.top }}
+        >
+          <span className="text-[12px] text-text-muted">Label of {cellAddress(labeling.cell.row, labeling.cell.col)} (empty to remove it)</span>
+          <div className="flex items-center gap-1">
+            <input
+              autoFocus
+              aria-label="Cell label"
+              value={labeling.text}
+              placeholder="A name, e.g. M_Keel"
+              onChange={(e) => setLabeling({ ...labeling, text: e.target.value })}
+              onBlur={() => finishLabel()}
+              onKeyDown={(e) => {
+                e.stopPropagation();
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  finishLabel();
+                } else if (e.key === "Escape") {
+                  e.preventDefault();
+                  finishLabel(true);
+                }
+              }}
+              className="h-7 min-w-0 flex-1 rounded border border-border-default bg-transparent px-2 font-mono text-[13px] text-text-primary outline-none focus:border-accent"
+            />
+            {labeling.old && (
+              <button
+                type="button"
+                title={`Remove the label ${labeling.old}`}
+                aria-label={`Remove the label ${labeling.old}`}
+                // The input keeps the focus: its blur would save the label first.
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => {
+                  setLabeling(null);
+                  gridRef.current?.focus({ preventScroll: true });
+                  commit(setCellLabel({ ...data, activeSheet: sheetName }, sheetName, labeling.cell, labeling.old, null));
+                }}
+                className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-text-muted hover:bg-surface-hover hover:text-text-primary"
+              >
+                ✕
+              </button>
+            )}
+          </div>
+        </div>
+      )}
       {notice && (
         <p role="alert" className="flex shrink-0 items-center gap-2 border-b border-border-default px-3 py-1 text-[14px] text-accent">
           {notice}
@@ -1142,6 +1231,7 @@ export default function SpreadsheetView({
                     .map((ref) => ({ edges: outlineEdges(ref.range, r, c), hex: FORMULA_PALETTE[ref.colorIndex].hex, inside: inside(ref.range, r, c) }))
                     .filter((mark) => mark.inside);
                   const textAlign = style?.align ?? (kind === "number" ? "right" : kind === "error" ? "center" : "left");
+                  const label = labels.get(`${r}:${c}`);
                   return (
                     <td
                       key={c}
@@ -1163,6 +1253,11 @@ export default function SpreadsheetView({
                       onDoubleClick={() => {
                         if (compact && !canEdit) onExpand?.({ row: r, col: c });
                         else startEdit();
+                      }}
+                      onContextMenu={(e) => {
+                        if (!canEdit || editing) return;
+                        e.preventDefault();
+                        askLabel({ row: r, col: c }, label ?? null, e.currentTarget);
                       }}
                       title={shown.length > 14 ? shown : undefined}
                       className={`relative overflow-hidden whitespace-nowrap border-b border-r border-border-default/60 px-1.5 ${
@@ -1205,6 +1300,27 @@ export default function SpreadsheetView({
                               isFormula ? OVER_FORMULA : "text-text-primary"
                             }`}
                           />
+                        </div>
+                      ) : label ? (
+                        <div className="flex h-full w-full items-center gap-1 overflow-hidden">
+                          <span
+                            title={canEdit ? `Cell label: ${label} (click to change it)` : `Cell label: ${label}`}
+                            onMouseDown={(e) => {
+                              if (!canEdit) return;
+                              e.preventDefault();
+                              e.stopPropagation();
+                              askLabel({ row: r, col: c }, label, e.currentTarget.closest("td") ?? e.currentTarget);
+                            }}
+                            onDoubleClick={(e) => canEdit && e.stopPropagation()}
+                            className={`max-w-[55%] shrink-0 select-none truncate rounded border border-cyan-500/60 bg-cyan-500/10 px-1 py-0.5 font-mono text-[10px] font-medium not-italic leading-none text-cyan-400 ${
+                              canEdit ? "cursor-pointer hover:bg-cyan-500/20" : "cursor-default"
+                            }`}
+                          >
+                            {label}
+                          </span>
+                          <span className="min-w-0 flex-1 truncate" style={{ textAlign }}>
+                            {shown}
+                          </span>
                         </div>
                       ) : (
                         shown
