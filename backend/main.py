@@ -1,6 +1,7 @@
 """FastAPI entry point. Run with `uvicorn main:app --reload` from backend/."""
 
 import html
+import io
 import json
 import os
 import re
@@ -27,6 +28,7 @@ import file_layer
 import database
 import local_files
 import spaces
+import voice
 from database import get_db, init_db
 from history import restore, set_source, soft_delete, to_jsonable, utcnow
 from models import FolderMeta, HistoryRecord, Link, Person, Project, SavedPrompt, Space, Task, TaskView, TimeLog
@@ -52,7 +54,11 @@ from schemas import (
     GanttResponse,
     GanttTask,
     FolderCreate,
+    AssetOpened,
+    AssetWritten,
     ImageUpload,
+    NewSpreadsheet,
+    NewSpreadsheetRequest,
     LocalFileCheck,
     LocalFileStat,
     LocalPathRequest,
@@ -238,10 +244,11 @@ def url_metadata(url: str) -> UrlMetadata:
     return UrlMetadata(title=_page_title(page) or title_from_url_slug(url))
 
 
-def _capture_path(project: str, now: datetime, root: Path) -> str:
-    """`Inbox/Capture_<ts>.md` or `<project>/Notes-in/Capture_<ts>.md`, never an existing file."""
+def _capture_path(project: str, now: datetime, root: Path, prefix: str = "Capture") -> str:
+    """`Inbox/Capture_<ts>.md` or `<project>/Notes-in/Capture_<ts>.md` (with another `prefix` for `Capture`), never an
+    existing file."""
     folder = INBOX if project.lower() == INBOX.lower() else f"{project}/Notes-in"
-    stem = f"{folder}/Capture_{now:%Y%m%d_%H%M%S}"
+    stem = f"{folder}/{prefix}_{now:%Y%m%d_%H%M%S}"
     path, n = f"{stem}.md", 1
     while file_layer.resolve_note_path(path, root).exists():
         n += 1
@@ -1076,6 +1083,18 @@ MAX_ASSET_BYTES = 50 * 1024 * 1024
 # Assets shown in the app rather than downloaded. Anything else (an HTML or SVG file, say) could run script on the
 # app's origin if opened in place.
 _INLINE_ASSET_SUFFIXES = {*file_layer.IMAGE_SUFFIXES.values(), ".pdf"}
+# Assets edited in the app (spreadsheets, saved back with PUT): fetched afresh each time, never cached for good.
+_EDITABLE_ASSET_SUFFIXES = {".xlsx", ".xlsm", ".xls", ".ods", ".csv", ".tsv"}
+
+
+def _asset_or_error(name: str, root: Path) -> Path:
+    """A stored asset's file, or the HTTP error for a malformed or missing name."""
+    try:
+        return file_layer.asset_path(name, notes_dir=root)
+    except file_layer.NotePathError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"No file {name}") from exc
 
 
 # Named for images, which came first; it stores any file attached to a note, so links in saved notes keep working.
@@ -1094,19 +1113,66 @@ async def upload_image(
 
 @app.get("/api/notes/image/{name}")
 def get_image(name: str, root: Path = Depends(space_content)) -> FileResponse:
-    """A stored image or file; its name is random and never reused, so it can be cached for good."""
-    try:
-        path = file_layer.asset_path(name, notes_dir=root)
-    except file_layer.NotePathError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=f"No file {name}") from exc
+    """A stored image or file; its name is random and never reused, so it can be cached for good, unless it's a
+    spreadsheet, which the app edits in place."""
+    path = _asset_or_error(name, root)
+    editable = path.suffix.lower() in _EDITABLE_ASSET_SUFFIXES
     headers = {
-        "Cache-Control": "public, max-age=31536000, immutable",
+        "Cache-Control": "no-cache" if editable else "public, max-age=31536000, immutable",
         "Content-Disposition": "inline" if path.suffix in _INLINE_ASSET_SUFFIXES else "attachment",
         "X-Content-Type-Options": "nosniff",
     }
     return FileResponse(path, headers=headers)
+
+
+@app.put("/api/notes/image/{name}")
+async def put_image(name: str, http: Request, root: Path = Depends(space_content)) -> AssetWritten:
+    """Replace a stored spreadsheet with the bytes of the request's body: the workbook as edited in the app. Other
+    assets stay as they were uploaded."""
+    path = _asset_or_error(name, root)
+    if path.suffix.lower() not in _EDITABLE_ASSET_SUFFIXES:
+        raise HTTPException(status_code=400, detail=f"{name} is not a spreadsheet: only spreadsheets can be replaced")
+    data = await http.body()
+    if len(data) > MAX_ASSET_BYTES:
+        raise HTTPException(status_code=413, detail=f"Files are limited to {MAX_ASSET_BYTES // (1024 * 1024)} MB")
+    if not data:
+        raise HTTPException(status_code=400, detail="The file is empty")
+    try:
+        file_layer.write_asset(name, data, notes_dir=root)
+    except PermissionError as exc:
+        # Excel holds a workbook it has open locked.
+        raise HTTPException(status_code=409, detail=f"{name} is open in another program; close it and try again") from exc
+    return AssetWritten(name=name, size=len(data))
+
+
+@app.post("/api/notes/image/{name}/open")
+def open_image(name: str, http: Request, root: Path = Depends(space_content)) -> AssetOpened:
+    """Open a stored file with its default program (a workbook in Excel, say); only for a client on this machine."""
+    if http.client is None or not local_files.is_local_host(http.client.host):
+        raise HTTPException(status_code=403, detail="Files can only be opened on the machine running Co-Pilot")
+    path = _asset_or_error(name, root)
+    try:
+        local_files.open_path(str(path))
+    except (local_files.LocalFileError, OSError) as exc:
+        raise _local_file_errors(exc) from exc
+    return AssetOpened(path=str(path))
+
+
+@app.post("/api/notes/spreadsheet/new")
+def new_spreadsheet(request: NewSpreadsheetRequest, db: Session = Depends(get_db)) -> NewSpreadsheet:
+    """A blank workbook (one empty sheet, `Sheet1`) attached to the space, to link from a note or show in a window."""
+    import openpyxl
+
+    root = spaces.content_dir(_space_id_or_404(db, request.space_id))
+    title = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", request.title).strip() or "Spreadsheet.xlsx"
+    if not title.lower().endswith(".xlsx"):
+        title += ".xlsx"
+    book = openpyxl.Workbook()
+    book.active.title = "Sheet1"
+    buffer = io.BytesIO()
+    book.save(buffer)
+    name = file_layer.save_asset(buffer.getvalue(), "", title, notes_dir=root)
+    return NewSpreadsheet(url=f"/api/notes/image/{name}?space_id={request.space_id}", name=name, title=title)
 
 
 @app.get("/api/notes/image/{name}/markup")
@@ -2331,6 +2397,241 @@ def delete_person(person_id: int, db: Session = Depends(get_db)) -> None:
     soft_delete(db, person)
     db.commit()
 
+
+
+# --- Voice notes (see voice.py) ---------------------------------------------------------------------------------
+# A note's listen widget records through the backend (only one recording runs at a time, app-wide), which transcribes
+# and diarizes it when it's stopped and writes the result into the widget's ```listen block in its note, so the result
+# lands even if the page was left meanwhile.
+
+VOICE_SOURCE = "voice"
+# An hour of compressed audio is tens of MB; a long WAV can be hundreds.
+MAX_VOICE_BYTES = 1024 * 1024 * 1024
+_VOICE_UPLOAD_SUFFIXES = {".wav", ".m4a", ".mp3", ".mp4", ".aac", ".ogg", ".oga", ".opus", ".webm", ".flac", ".3gp"}
+_AUDIO_MEDIA_TYPES = {".wav": "audio/wav", ".m4a": "audio/mp4", ".mp4": "audio/mp4", ".mp3": "audio/mpeg", ".webm": "audio/webm", ".ogg": "audio/ogg"}
+
+
+def _write_listen_block(space_id: int | None, note_path: str | None, widget_id: str | None, update) -> dict[str, Any] | None:
+    """Pass the note's listen block `widget_id` through `update` and save the note; its new data, or None if there's
+    no such note or block (the note was deleted, say, or the widget removed from it)."""
+    if space_id is None or not note_path or not widget_id:
+        return None
+    with database.SessionLocal() as db:
+        if spaces.get_space(db, space_id) is None:
+            return None
+    root = spaces.content_dir(space_id)
+    try:
+        note = file_layer.read_note(note_path, notes_dir=root)
+    except (file_layer.FileLayerError, FileNotFoundError):
+        return None
+    written: dict[str, Any] = {}
+
+    def apply(data: dict[str, Any]) -> dict[str, Any]:
+        written.update(update(data))
+        return written
+
+    content = voice.update_listen_block(note["content"], widget_id, apply)
+    if content is None:
+        return None
+    file_layer.write_note(note["path"], content, note["frontmatter"], AccessMode.WRITE_DIRECTLY, notes_dir=root, source=VOICE_SOURCE)
+    return written
+
+
+@app.get("/api/voice/devices")
+def voice_devices() -> schemas.AudioDevices:
+    """The microphones and system-audio (WASAPI loopback) devices a recording can capture."""
+    try:
+        return schemas.AudioDevices.model_validate(voice.list_audio_devices())
+    except voice.VoiceError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.post("/api/voice/recording/start")
+def start_recording(request: schemas.VoiceStartRequest, db: Session = Depends(get_db)) -> schemas.VoiceStatus:
+    """Start the app's one recording for a note's listen widget: 409 while another is running or being transcribed."""
+    _space_id_or_404(db, request.space_id)
+    owner = {"widget_id": request.widget_id, "space_id": request.space_id, "note_path": request.note_path}
+    try:
+        status = voice.SESSION.start(request.source, request.mic_device_index, request.loopback_device_index, owner)
+    except voice.SessionBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except voice.VoiceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return schemas.VoiceStatus.model_validate(status)
+
+
+@app.get("/api/voice/recording/status")
+def recording_status() -> schemas.VoiceStatus:
+    return schemas.VoiceStatus.model_validate(voice.SESSION.status())
+
+
+@app.post("/api/voice/recording/pause")
+def pause_recording() -> schemas.VoiceStatus:
+    try:
+        return schemas.VoiceStatus.model_validate(voice.SESSION.pause())
+    except voice.NoSessionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/voice/recording/resume")
+def resume_recording() -> schemas.VoiceStatus:
+    try:
+        return schemas.VoiceStatus.model_validate(voice.SESSION.resume())
+    except voice.NoSessionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+def _transcribe(path: Path, progress=None) -> dict[str, Any]:
+    try:
+        return voice.transcribe_audio(path, progress=progress)
+    except Exception as exc:  # noqa: BLE001 - a model that won't load or download, an unreadable file...
+        raise HTTPException(status_code=500, detail=f"Could not transcribe {path.name} ({exc})") from exc
+
+
+@app.post("/api/voice/recording/stop")
+def stop_recording() -> schemas.VoiceResult:
+    """Stop the recording, transcribe and diarize it (the status's `stage` says how far it's got), and write the result
+    into its widget's block in the note."""
+    try:
+        path, source, owner = voice.SESSION.stop()
+    except voice.NoSessionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    try:
+        result = _transcribe(path, progress=voice.SESSION.set_stage)
+    finally:
+        voice.SESSION.finish()
+    block = voice.completed_block(owner["widget_id"], source, result)
+    note_path = owner.get("note_path")
+    written = _write_listen_block(owner.get("space_id"), note_path, owner["widget_id"], lambda _old: block)
+    return schemas.VoiceResult.model_validate({**block, "note_updated": written is not None, "note_path": note_path})
+
+
+@app.post("/api/voice/transcribe")
+async def transcribe_upload(
+    file: UploadFile = File(...),
+    space_id: int = Form(spaces.DEFAULT_SPACE_ID),
+    note_path: str | None = Form(None),
+    project: str = Form(INBOX, pattern=r"^[A-Za-z0-9_-]+$", max_length=64),
+    widget_id: str | None = Form(None, max_length=64),
+    source: str = Form("mic", pattern=r"^(mic|loopback|mixed|upload)$"),
+    db: Session = Depends(get_db),
+) -> schemas.VoiceResult:
+    """Transcribe an uploaded recording. With `widget_id` and `note_path` (a listen widget's recording, made in the
+    browser) the result is written into that widget's block in the note; otherwise (the Android app's, or a file picked
+    on the desktop) into a new listen block: appended to `note_path`, else in a new voice note in the project's inbox
+    (as a capture is)."""
+    root = spaces.content_dir(_space_id_or_404(db, space_id))
+    if note_path:
+        try:
+            file_layer.read_note(note_path, notes_dir=root)
+        except file_layer.FileLayerError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=f"No note at {note_path}") from exc
+    suffix = Path(file.filename or "").suffix.lower() or ".wav"
+    if suffix not in _VOICE_UPLOAD_SUFFIXES:
+        raise HTTPException(status_code=400, detail=f"Not an audio file: {file.filename}")
+    path = voice.new_recording_path(suffix)
+    size = 0
+    with path.open("wb") as out:
+        while chunk := await file.read(1024 * 1024):
+            size += len(chunk)
+            if size > MAX_VOICE_BYTES:
+                break
+            out.write(chunk)
+    if size > MAX_VOICE_BYTES:
+        path.unlink(missing_ok=True)
+        raise HTTPException(status_code=413, detail=f"Recordings are limited to {MAX_VOICE_BYTES // (1024 * 1024)} MB")
+    result = await anyio.to_thread.run_sync(_transcribe, path)
+    if widget_id and note_path:
+        block = voice.completed_block(widget_id, source, result)
+        written = _write_listen_block(space_id, note_path, widget_id, lambda _old: block)
+        return schemas.VoiceResult.model_validate({**block, "note_updated": written is not None, "note_path": note_path})
+    block = voice.completed_block(f"lw_{secrets.token_hex(6)}", "upload", result)
+    markdown = voice.listen_block_markdown(block)
+
+    if note_path:
+        note = file_layer.read_note(note_path, notes_dir=root)
+        content = f"{note['content'].rstrip()}\n\n{markdown}\n" if note["content"].strip() else f"{markdown}\n"
+        file_layer.write_note(note["path"], content, note["frontmatter"], AccessMode.WRITE_DIRECTLY, notes_dir=root, source=VOICE_SOURCE)
+        written_path = note["path"]
+    else:
+        now = datetime.now().replace(microsecond=0)
+        written_path = _capture_path(project, now, root, prefix="Voice")
+        frontmatter = {
+            "title": f"Voice note {now:%Y-%m-%d %H:%M}",
+            "type": "capture",
+            "project": project,
+            "priority": Priority.NORMAL.value,
+            "created": now.isoformat(),
+            "source": VOICE_SOURCE,
+        }
+        file_layer.write_note(written_path, f"{markdown}\n", frontmatter, AccessMode.WRITE_DIRECTLY, notes_dir=root, source=VOICE_SOURCE)
+    return schemas.VoiceResult.model_validate({**block, "note_updated": True, "note_path": written_path})
+
+
+def _voice_file(folder: Path, name: str) -> FileResponse:
+    try:
+        path = voice.stored_file(folder, name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"No recording {name}") from exc
+    return FileResponse(
+        path, media_type=_AUDIO_MEDIA_TYPES.get(path.suffix.lower()), headers={"X-Content-Type-Options": "nosniff"}
+    )
+
+
+@app.get("/api/voice/audio/{name}")
+def get_voice_audio(name: str) -> FileResponse:
+    """A recording, to play back in its widget (seekable: range requests are served)."""
+    return _voice_file(voice.recordings_dir(), name)
+
+
+@app.get("/api/voice/snippets/{name}")
+def get_voice_snippet(name: str) -> FileResponse:
+    """A few seconds of a speaker nobody's named yet, to tell who it is."""
+    return _voice_file(voice.snippets_dir(), name)
+
+
+@app.get("/api/voice/contacts")
+def voice_contacts() -> list[dict[str, Any]]:
+    """The people whose voices are known (or named), for suggesting names when tagging a speaker."""
+    return voice.list_contacts()
+
+
+@app.post("/api/voice/tag-participant")
+def tag_voice_participant(request: schemas.VoiceTagRequest) -> schemas.VoiceTagResponse:
+    """Name a speaker of a recording: enrol their voiceprint (so they're recognised next time), and rename them in the
+    widget's data and in its block in the note."""
+    try:
+        contact = voice.enroll_participant(request.alias, request.email, request.audio_stem, request.cluster_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    def tag(block: dict[str, Any]) -> dict[str, Any]:
+        return voice.tag_participant(block, request.speaker_id, request.alias, request.email)
+
+    written = _write_listen_block(request.space_id, request.note_path, request.widget_id, tag)
+    block = tag(request.block) if request.block else (written or {})
+    return schemas.VoiceTagResponse(
+        block=block, note_updated=written is not None, has_untagged=voice.has_untagged(block), contact=contact
+    )
+
+
+@app.post("/api/voice/untag-participant")
+def untag_voice_participant(request: schemas.VoiceUntagRequest) -> schemas.VoiceTagResponse:
+    """Remove a speaker's name: set them back to unidentified in the widget's data and in its block in the note (their
+    turns renamed back). Any voiceprint enrolled under the name is kept."""
+
+    def untag(block: dict[str, Any]) -> dict[str, Any]:
+        return voice.untag_participant(block, request.speaker_id)
+
+    written = _write_listen_block(request.space_id, request.note_path, request.widget_id, untag)
+    block = untag(request.block) if request.block else (written or {})
+    return schemas.VoiceTagResponse(
+        block=block, note_updated=written is not None, has_untagged=voice.has_untagged(block), contact={}
+    )
 
 if __name__ == "__main__":
     import uvicorn

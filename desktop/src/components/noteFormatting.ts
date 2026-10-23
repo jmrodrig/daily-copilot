@@ -68,7 +68,8 @@ import { isLocalHref } from "../lib/localFiles";
  *   ```
  *
  * which the editor shows as a live board (`WhiteboardBlock`) and the read-only view as a read-only one; other
- * markdown renderers show the JSON as code.
+ * markdown renderers show the JSON as code. A voice recording's listen widget is a ```listen block the same way
+ * (`ListenBlock`), and so is a spreadsheet, a ```spreadsheet block (`SpreadsheetBlock`).
  */
 
 /** The text column a note's title, properties and body sit in, centered on the page (see `.note-body` in index.css). */
@@ -531,6 +532,134 @@ export const WhiteboardBlock = Node.create({
     // On one line, with no backtick in it, so it can't end its fence early (see whiteboard.ts).
     const data = String(node.attrs?.data ?? EMPTY_WHITEBOARD_JSON).replace(/\r?\n/g, " ").replace(/`/g, "\\u0060");
     return "```whiteboard\n" + data + "\n```";
+  },
+});
+
+/** An empty embedded spreadsheet's JSON: one 5 × 5 sheet (see spreadsheet.ts). */
+export const EMPTY_SPREADSHEET_JSON = JSON.stringify({
+  activeSheet: "Sheet1",
+  sheets: [{ name: "Sheet1", rows: Array.from({ length: 5 }, () => Array<string>(5).fill("")) }],
+});
+
+/** A spreadsheet window not yet pointed at a workbook file: it offers to pick one (see SpreadsheetWidget). */
+export const EMPTY_SPREADSHEET_WINDOW_JSON = "{}";
+
+const SPREADSHEET_FENCE = /^ {0,3}```spreadsheet[ \t]*\n([\s\S]*?)\n? {0,3}```[ \t]*(?:\n+|$)/;
+
+/**
+ * A spreadsheet in the note: a block atom holding its JSON in `data`, read from and saved as a ```spreadsheet fenced
+ * block on one line, as a whiteboard is. Either a window onto a workbook file attached to the note, showing some of
+ * its cells (see SpreadsheetWidget), or, as notes saved them before, a whole spreadsheet embedded (see spreadsheet.ts):
+ *
+ *   ```spreadsheet
+ *   {"src":"/api/notes/image/<name>.xlsx?space_id=1","sheet":"Costs","displayArea":"A1:E8","title":"Budget.xlsx"}
+ *   ```
+ *
+ *   ```spreadsheet
+ *   {"activeSheet":"Sheet1","sheets":[{"name":"Sheet1","rows":[["Item","Cost"],["Keel","=B3*2"]]}]}
+ *   ```
+ *
+ * The grid is a node view, added by the editor (see SpreadsheetWidget).
+ */
+export const SpreadsheetBlock = Node.create({
+  name: "spreadsheet",
+  group: "block",
+  atom: true,
+  selectable: true,
+  draggable: false,
+  addAttributes() {
+    return {
+      data: {
+        default: EMPTY_SPREADSHEET_JSON,
+        parseHTML: (element: HTMLElement) => element.getAttribute("data-spreadsheet") ?? EMPTY_SPREADSHEET_JSON,
+        renderHTML: (attrs: Record<string, unknown>) => ({ "data-spreadsheet": String(attrs.data ?? EMPTY_SPREADSHEET_JSON) }),
+      },
+    };
+  },
+  parseHTML() {
+    return [{ tag: "div[data-spreadsheet]" }];
+  },
+  renderHTML({ HTMLAttributes }) {
+    return ["div", HTMLAttributes];
+  },
+  markdownTokenName: "spreadsheet",
+  markdownTokenizer: {
+    name: "spreadsheet",
+    level: "block",
+    start: (src: string) => src.indexOf("```spreadsheet"),
+    tokenize(src) {
+      const match = SPREADSHEET_FENCE.exec(src);
+      if (!match) return undefined;
+      return { type: "spreadsheet", raw: match[0], text: match[1].trim() };
+    },
+  },
+  parseMarkdown: (token, h) => h.createNode("spreadsheet", { data: (token.text as string | undefined) || EMPTY_SPREADSHEET_JSON }),
+  renderMarkdown: (node) => {
+    // On one line, with no backtick in it, so it can't end its fence early. A cell's line break is `\n` in the JSON
+    // already; a raw one is only JSON's whitespace.
+    const data = String(node.attrs?.data ?? EMPTY_SPREADSHEET_JSON).replace(/\r?\n/g, " ").replace(/`/g, "\\u0060");
+    return "```spreadsheet\n" + data + "\n```";
+  },
+});
+
+/** A new listen widget's JSON: its own id (which the backend writes the transcript back by), not yet recorded. */
+export function newListenJson(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(6));
+  const id = `lw_${Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("")}`;
+  return JSON.stringify({ id, status: "idle", source: "mic" });
+}
+
+const EMPTY_LISTEN_JSON = '{"id":"","status":"idle"}';
+const LISTEN_FENCE = /^ {0,3}```listen[ \t]*\n([\s\S]*?)\n? {0,3}```[ \t]*(?:\n+|$)/;
+
+/**
+ * A listen widget (see ListenWidget): a block atom holding its JSON in `data` (its id, and once recorded, the
+ * transcript, the speakers and the recording's file), read from and saved as a ```listen fenced block on one line,
+ * as a whiteboard is:
+ *
+ *   ```listen
+ *   {"id":"lw_3f9a…","status":"completed","duration":48.5,"audio_file":"voice_20261018_130000.wav","dialogue":"…","participants":[…]}
+ *   ```
+ *
+ * The backend writes into the block too (backend/voice.py), by its id. The widget is a node view, added by the editor.
+ */
+export const ListenBlock = Node.create({
+  name: "listen",
+  group: "block",
+  atom: true,
+  selectable: true,
+  draggable: false,
+  addAttributes() {
+    return {
+      data: {
+        default: EMPTY_LISTEN_JSON,
+        parseHTML: (element: HTMLElement) => element.getAttribute("data-listen") ?? EMPTY_LISTEN_JSON,
+        renderHTML: (attrs: Record<string, unknown>) => ({ "data-listen": String(attrs.data ?? EMPTY_LISTEN_JSON) }),
+      },
+    };
+  },
+  parseHTML() {
+    return [{ tag: "div[data-listen]" }];
+  },
+  renderHTML({ HTMLAttributes }) {
+    return ["div", HTMLAttributes];
+  },
+  markdownTokenName: "listen",
+  markdownTokenizer: {
+    name: "listen",
+    level: "block",
+    start: (src: string) => src.indexOf("```listen"),
+    tokenize(src) {
+      const match = LISTEN_FENCE.exec(src);
+      if (!match) return undefined;
+      return { type: "listen", raw: match[0], text: match[1].trim() };
+    },
+  },
+  parseMarkdown: (token, h) => h.createNode("listen", { data: (token.text as string | undefined) || EMPTY_LISTEN_JSON }),
+  renderMarkdown: (node) => {
+    // On one line, with no backtick in it, so it can't end its fence early.
+    const data = String(node.attrs?.data ?? EMPTY_LISTEN_JSON).replace(/\r?\n/g, " ").replace(/`/g, "\\u0060");
+    return "```listen\n" + data + "\n```";
   },
 });
 

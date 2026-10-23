@@ -10,6 +10,10 @@ The tools the model may call:
 - `write_note`: create or replace a note. Only offered outside `read_only` mode.
 - `search_local_files` / `list_local_directory` / `read_local_file`: search, crawl and read the local file system
   (design data such as PDFs, CAD and Maxsurf files outside the notes; see `local_files`).
+- `read_spreadsheet`: one sheet of a workbook or CSV, or the cells matching a search (see `read_spreadsheet`): a local
+  file, or one attached to a note (a space asset, `/api/notes/image/<name>`).
+- `edit_spreadsheet`: change cells of such a workbook, add a sheet, or create one. Only offered outside `read_only`
+  mode, and refused in `ask_first` mode (a workbook has no approval step).
 - `search_web` / `fetch_web_page`: search the live web (DuckDuckGo) and read web pages, for online research.
 
 Gemini models in `GEMINI_API_MODELS` run on litellm with `COPILOT_GEMINI_API_KEY` (the Gemini API) and the tools
@@ -57,6 +61,7 @@ from sqlalchemy import func, or_, select
 import database
 import file_layer
 import local_files
+import read_spreadsheet
 import spaces
 from config import Settings, get_settings
 from models import FolderMeta, Project, Space, Task
@@ -164,8 +169,16 @@ meeting prep): carry out its instruction with the tools, using any `User input:`
 files with `read_local_file` to find design data outside the notes (PDF drawings and reports, CAD files, Maxsurf \
 models, spreadsheets, ...). To find files on a topic, start with `search_local_files` on the root folder rather than \
 browsing folder by folder. Use absolute paths, e.g. ones linked from a note (`file:///C:/...`, `C:\\...`, \
-`\\\\server\\share\\...`). Text files, PDFs and Outlook emails (`.msg`: headers, attachment names and body) can \
-be read; for other formats you get only their size and dates. Cite the file paths you relied on.
+`\\\\server\\share\\...`). Text files, PDFs, Outlook emails (`.msg`: headers, attachment names and body) and \
+spreadsheets (`.xlsx`, `.xlsm`, `.csv`, `.tsv`: each sheet as a table, with its formulas) can be read; for other \
+formats you get only their size and dates. For a large spreadsheet, use `read_spreadsheet` to read one sheet or \
+search its cells for a line item. Cite the file paths you relied on.
+- Spreadsheets in notes: a workbook attached to a note is a file in the space, linked by its URL, e.g. \
+`[Budget.xlsx](/api/notes/image/<name>.xlsx?space_id={space_id})`; clicking it opens it in full view. A note shows part \
+of one in a spreadsheet window: a fenced block of one line of JSON, \
+```spreadsheet\n{{"src":"/api/notes/image/<name>.xlsx?space_id={space_id}","sheet":"Costs","displayArea":"A1:E8"}}\n``` \
+(the cells `displayArea` of `sheet`, editable in the note and saved to the file). `read_spreadsheet` and \
+`edit_spreadsheet` take such a URL as their `path`, as well as a local file path. Read a spreadsheet before you edit it.
 - You can search the live internet with `search_web` and read web pages with `fetch_web_page` for online technical \
 research: standards, classification rules, vendor and product data, papers and publications. Search first, then \
 read the most relevant pages. Cite the URLs you relied on.
@@ -266,9 +279,64 @@ TOOLS: dict[str, dict[str, Any]] = {
         "parameters": {"type": "object", "properties": {"path": _LOCAL_PATH_PARAM}, "required": ["path"]},
     },
     "read_local_file": {
-        "description": "Read a file on the local file system: text files (.txt, .md, .csv, .json, ...) as they are and "
-        "the text of PDFs and Outlook emails (.msg: subject, sender, recipients, date, attachment names and body); other formats (Word, Excel, CAD, Maxsurf, ...) return only their size and dates.",
+        "description": "Read a file on the local file system: text files (.txt, .md, .json, ...) as they are, "
+        "the text of PDFs and Outlook emails (.msg: subject, sender, recipients, date, attachment names and body), "
+        "and spreadsheets (.xlsx, .xlsm, .csv, .tsv) as a table per sheet with its formulas; other formats (Word, CAD, Maxsurf, ...) return only their size and dates.",
         "parameters": {"type": "object", "properties": {"path": _LOCAL_PATH_PARAM}, "required": ["path"]},
+    },
+    "read_spreadsheet": {
+        "description": "Read a local spreadsheet (.xlsx, .xlsm, .csv, .tsv): its sheets and sizes, then each sheet "
+        "(or only `sheet`) as a table with row numbers and its formulas. With `search`, only the cells whose value or "
+        "formula contains it, each with its sheet, address and whole row: use it to find line items in large workbooks.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": _LOCAL_PATH_PARAM,
+                "sheet": {"type": "string", "description": "Optional sheet name, e.g. `Costs` (default: every sheet)"},
+                "search": {"type": "string", "description": "Optional text to find in cell values and formulas, e.g. `keel`"},
+                "max_rows": {"type": "integer", "description": "Data rows shown per sheet (default 50)"},
+            },
+            "required": ["path"],
+        },
+    },
+    "edit_spreadsheet": {
+        "description": "Change a spreadsheet (.xlsx, .xlsm, .csv, .tsv) and save it: a local file, or one attached to "
+        "a note (its `/api/notes/image/...` URL). Sets cells (`cell` and `value`, or several with `updates`) to "
+        "numbers, text or formulas, empties a range (`clear_range`, applied first), adds a sheet (`add_sheet`), or "
+        "defines names for cells or ranges (`names`, as Excel's Name Box: formulas may then use them, `=KeelWeight*2`). "
+        "With `create`, makes a new workbook: at a local path, or, given just a file name (`Budget.xlsx`), attached to "
+        "the space, returning the URL and markdown link to put in a note. Read the spreadsheet first.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Absolute local path, `file://` URL, or a note attachment's URL "
+                    "(`/api/notes/image/<name>.xlsx?space_id=1`); with `create`, may be just a file name",
+                },
+                "sheet": {"type": "string", "description": "Sheet to edit (default: the sheet added, else the active one)"},
+                "cell": {"type": "string", "description": "One cell to set, e.g. `B2`"},
+                "value": {
+                    "type": ["string", "number", "boolean", "null"],
+                    "description": "The value or formula for `cell`, e.g. `100` or `=SUM(B1:B9)`; empty clears it",
+                },
+                "updates": {
+                    "type": "object",
+                    "description": 'Several cells at once, address to value, e.g. `{"B2": 150, "B4": "=SUM(B2:B3)"}`',
+                    "additionalProperties": {"type": ["string", "number", "boolean", "null"]},
+                },
+                "add_sheet": {"type": "string", "description": "Name of a new sheet to add"},
+                "clear_range": {"type": "string", "description": "Cells to empty, e.g. `A1:C10`"},
+                "names": {
+                    "type": "object",
+                    "description": "Defined names to set, name to cells, e.g. `{\"KeelWeight\": \"B2\", \"Prices\": \"Costs!A1:A10\"}` "
+                    "(without a sheet: on the sheet edited); `null` or `\"\"` removes a name",
+                    "additionalProperties": {"type": ["string", "null"]},
+                },
+                "create": {"type": "boolean", "description": "Create the workbook if it doesn't exist (default false)"},
+            },
+            "required": ["path"],
+        },
     },
     "search_web": {
         "description": "Search the live web. Returns up to 10 results with title, URL and snippet; read the useful "
@@ -290,8 +358,12 @@ TOOLS: dict[str, dict[str, Any]] = {
 }
 
 
+# Tools that change files: not offered in read only mode.
+_WRITE_TOOLS = {"write_note", "edit_spreadsheet"}
+
+
 def _tool_specs(mode: AccessMode) -> list[dict[str, Any]]:
-    names = [name for name in TOOLS if not (name == "write_note" and mode is AccessMode.READ_ONLY)]
+    names = [name for name in TOOLS if not (name in _WRITE_TOOLS and mode is AccessMode.READ_ONLY)]
     return [{"type": "function", "function": {"name": name, **TOOLS[name]}} for name in names]
 
 
@@ -421,6 +493,40 @@ def list_tasks(
         )
     tasks.sort(key=lambda t: (t["project"] or "", t["deadline"] is None, t["deadline"] or "", t["id"]))
     return {"today": today.isoformat(), "count": len(tasks), "tasks": tasks}
+
+
+# A file attached to a note: `/api/notes/image/<name>?space_id=1`, as linked in the note.
+_ASSET_URL_RE = re.compile(r"/api/notes/image/([^/?#\s]+)")
+
+
+def spreadsheet_file(path: str, notes_dir: str | Path | None = None) -> tuple[Path, bool]:
+    """The file a spreadsheet `path` names, and whether it's attached to a note: a space asset by its URL (found in
+    the space's `notes_dir`), else a local file (an absolute path or `file://` URL)."""
+    match = _ASSET_URL_RE.search(path)
+    if match and notes_dir is not None:
+        return file_layer.asset_path(urllib.parse.unquote(match.group(1)), notes_dir=notes_dir), True
+    return local_files.to_path(path), False
+
+
+def read_spreadsheet_tool(
+    path: str,
+    sheet: str | None = None,
+    search: str | None = None,
+    max_rows: int | None = None,
+    *,
+    notes_dir: str | Path | None = None,
+) -> dict[str, Any]:
+    """A spreadsheet's sheets as tables with their formulas, only `sheet` if given, or the cells matching `search`
+    (see `read_spreadsheet.read_spreadsheet`): a local file, or one attached to a note in `notes_dir`."""
+    file, attached = spreadsheet_file(path, notes_dir)
+    data = read_spreadsheet.read_spreadsheet(file, sheet=sheet or None, search=search or None)
+    rows = max_rows if max_rows and max_rows > 0 else read_spreadsheet.DEFAULT_MAX_ROWS
+    result = {
+        "path": path.strip() if attached else str(file),
+        "sheets": [{"name": s["name"], "rows": s["rows"], "cols": s["cols"]} for s in data["sheets"]],
+        "content": local_files.truncate(read_spreadsheet.format_spreadsheet(data, max_rows=rows)),
+    }
+    return {**result, "names": data["names"]} if data.get("names") else result
 
 
 # --- Web ----------------------------------------------------------------------
@@ -694,6 +800,58 @@ class _Turn:
             self.written.append(rel)
         return {"status": "written" if written else "unchanged", "path": rel}
 
+    def edit_spreadsheet(
+        self,
+        path: str,
+        sheet: str | None = None,
+        cell: str | None = None,
+        value: Any = None,
+        updates: dict[str, Any] | None = None,
+        add_sheet: str | None = None,
+        clear_range: str | None = None,
+        create: bool = False,
+        names: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Change a spreadsheet (see `read_spreadsheet.edit_spreadsheet`): a local file, or one attached to a note.
+        With `create` and just a file name, a new workbook attached to the space."""
+        if self.mode is AccessMode.READ_ONLY:
+            raise ToolError("Files are read only in this conversation")
+        if self.mode is AccessMode.ASK_FIRST:
+            raise ToolError(
+                "Spreadsheets can't be edited in ASK FIRST mode (a workbook has no approval step): tell the user the "
+                "changes to make, or to switch the access mode to WRITE DIRECTLY"
+            )
+        if updates is not None and not isinstance(updates, dict):
+            raise ToolError("updates must be an object of cell addresses to values")
+        if names is not None and not isinstance(names, dict):
+            raise ToolError("names must be an object of names to cells, e.g. {\"KeelWeight\": \"B2\"}")
+        changes = dict(updates or {})
+        if cell:
+            changes[cell] = value
+        if not changes and not add_sheet and not clear_range and not names and not create:
+            raise ToolError("Nothing to change: give `cell` and `value`, `updates`, `clear_range`, `add_sheet` or `names`")
+
+        text = path.strip()
+        if create and not _ASSET_URL_RE.search(text) and not re.search(r"[\\/:]", text):
+            # Just a file name: a new workbook attached to the space.
+            suffix = Path(text).suffix.lower()
+            if suffix not in read_spreadsheet.SPREADSHEET_SUFFIXES:
+                raise ToolError(f"Name the new spreadsheet with its type, e.g. `{Path(text).stem or 'Budget'}.xlsx`")
+            name = file_layer.save_asset(b"", "", text, notes_dir=self.root)
+            file = file_layer.asset_path(name, notes_dir=self.root)
+            file.unlink()
+            result = read_spreadsheet.edit_spreadsheet(
+                file, sheet=sheet, updates=changes, add_sheet=add_sheet, clear_range=clear_range, create=True, names=names
+            )
+            url = f"/api/notes/image/{name}?space_id={self.space_id}"
+            return {**result, "path": url, "url": url, "link": f"[{text}]({url})"}
+
+        file, attached = spreadsheet_file(text, self.root)
+        result = read_spreadsheet.edit_spreadsheet(
+            file, sheet=sheet, updates=changes, add_sheet=add_sheet, clear_range=clear_range, create=create, names=names
+        )
+        return {**result, "path": text if attached else result["path"]}
+
     def call(self, name: str, arguments: dict[str, Any]) -> Any:
         tools: dict[str, Callable[..., Any]] = {
             "search_notes": functools.partial(search_notes, notes_dir=self.root),
@@ -703,16 +861,24 @@ class _Turn:
             "search_local_files": local_files.search_local_files,
             "list_local_directory": local_files.list_local_directory,
             "read_local_file": local_files.read_local_file,
+            "read_spreadsheet": functools.partial(read_spreadsheet_tool, notes_dir=self.root),
+            "edit_spreadsheet": self.edit_spreadsheet,
             "search_web": search_web,
             "fetch_web_page": fetch_web_page,
         }
-        if name not in tools or (name == "write_note" and self.mode is AccessMode.READ_ONLY):
+        if name not in tools or (name in _WRITE_TOOLS and self.mode is AccessMode.READ_ONLY):
             raise ToolError(f"Unknown tool: {name}")
         try:
             return tools[name](**arguments)
         except TypeError as exc:
             raise ToolError(f"Bad arguments for {name}: {exc}") from exc
-        except (file_layer.FileLayerError, local_files.LocalFileError, OSError, UnicodeDecodeError) as exc:
+        except (
+            file_layer.FileLayerError,
+            local_files.LocalFileError,
+            read_spreadsheet.SpreadsheetReadError,
+            OSError,
+            UnicodeDecodeError,
+        ) as exc:
             raise ToolError(str(exc)) from exc
 
 
@@ -824,7 +990,10 @@ tools named above. Map them as follows:
 with Glob and Grep and read them with Read, instead of `search_notes` and `read_note`.
 - Local design files (instead of `search_local_files`, `list_local_directory`, `read_local_file`): Glob, Grep and \
 Read with absolute paths. Outlook emails (`.msg`) are binary and Read can't parse them: ask the user to attach the \
-email to the chat (its text then comes with the message) or to run `python scripts/read_msg.py <path>`.
+email to the chat (its text then comes with the message) or to run `python scripts/read_msg.py <path>`. Excel \
+workbooks (`.xlsx`, `.xlsm`) are binary too: ask the user to attach them or to run \
+`python scripts/read_spreadsheet.py <path> [--sheet NAME] [--search TEXT]`.
+- A spreadsheet attached to a note (`/api/notes/image/<name>`) is the file `{notes_dir}/.assets/<name>`. `edit_spreadsheet` isn't available here: to change a spreadsheet, tell the user which cells to change and to what.
 - Online research (instead of `search_web`, `fetch_web_page`): WebSearch and WebFetch. Cite the URLs you relied on.
 - The space's open tasks are listed below (instead of `list_tasks`)."""
 
@@ -836,7 +1005,9 @@ with glob and grep_search and read them with read_file, instead of `search_notes
 - Local design files (instead of `search_local_files`, `list_local_directory`, `read_local_file`): glob, \
 grep_search, list_directory and read_file with absolute paths. Outlook emails (`.msg`) are binary and read_file \
 can't parse them: ask the user to attach the email to the chat (its text then comes with the message) or to run \
-`python scripts/read_msg.py <path>`.
+`python scripts/read_msg.py <path>`. Excel workbooks (`.xlsx`, `.xlsm`) are binary too: ask the user to attach \
+them or to run `python scripts/read_spreadsheet.py <path> [--sheet NAME] [--search TEXT]`.
+- A spreadsheet attached to a note (`/api/notes/image/<name>`) is the file `{notes_dir}/.assets/<name>`. `edit_spreadsheet` isn't available here: to change a spreadsheet, tell the user which cells to change and to what.
 - Online research (instead of `search_web`, `fetch_web_page`): google_web_search and web_fetch. Cite the URLs you \
 relied on.
 - The space's open tasks are listed below (instead of `list_tasks`).
@@ -889,7 +1060,7 @@ def _attachment_block(attachment: ChatAttachment, root: Path) -> str:
     except (file_layer.NotePathError, FileNotFoundError):
         return f'[Attached file: "{attachment.name}" (size: {size}; not found in this space\'s files)]'
     header = f'[Attached file: "{attachment.name}" (size: {size}, local path: {path})]'
-    if path.suffix.lower() not in {*local_files.TEXT_SUFFIXES, ".pdf", ".msg"}:
+    if path.suffix.lower() not in {*local_files.TEXT_SUFFIXES, *local_files.SPREADSHEET_SUFFIXES, ".pdf", ".msg"}:
         return header
     try:
         content = local_files.read_local_file(str(path))["content"]

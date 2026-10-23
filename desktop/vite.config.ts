@@ -20,6 +20,7 @@ export default defineConfig({
         short_name: "Copilot",
         start_url: "/",
         display: "standalone",
+        display_override: ["window-controls-overlay", "standalone"],
         theme_color: "#101820",
         background_color: "#101820",
         icons: [

@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent, type RefObject } from "react";
 import { Outlet } from "react-router-dom";
 
+import { CHAT_PROMPT } from "../lib/api";
 import { useTaskPanel } from "../lib/tasks";
 import CopilotChat from "./CopilotChat";
-import Sidebar, { IconButton } from "./Sidebar";
+import Sidebar, { AssistantButton, IconButton, ListeningDot } from "./Sidebar";
 import TaskPanel from "./TaskPanel";
 
 const LEFT_KEY = "copilot.leftOpen";
@@ -95,6 +96,13 @@ export default function Layout() {
   useEffect(() => {
     localStorage.setItem(WIDTHS_KEY, JSON.stringify(widths));
   }, [widths]);
+
+  // A question written into the chat from elsewhere (a listen widget's "Summarize Meeting") opens it to be seen.
+  useEffect(() => {
+    const open = () => setChatOpen(true);
+    window.addEventListener(CHAT_PROMPT, open);
+    return () => window.removeEventListener(CHAT_PROMPT, open);
+  }, [setChatOpen]);
 
   // Shrink the open panes (the chat first, then the task, then the page tree) when the window is too narrow for them
   // and the main view, so the chat (and its scrollbar) never runs off the right edge.
@@ -188,8 +196,9 @@ export default function Layout() {
         {leftOpen ? (
           <Sidebar onCollapse={() => setLeftOpen(false)} />
         ) : (
-          <div className="flex flex-col items-center py-3.5">
+          <div className="flex flex-col items-center gap-3 py-3.5">
             <IconButton label="Expand page tree" onClick={() => setLeftOpen(true)} direction="right" />
+            <ListeningDot />
           </div>
         )}
       </nav>
@@ -241,7 +250,7 @@ export default function Layout() {
           chatOpen ? "" : "shrink-0 items-center border-l border-border-default py-3.5"
         } ${paneTransition}`}
       >
-        {!chatOpen && <IconButton label="Expand chat" onClick={() => setChatOpen(true)} direction="left" />}
+        {!chatOpen && <AssistantButton label="AI Assistant" title="Open AI Assistant" onClick={() => setChatOpen(true)} />}
         <div className={chatOpen ? "min-h-0 flex-1" : "hidden"}>
           <CopilotChat
             active={chatOpen}

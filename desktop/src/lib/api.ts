@@ -60,3 +60,10 @@ export type SavedPrompt = { id: number; space_id: number; command: string; descr
 
 /** Fired after the saved prompts change, so the chat's command menu can reload them. */
 export const PROMPTS_CHANGED = "copilot:prompts-changed";
+
+/** Fired to open the Co-pilot chat with a question written into its input (`detail`: the text), ready to send. */
+export const CHAT_PROMPT = "copilot:chat-prompt";
+
+export function promptCopilot(text: string) {
+  window.dispatchEvent(new CustomEvent<string>(CHAT_PROMPT, { detail: text }));
+}

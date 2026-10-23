@@ -8,12 +8,14 @@ import {
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from "react";
-import { NavLink, useLocation, useNavigate } from "react-router-dom";
+import { Link, NavLink, useLocation, useNavigate } from "react-router-dom";
 
+import { useVoiceRecording } from "../context/VoiceRecordingContext";
 import { getJson, message, sendJson } from "../lib/api";
 import { tint } from "../lib/colors";
 import { notePath, openNoteInNewWindow, useSpace } from "../lib/space";
 import { VIEW_TYPES, VIEWS_CHANGED, viewPath, type TaskView, type ViewType } from "../lib/views";
+import BlippingDot from "./BlippingDot";
 import { WhiteboardIcon } from "./markupUi";
 
 // GET /api/tree (see TreeResponse and FolderNode in backend/schemas.py).
@@ -449,12 +451,15 @@ export default function Sidebar({ onCollapse }: { onCollapse: () => void }) {
 
   return (
     <div className="flex h-full min-w-[200px] flex-col">
-      <div className="flex items-center justify-between pb-2.5 pl-[18px] pr-3 pt-3.5">
-        <span className="flex min-w-0 items-center gap-2.5">
-          <img src="/logo/mark-adaptive.svg" width="24" height="24" alt="" className="shrink-0" />
-          <span className="dc-wordmark truncate text-[15px]">Daily Copilot</span>
-        </span>
-        <IconButton label="Collapse page tree" onClick={onCollapse} direction="left" />
+      <div className="flex items-center justify-between gap-2 pb-2.5 pl-3 pr-3 pt-3.5">
+        <div className="flex min-w-0 items-center gap-2">
+          <IconButton label="Collapse page tree" onClick={onCollapse} direction="left" />
+          <span className="flex min-w-0 items-center gap-2.5">
+            <img src="/logo/mark-adaptive.svg" width="24" height="24" alt="" className="shrink-0" />
+            <span className="dc-wordmark truncate text-[15px]">Daily Copilot</span>
+          </span>
+        </div>
+        <ListeningDot />
       </div>
       <SpaceSwitcher />
 
@@ -1278,6 +1283,30 @@ function TemplateIcon() {
   );
 }
 
+/**
+ * The white dot blipping while a voice recording runs, on every page and in every window: clicking it goes to the
+ * note that's recording.
+ */
+export function ListeningDot() {
+  const { status } = useVoiceRecording();
+  if (!status.is_recording) return null;
+  const noteTitle = status.note_path?.split("/").pop()?.replace(/\.md$/i, "");
+  const label = `${status.is_paused ? "Paused" : "Listening"} in ${noteTitle ?? "note"} (click to view)`;
+  const className = "relative flex h-5 w-5 shrink-0 items-center justify-center rounded-full hover:bg-white/10";
+  if (!status.note_path || status.space_id === null) {
+    return (
+      <span role="status" title={label} aria-label={label} className={className}>
+        <BlippingDot paused={status.is_paused} />
+      </span>
+    );
+  }
+  return (
+    <Link to={notePath(status.space_id, status.note_path)} title={label} aria-label={label} className={className}>
+      <BlippingDot paused={status.is_paused} />
+    </Link>
+  );
+}
+
 export function IconButton({
   label,
   onClick,
@@ -1307,6 +1336,34 @@ export function IconButton({
         aria-hidden="true"
       >
         <path d={direction === "left" ? "M15 6l-6 6 6 6" : "M9 6l6 6-6 6"} />
+      </svg>
+    </button>
+  );
+}
+
+/** The AI Assistant button (sparkles) that opens or closes the Co-pilot chat. */
+export function AssistantButton({ label, title, onClick }: { label: string; title?: string; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label={label}
+      title={title ?? label}
+      className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-border-light bg-surface-raised text-text-secondary hover:text-text-primary"
+    >
+      <svg
+        width="18"
+        height="18"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        aria-hidden="true"
+      >
+        <path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z" />
+        <path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8L19 15z" />
       </svg>
     </button>
   );

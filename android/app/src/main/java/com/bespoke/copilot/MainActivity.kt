@@ -27,6 +27,7 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -75,6 +76,16 @@ fun CopilotApp() {
     val showMessage: (String, Boolean) -> Unit = { message, isError ->
         lastMessageIsError = isError
         scope.launch { snackbarHostState.showSnackbar(message) }
+    }
+
+    // A voice note finishes in VoiceRecordingService whichever tab is open (or none: it posts a notification too).
+    LaunchedEffect(Unit) {
+        VoiceRecordingService.events.collect { event ->
+            when (event) {
+                is ListenEvent.Saved -> showMessage("Voice note saved to ${event.notePath}", false)
+                is ListenEvent.Failed -> showMessage(event.message, true)
+            }
+        }
     }
 
     Scaffold(

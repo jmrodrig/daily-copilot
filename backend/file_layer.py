@@ -520,6 +520,21 @@ def asset_path(name: str, *, notes_dir: str | Path | None = None) -> Path:
     return path
 
 
+def write_asset(name: str, data: bytes, *, notes_dir: str | Path | None = None) -> Path:
+    """Replace a stored asset's file with `data` (a spreadsheet edited in the app, say), swapped in whole so a reader
+    never sees half of it. Raises as `asset_path` does."""
+    path = asset_path(name, notes_dir=notes_dir)
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        os.replace(tmp_name, path)
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
+    return path
+
+
 # A stored asset's markup (strokes and comments drawn over it in the lightbox) lives beside it, in `<name>.json`,
 # so the asset itself is never changed. The sidecar's name has two suffixes, so it can't be fetched as an asset.
 MARKUP_SUFFIX = ".json"

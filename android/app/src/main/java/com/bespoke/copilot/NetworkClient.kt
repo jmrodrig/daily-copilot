@@ -3,11 +3,14 @@ package com.bespoke.copilot
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 import java.io.IOException
 import java.time.LocalDate
 import java.util.concurrent.TimeUnit
@@ -43,10 +46,16 @@ object NetworkClient {
         .readTimeout(15, TimeUnit.SECONDS)
         .build()
 
+    // The backend transcribes an upload before it answers, which takes minutes for a long recording.
+    private val slowHttp = http.newBuilder()
+        .writeTimeout(5, TimeUnit.MINUTES)
+        .readTimeout(30, TimeUnit.MINUTES)
+        .build()
+
     private fun url(path: String) = "${BuildConfig.BACKEND_URL}$path"
 
-    private fun execute(request: Request): String =
-        http.newCall(request).execute().use { response ->
+    private fun execute(request: Request, client: OkHttpClient = http): String =
+        client.newCall(request).execute().use { response ->
             if (!response.isSuccessful) {
                 throw IOException("Server returned ${response.code}")
             }
@@ -131,6 +140,24 @@ object NetworkClient {
             runCatching {
                 val body = JSONObject().put("completed_task_ids", JSONArray(completedTaskIds))
                 JSONObject(post("/api/checkin", body)).getJSONArray("completed_task_ids").length()
+            }
+        }
+
+    /**
+     * Uploads a recording to `/api/voice/transcribe`, which transcribes it into a listen block: appended to
+     * [notePath] if given, else in a new voice note in [project]'s inbox. Returns the note's path.
+     */
+    suspend fun transcribeVoice(audio: File, project: String, notePath: String? = null): Result<String> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val body = MultipartBody.Builder()
+                    .setType(MultipartBody.FORM)
+                    .addFormDataPart("file", audio.name, audio.asRequestBody("audio/mp4".toMediaType()))
+                    .addFormDataPart("project", project)
+                    .apply { if (notePath != null) addFormDataPart("note_path", notePath) }
+                    .build()
+                val request = Request.Builder().url(url("/api/voice/transcribe")).post(body).build()
+                JSONObject(execute(request, slowHttp)).getString("note_path")
             }
         }
 }

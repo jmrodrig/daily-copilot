@@ -282,6 +282,7 @@ def test_read_only_does_not_offer_or_allow_writes(client, notes_dir, model):
         "search_local_files",
         "list_local_directory",
         "read_local_file",
+        "read_spreadsheet",
         "search_web",
         "fetch_web_page",
     ]
@@ -1453,3 +1454,171 @@ def test_chat_stream_cli_timeout(client, popen, monkeypatch):
     assert kinds(events) == ["tool_start", "error"]
     assert events[-1]["status_code"] == 502 and "did not answer within" in events[-1]["detail"]
     assert process.killed
+
+
+# --- Spreadsheets -----------------------------------------------------------------
+
+
+@pytest.fixture
+def budget(notes_dir):
+    """A workbook attached to a note in the Default space: its asset URL and file."""
+    import openpyxl
+
+    book = openpyxl.Workbook()
+    costs = book.active
+    costs.title = "Costs"
+    costs.append(["Item", "Qty"])
+    costs.append(["Keel bolts", 12])
+    book.create_sheet("Notes")
+    buffer = io.BytesIO()
+    book.save(buffer)
+    name = file_layer.save_asset(buffer.getvalue(), "", "Budget.xlsx", notes_dir=notes_dir)
+    return f"/api/notes/image/{name}?space_id=1", file_layer.asset_path(name, notes_dir=notes_dir)
+
+
+def cells(path, sheet=None):
+    import openpyxl
+
+    book = openpyxl.load_workbook(path)
+    ws = book[sheet] if sheet else book.active
+    return [[c.value for c in row] for row in ws.iter_rows()]
+
+
+def test_read_spreadsheet_reads_a_note_attachment(budget):
+    url, _ = budget
+    turn = agent._Turn(AccessMode.READ_ONLY)
+
+    result = turn.call("read_spreadsheet", {"path": url, "sheet": "Costs"})
+
+    assert result["path"] == url
+    assert result["sheets"] == [{"name": "Costs", "rows": 2, "cols": 2}]
+    assert "| 2 | Keel bolts | 12 |" in result["content"]
+
+
+def test_edit_spreadsheet_sets_cells_and_formulas(budget):
+    url, path = budget
+    turn = agent._Turn(AccessMode.WRITE_DIRECTLY)
+
+    result = turn.call("edit_spreadsheet", {"path": url, "cell": "B2", "value": "999"})
+    assert result["path"] == url and result["sheet"] == "Costs" and result["changed"] == ["B2"]
+    assert cells(path)[1] == ["Keel bolts", 999]
+
+    turn.call("edit_spreadsheet", {"path": url, "updates": {"A3": "Total", "B3": "=SUM(B2:B2)", "C1": 2.5, "C2": ""}})
+    assert cells(path) == [["Item", "Qty", 2.5], ["Keel bolts", 999, None], ["Total", "=SUM(B2:B2)", None]]
+
+    turn.call("edit_spreadsheet", {"path": url, "clear_range": "A3:B3"})
+    assert cells(path) == [["Item", "Qty", 2.5], ["Keel bolts", 999, None]]
+
+
+def test_edit_spreadsheet_adds_and_picks_sheets(budget):
+    url, path = budget
+    turn = agent._Turn(AccessMode.WRITE_DIRECTLY)
+
+    added = turn.call("edit_spreadsheet", {"path": url, "add_sheet": "Hull", "updates": {"A1": "Mass"}})
+    assert added["sheets"] == ["Costs", "Notes", "Hull"] and added["sheet"] == "Hull"
+    assert cells(path, "Hull") == [["Mass"]]
+
+    turn.call("edit_spreadsheet", {"path": url, "sheet": "notes", "cell": "A1", "value": "Yard A"})
+    assert cells(path, "Notes") == [["Yard A"]]
+
+    with pytest.raises(agent.ToolError, match="has a sheet named"):
+        turn.call("edit_spreadsheet", {"path": url, "add_sheet": "hull"})
+    with pytest.raises(agent.ToolError, match="No sheet named"):
+        turn.call("edit_spreadsheet", {"path": url, "sheet": "Rig", "cell": "A1", "value": 1})
+    with pytest.raises(agent.ToolError, match="Not a cell or range"):
+        turn.call("edit_spreadsheet", {"path": url, "cell": "nope", "value": 1})
+    with pytest.raises(agent.ToolError, match="Nothing to change"):
+        turn.call("edit_spreadsheet", {"path": url})
+
+
+def test_edit_spreadsheet_edits_local_files_and_csv(tmp_path):
+    turn = agent._Turn(AccessMode.WRITE_DIRECTLY)
+    csv_file = tmp_path / "parts.csv"
+    csv_file.write_text("Part;Mass\nKeel;8200\n", encoding="utf-8")
+
+    turn.call("edit_spreadsheet", {"path": csv_file.as_uri(), "updates": {"B2": 8300, "A3": "Rudder", "B3": "150"}})
+    assert csv_file.read_text(encoding="utf-8").splitlines() == ["Part;Mass", "Keel;8300", "Rudder;150"]
+
+    with pytest.raises(agent.ToolError, match="File not found"):
+        turn.call("edit_spreadsheet", {"path": str(tmp_path / "missing.xlsx"), "cell": "A1", "value": 1})
+
+    made = turn.call("edit_spreadsheet", {"path": str(tmp_path / "new.xlsx"), "create": True, "cell": "A1", "value": "Hi"})
+    assert made["sheets"] == ["Sheet1"] and cells(tmp_path / "new.xlsx") == [["Hi"]]
+
+
+def test_edit_spreadsheet_creates_a_note_attachment(notes_dir):
+    turn = agent._Turn(AccessMode.WRITE_DIRECTLY)
+
+    made = turn.call("edit_spreadsheet", {"path": "Rig.xlsx", "create": True, "updates": {"A1": "Mast"}})
+
+    assert made["url"].startswith("/api/notes/image/") and made["url"].endswith(".xlsx?space_id=1")
+    assert made["link"] == f"[Rig.xlsx]({made['url']})"
+    name = made["url"].removeprefix("/api/notes/image/").removesuffix("?space_id=1")
+    assert cells(file_layer.asset_path(name, notes_dir=notes_dir)) == [["Mast"]]
+    with pytest.raises(agent.ToolError, match="with its type"):
+        turn.call("edit_spreadsheet", {"path": "Rig", "create": True})
+
+
+def test_edit_spreadsheet_respects_the_access_mode(budget):
+    url, path = budget
+    before = path.read_bytes()
+
+    with pytest.raises(agent.ToolError, match="Unknown tool"):
+        agent._Turn(AccessMode.READ_ONLY).call("edit_spreadsheet", {"path": url, "cell": "B2", "value": 1})
+    with pytest.raises(agent.ToolError, match="ASK FIRST"):
+        agent._Turn(AccessMode.ASK_FIRST).call("edit_spreadsheet", {"path": url, "cell": "B2", "value": 1})
+    assert path.read_bytes() == before
+
+
+def test_chat_edits_a_spreadsheet(client, model, budget):
+    url, path = budget
+    model.script += [
+        reply(tool_calls=[tool_call("edit_spreadsheet", {"path": url, "cell": "B2", "value": 999})]),
+        reply("B2 is now 999."),
+    ]
+
+    body = chat(client, "Update B2 to 999", mode="write_directly").json()
+
+    offered = [t["function"]["name"] for t in model.calls[0]["tools"]]
+    assert "edit_spreadsheet" in offered and "read_spreadsheet" in offered
+    assert "spreadsheet window" in model.calls[0]["messages"][0]["content"]
+    assert tool_results(model.calls[1])[0]["changed"] == ["B2"]
+    assert body["reply"] == "B2 is now 999."
+    assert cells(path)[1] == ["Keel bolts", 999]
+
+
+def test_edit_spreadsheet_defines_and_removes_names(budget):
+    url, path = budget
+    turn = agent._Turn(AccessMode.WRITE_DIRECTLY)
+
+    result = turn.call(
+        "edit_spreadsheet",
+        {"path": url, "names": {"KeelWeight": "B2", "Prices": "Costs!A1:B2", "Remarks": "'Notes'!A1"}, "updates": {"C2": "=KeelWeight*2"}},
+    )
+    assert result["changed"] == ["C2", "KeelWeight", "Prices", "Remarks"]
+    assert result["names"] == {"KeelWeight": "Costs!$B$2", "Prices": "Costs!$A$1:$B$2", "Remarks": "Notes!$A$1"}
+    read = turn.call("read_spreadsheet", {"path": url})
+    assert read["names"]["KeelWeight"] == "Costs!$B$2"
+    assert "  - KeelWeight: Costs!$B$2" in read["content"]
+
+    # A name is matched whatever its case: redefined, then removed.
+    turn.call("edit_spreadsheet", {"path": url, "names": {"keelweight": "Notes!B5"}})
+    removed = turn.call("edit_spreadsheet", {"path": url, "names": {"Prices": None, "Remarks": ""}})
+    assert removed["changed"] == ["-Prices", "-Remarks"]
+    assert removed["names"] == {"keelweight": "Notes!$B$5"}
+
+    with pytest.raises(agent.ToolError, match="Not a name a cell can have"):
+        turn.call("edit_spreadsheet", {"path": url, "names": {"B2": "C3"}})
+    with pytest.raises(agent.ToolError, match="No sheet named"):
+        turn.call("edit_spreadsheet", {"path": url, "names": {"Mast": "Rig!A1"}})
+    with pytest.raises(agent.ToolError, match="Not a cell or range"):
+        turn.call("edit_spreadsheet", {"path": url, "names": {"Mast": "nope"}})
+
+
+def test_edit_spreadsheet_names_need_a_workbook(tmp_path):
+    turn = agent._Turn(AccessMode.WRITE_DIRECTLY)
+    csv_file = tmp_path / "parts.csv"
+    csv_file.write_text("Part,Mass\nKeel,8200\n", encoding="utf-8")
+
+    with pytest.raises(agent.ToolError, match="can't have defined names"):
+        turn.call("edit_spreadsheet", {"path": str(csv_file), "names": {"KeelMass": "B2"}})

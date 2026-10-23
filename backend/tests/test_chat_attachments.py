@@ -116,7 +116,8 @@ def test_text_attachment_is_embedded_with_its_local_path(client, notes_dir):
     asset = attachment["url"].split("/api/notes/image/")[1].split("?")[0]
     assert text.startswith("Sum the loads\n\n")
     assert f'[Attached file: "loads.csv" (size: 18 bytes, local path: {(notes_dir / ".assets" / asset).resolve()})]' in text
-    assert "keel,1200" in text
+    # A CSV comes as a table, its rows numbered as in a spreadsheet (see read_spreadsheet).
+    assert "| # | part | kg |" in text and "| 2 | keel | 1200 |" in text
 
 
 def test_pdf_attachment_text_is_extracted(client, notes_dir):

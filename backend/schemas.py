@@ -9,7 +9,7 @@ from datetime import date, datetime
 from enum import Enum
 from typing import Any, ClassVar, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class AccessMode(str, Enum):
@@ -626,6 +626,36 @@ class ImageUpload(BaseModel):
     """`POST /api/notes/image`: where a pasted image is served from, for the note's markdown."""
 
     url: str
+
+
+class NewSpreadsheetRequest(BaseModel):
+    """`POST /api/notes/spreadsheet/new`: a blank workbook attached to the space, named `title` (`.xlsx` added)."""
+
+    space_id: int
+    title: str = Field(default="Spreadsheet.xlsx", max_length=200)
+
+
+class NewSpreadsheet(BaseModel):
+    """The blank workbook made: the URL it's served from, its stored name, and the file name to link it under."""
+
+    url: str
+    name: str
+    title: str
+
+
+class AssetWritten(BaseModel):
+    """`PUT /api/notes/image/{name}`: the asset replaced, and its new size in bytes."""
+
+    status: str = "ok"
+    name: str
+    size: int
+
+
+class AssetOpened(BaseModel):
+    """`POST /api/notes/image/{name}/open`: the asset opened with its default program, and where it is on disk."""
+
+    status: str = "ok"
+    path: str
 
 
 class MarkupComment(BaseModel):
@@ -1342,3 +1372,131 @@ class ChatHistoryResponse(BaseModel):
     space_id: int
     threads: list[dict[str, Any]] = Field(default_factory=list)
     active_id: str | None = None
+
+
+# --- Voice notes (see voice.py) ---------------------------------------------------------------------------------
+
+VoiceSource = Literal["mic", "loopback", "mixed"]
+# A listen widget's id, as the desktop makes them (`lw_` and random letters): it names the block in its note.
+_WIDGET_ID = r"^[A-Za-z0-9_-]{1,64}$"
+
+
+class AudioDevice(BaseModel):
+    index: int
+    name: str
+    host_api: str = ""
+    channels: int
+    default_samplerate: int
+
+
+class AudioDevices(BaseModel):
+    """`GET /api/voice/devices`: what a recording can capture, microphones and system audio (loopback)."""
+
+    mics: list[AudioDevice]
+    loopbacks: list[AudioDevice]
+    default_mic_index: int | None = None
+    default_loopback_index: int | None = None
+
+
+class VoiceStartRequest(BaseModel):
+    """`POST /api/voice/recording/start`: what to record, and the listen widget (in its note) that records it."""
+
+    source: VoiceSource = "mic"
+    # The devices (`GET /api/voice/devices` indexes) to record from; the defaults when not given.
+    mic_device_index: int | None = Field(default=None, validation_alias=AliasChoices("mic_device_index", "mic_index"))
+    loopback_device_index: int | None = Field(
+        default=None, validation_alias=AliasChoices("loopback_device_index", "loopback_index")
+    )
+    widget_id: str = Field(pattern=_WIDGET_ID)
+    space_id: int = 1
+    note_path: str | None = None
+
+
+class VoiceStatus(BaseModel):
+    """`GET /api/voice/recording/status`: the app's one recording, if any, and the widget that owns it."""
+
+    is_recording: bool
+    is_paused: bool = False
+    # Stopped and being transcribed; no new recording can start till it's done.
+    is_processing: bool = False
+    stage: str | None = None
+    elapsed_seconds: float = 0.0
+    source: str | None = None
+    started_at: str | None = None
+    widget_id: str | None = None
+    space_id: int | None = None
+    note_path: str | None = None
+
+
+class VoiceParticipant(BaseModel):
+    speaker_id: str  # `Participant 2`: the speaker's cluster, as the dialogue first named them
+    display_name: str
+    is_tagged: bool = False
+    email: str = ""
+    cluster_id: int | None = None
+    audio_stem: str | None = None
+    snippet_url: str | None = None
+    sample_text: str = ""
+
+
+class VoiceResult(BaseModel):
+    """A transcribed recording: what a completed listen widget holds (and its ```listen block in the note)."""
+
+    model_config = ConfigDict(extra="allow")
+
+    id: str
+    status: Literal["completed"] = "completed"
+    source: str
+    recorded_at: str | None = None
+    duration: float
+    audio_file: str
+    audio_url: str
+    participants: list[VoiceParticipant] = Field(default_factory=list)
+    dialogue: str = ""
+    full_text: str = ""
+    # Whether the result was written into the widget's block in its note on disk.
+    note_updated: bool = False
+    # The note it was written into (`POST /api/voice/transcribe` makes one when it isn't given one).
+    note_path: str | None = None
+
+
+class VoiceTagRequest(BaseModel):
+    """`POST /api/voice/tag-participant`: name a speaker of a recording, enrolling their voiceprint."""
+
+    speaker_id: str = Field(min_length=1, max_length=64)
+    alias: str = Field(min_length=1, max_length=120)
+    email: str | None = Field(default=None, max_length=200)
+    audio_stem: str | None = Field(default=None, max_length=120)
+    cluster_id: int | None = None
+    # The widget's data as the page has it, returned tagged.
+    block: dict[str, Any] = Field(default_factory=dict)
+    # The widget's block in its note, tagged on disk too.
+    widget_id: str | None = Field(default=None, pattern=_WIDGET_ID)
+    space_id: int = 1
+    note_path: str | None = None
+
+    @field_validator("alias")
+    @classmethod
+    def _alias_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("alias must not be blank")
+        return value.strip()
+
+
+class VoiceUntagRequest(BaseModel):
+    """`POST /api/voice/untag-participant`: set a named speaker of a recording back to unidentified."""
+
+    speaker_id: str = Field(min_length=1, max_length=64)
+    # The widget's data as the page has it, returned untagged.
+    block: dict[str, Any] = Field(default_factory=dict)
+    # The widget's block in its note, untagged on disk too.
+    widget_id: str | None = Field(default=None, pattern=_WIDGET_ID)
+    space_id: int = 1
+    note_path: str | None = None
+
+
+class VoiceTagResponse(BaseModel):
+    block: dict[str, Any]
+    note_updated: bool = False
+    has_untagged: bool = False
+    contact: dict[str, Any]
