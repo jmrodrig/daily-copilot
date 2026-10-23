@@ -45,6 +45,7 @@ STATUS_LABELS = {ONLINE: "Online", PARTIAL: "Partial", STOPPED: "Stopped"}
 STATUS_COLORS = {ONLINE: "#22c55e", PARTIAL: "#eab308", STOPPED: "#ef4444"}
 BACKGROUND_COLOR = "#101820"
 MONOGRAM_COLOR = "#e2e8f0"
+BRAND_ICON_PATH = REPO_ROOT / "docs" / "brand" / "favicon" / "icon-192.png"
 
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
 
@@ -82,14 +83,22 @@ def status_title(status):
 
 
 def create_icon_image(status, size=64):
-    """The tray icon: a dark rounded square with a `C` monogram and a status dot in the bottom-right corner."""
-    image = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    """The tray icon: the Ashlar brand mark with a live status dot in the bottom-right corner."""
+    if BRAND_ICON_PATH.exists():
+        try:
+            base = Image.open(BRAND_ICON_PATH).convert("RGBA")
+            image = base.resize((size, size), Image.Resampling.LANCZOS)
+        except Exception:
+            image = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(image)
+            draw.rounded_rectangle((0, 0, size - 1, size - 1), radius=size // 5, fill=BACKGROUND_COLOR)
+    else:
+        image = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(image)
+        draw.rounded_rectangle((0, 0, size - 1, size - 1), radius=size // 5, fill=BACKGROUND_COLOR)
+
     draw = ImageDraw.Draw(image)
-    draw.rounded_rectangle((0, 0, size - 1, size - 1), radius=size // 5, fill=BACKGROUND_COLOR)
-    # Monogram: an open ring (a "C") in the upper-left part of the square.
-    ring = (size * 0.14, size * 0.14, size * 0.70, size * 0.70)
-    draw.arc(ring, start=45, end=315, fill=MONOGRAM_COLOR, width=max(2, size // 9))
-    # Status dot, outlined in the background color so it stands out from the monogram.
+    # Status dot, outlined in the background color so it stands out cleanly.
     dot = (size * 0.56, size * 0.56, size * 0.94, size * 0.94)
     draw.ellipse(dot, fill=STATUS_COLORS[status], outline=BACKGROUND_COLOR, width=max(1, size // 32))
     return image

@@ -173,6 +173,12 @@ def test_icon_images_differ_by_status():
     assert len(set(images.values())) == 3
 
 
+def test_icon_uses_brand_asset():
+    assert tray.BRAND_ICON_PATH.exists()
+    image = tray.create_icon_image(tray.ONLINE)
+    assert image.getpixel((32, 32))[3] > 0
+
+
 # --- Single instance -----------------------------------------------------------------------------------------------
 
 
