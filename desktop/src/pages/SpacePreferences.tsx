@@ -448,6 +448,7 @@ const FIELD_TYPES: Record<CustomFieldType, string> = {
   date: "Date",
   checkbox: "Checkbox",
   dropdown: "Dropdown",
+  person: "Person",
 };
 
 /** A dropdown option being edited: `original` is its saved name (null if new), so a rename carries tasks over. */

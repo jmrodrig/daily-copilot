@@ -731,6 +731,7 @@ function KanbanAddCard({
               named
               field={field}
               value={draft.custom_fields[field.id]}
+              people={people}
               onChange={(value) => setCustom(field.id, value)}
               onKeyDown={fieldKeys}
               className="min-w-0 max-w-full rounded border border-border-default bg-surface-panel px-1.5 py-0.5 text-[13px]"

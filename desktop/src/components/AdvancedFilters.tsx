@@ -237,7 +237,8 @@ function CustomFieldFilter({ field, value, onChange }: { field: CustomFieldDef; 
     );
   }
 
-  // Text, number and date: Any / Has a value / No value, or "Is…" with the value to match.
+  // Text, person, number and date: Any / Has a value / No value, or "Is…" with the value to match (text and people:
+  // any part of it, in any case).
   const mode = value === null ? OFF : value === ANY_VALUE || value === NO_VALUE ? value : IS;
   return (
     <span className="flex items-center gap-1.5">
@@ -253,7 +254,7 @@ function CustomFieldFilter({ field, value, onChange }: { field: CustomFieldDef; 
         className="field w-32 py-1 text-[13px]"
       >
         {presence}
-        <option value={IS}>{field.type === "text" ? "Contains…" : "Is…"}</option>
+        <option value={IS}>{field.type === "text" || field.type === "person" ? "Contains…" : "Is…"}</option>
       </select>
       {(mode === IS || pickedIs) && (
         <DraftInput

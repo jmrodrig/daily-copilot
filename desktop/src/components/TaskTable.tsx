@@ -38,6 +38,7 @@ export function formatCustomValue(field: CustomFieldDef, value: CustomFieldValue
   if (value === undefined) return "—";
   if (field.type === "checkbox") return value ? "✓" : "—";
   if (field.type === "date" && typeof value === "string") return formatDay(value);
+  // A person field holds the person's name.
   return String(value);
 }
 
@@ -246,7 +247,7 @@ export function NewTaskRow({
       );
     }
     const field = customFields.find((f) => `cf:${f.id}` === id);
-    return field ? <CustomFieldInput field={field} value={draft.custom_fields[field.id]} onChange={(value) => setCustom(field.id, value)} onKeyDown={keys} className={cell} /> : null;
+    return field ? <CustomFieldInput field={field} value={draft.custom_fields[field.id]} people={people} onChange={(value) => setCustom(field.id, value)} onKeyDown={keys} className={cell} /> : null;
   }
 
   // Fields asked for on inline creation whose column is hidden still get an input, above the actions.
@@ -284,6 +285,7 @@ export function NewTaskRow({
                   named
                   field={field}
                   value={draft.custom_fields[field.id]}
+                  people={people}
                   onChange={(value) => setCustom(field.id, value)}
                   onKeyDown={keys}
                   className="field w-auto px-2 py-1 text-[13px]"
@@ -309,11 +311,12 @@ export function NewTaskRow({
 
 /**
  * A custom field's input for a new task. `named` shows the field's name (as the placeholder, the empty dropdown
- * choice or the checkbox's label), for inputs without a column header above them.
+ * choice or the checkbox's label), for inputs without a column header above them. A person field picks from `people`.
  */
 export function CustomFieldInput({
   field,
   value,
+  people = [],
   onChange,
   onKeyDown,
   className,
@@ -321,12 +324,25 @@ export function CustomFieldInput({
 }: {
   field: CustomFieldDef;
   value: CustomFieldValue | undefined;
+  people?: Person[];
   onChange: (value: CustomFieldValue | null) => void;
   onKeyDown: (e: KeyboardEvent) => void;
   className: string;
   named?: boolean;
 }) {
   const label = `New task ${field.name}`;
+  if (field.type === "person") {
+    return (
+      <AssigneeSelect
+        ariaLabel={label}
+        value={typeof value === "string" ? value : null}
+        people={people}
+        emptyLabel={named ? `${field.name}…` : "—"}
+        onChange={onChange}
+        className={className}
+      />
+    );
+  }
   if (field.type === "checkbox") {
     const box = <input type="checkbox" aria-label={label} checked={value === true} onChange={(e) => onChange(e.target.checked || null)} />;
     if (!named) return box;

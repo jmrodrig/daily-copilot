@@ -3,7 +3,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState, t
 import { errorDetail, getJson } from "./api";
 import type { ProjectOption, StatusFlow } from "./tasks";
 
-export type CustomFieldType = "text" | "number" | "date" | "checkbox" | "dropdown";
+export type CustomFieldType = "text" | "number" | "date" | "checkbox" | "dropdown" | "person";
 
 /**
  * One custom task field of a space; tasks keep its value under `id` (see CustomFieldDef in backend/schemas.py).
