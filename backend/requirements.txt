@@ -18,3 +18,6 @@ onnxruntime>=1.17
 huggingface-hub>=0.20
 pyaudiowpatch>=0.2.12; sys_platform == "win32"
 sounddevice>=0.4.6
+# System tray server controller (scripts/copilot_tray.pyw; Pillow comes with pystray)
+pystray>=0.19.5
+pywin32>=306; sys_platform == "win32"

@@ -33,3 +33,6 @@ backend/data/
 
 # Speaker-embedding model (voice notes): ~29 MB, downloaded from Hugging Face when missing (see backend/voice.py)
 backend/models/*.onnx
+
+# Dev server logs written by the tray controller (scripts/copilot_tray.pyw)
+.logs/
