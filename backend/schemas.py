@@ -751,6 +751,8 @@ class CustomFieldType(str, Enum):
     CHECKBOX = "checkbox"
     # One of the field's `options`.
     DROPDOWN = "dropdown"
+    # A person's name, picked from the space's People directory.
+    PERSON = "person"
 
 
 class CustomFieldDef(BaseModel):

@@ -245,7 +245,12 @@ export default function TaskListView({
             {field.type === "dropdown" ? (
               <DropdownCell field={field} task={task} disabled={busy} onChange={(value) => setField(task, field, value)} />
             ) : (
-              formatCustomValue(field, task.custom_fields[field.id])
+              (() => {
+                // A person field shows the person's avatar when they're in People.
+                const value = task.custom_fields[field.id];
+                const person = field.type === "person" ? people.find((p) => p.name === value) : undefined;
+                return person ? <PersonBadge person={person} /> : formatCustomValue(field, value);
+              })()
             )}
           </td>
         );

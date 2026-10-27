@@ -207,6 +207,7 @@ export default function BulkEditDialog({
               <CustomFieldInput
                 field={field}
                 value={draft.custom_fields[field.id] ?? null}
+                people={people}
                 onChange={(value) => setCustom(field.id, value)}
                 className={input}
               />,
@@ -288,11 +289,13 @@ function YesNo({ label, value, onChange, className }: { label: string; value: bo
 function CustomFieldInput({
   field,
   value,
+  people,
   onChange,
   className,
 }: {
   field: CustomFieldDef;
   value: CustomFieldValue | null;
+  people: Person[];
   onChange: (value: CustomFieldValue | null) => void;
   className: string;
 }) {
@@ -307,6 +310,17 @@ function CustomFieldInput({
       );
     case "date":
       return <DateInput label={label} value={typeof value === "string" ? value : null} onChange={onChange} />;
+    case "person":
+      return (
+        <AssigneeSelect
+          ariaLabel={label}
+          value={typeof value === "string" ? value : null}
+          people={people}
+          emptyLabel="— (clear)"
+          onChange={onChange}
+          className={className}
+        />
+      );
     case "dropdown": {
       const current = typeof value === "string" ? value : "";
       return (

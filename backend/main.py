@@ -517,6 +517,8 @@ def _custom_value(field: schemas.CustomFieldDef, value: Any) -> Any:
             return None
         if value.strip() in field.options:
             return value.strip()
+    if field.type is kind.PERSON and isinstance(value, str):
+        return value.strip()[:128] or None
     raise HTTPException(status_code=400, detail=f"Invalid value for the {field.type.value} field {field.name!r}: {value!r}")
 
 
@@ -1867,8 +1869,8 @@ ANY_VALUE = "*"
 def _custom_field_matches(field: schemas.CustomFieldDef, value: Any, wanted: str) -> bool:
     """Whether a task's stored `value` (None if unset) of a custom field matches the filter text `wanted`.
 
-    "" matches tasks without a value and "*" those with one. Otherwise text fields match case-insensitively
-    anywhere in the value, numbers by value, checkboxes by "true"/"false" (unset counts as false), and dates and
+    "" matches tasks without a value and "*" those with one. Otherwise text and person fields match
+    case-insensitively anywhere in the value, numbers by value, checkboxes by "true"/"false" (unset counts as false), and dates and
     dropdowns exactly.
     """
     kind = schemas.CustomFieldType
@@ -1881,7 +1883,7 @@ def _custom_field_matches(field: schemas.CustomFieldDef, value: Any, wanted: str
         return wanted.lower() == ("false" if unset else "true")
     if value is None:
         return False
-    if field.type is kind.TEXT:
+    if field.type in (kind.TEXT, kind.PERSON):
         return wanted.lower() in str(value).lower()
     if field.type is kind.NUMBER:
         try:

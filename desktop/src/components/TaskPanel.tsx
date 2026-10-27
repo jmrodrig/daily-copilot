@@ -13,7 +13,7 @@ import { Link } from "react-router-dom";
 
 import { getJson, message, sendJson } from "../lib/api";
 import { colouredOptions, optionColor, pillStyle } from "../lib/colors";
-import { AssigneeSelect, usePeople } from "../lib/people";
+import { AssigneeSelect, usePeople, type Person } from "../lib/people";
 import { notePath, useSpace, type CustomFieldDef } from "../lib/space";
 import {
   allowedStatuses,
@@ -281,6 +281,7 @@ function TaskFields({
             key={field.id}
             field={field}
             value={task.custom_fields[field.id]}
+            people={people}
             onSave={(value) => onPatch({ custom_fields: { [field.id]: value } })}
           />
         ))}
@@ -408,10 +409,12 @@ function TextField({
 function CustomField({
   field,
   value,
+  people,
   onSave,
 }: {
   field: CustomFieldDef;
   value: CustomFieldValue | undefined;
+  people: Person[];
   onSave: (value: CustomFieldValue | null) => Promise<boolean>;
 }) {
   const label = "flex flex-col gap-1 text-[13px] text-text-muted";
@@ -461,6 +464,20 @@ function CustomField({
         </label>
       );
     }
+    case "person":
+      return (
+        <label className={`${label} col-span-2`}>
+          {field.name}
+          <AssigneeSelect
+            ariaLabel={field.name}
+            value={typeof value === "string" ? value : null}
+            people={people}
+            emptyLabel="—"
+            onChange={(name) => onSave(name)}
+            className={input}
+          />
+        </label>
+      );
     case "number":
       return (
         <label className={label}>
