@@ -13,17 +13,19 @@ import { Link } from "react-router-dom";
 
 import { getJson, message, sendJson } from "../lib/api";
 import { colouredOptions, optionColor, pillStyle } from "../lib/colors";
-import { AssigneeSelect, usePeople, type Person } from "../lib/people";
+import { AssigneeSelect, AssigneesSelect, usePeople, type Person } from "../lib/people";
 import { notePath, useSpace, type CustomFieldDef } from "../lib/space";
 import {
   allowedStatuses,
   announceTaskChange,
+  assigneesPatch,
   createTaskLink,
   deleteTaskLink,
   fetchTaskDependencies,
   isOverdue,
   STATUS_LABELS,
   statusColor,
+  taskAssignees,
   useLinksChanged,
   useTaskChanges,
   useTaskPanel,
@@ -43,7 +45,8 @@ import { postStatusComment, useStatusChangePrompt } from "./StatusChangeDialog";
 import { OptionPill } from "./ColorPicker";
 import { ProjectPicker } from "./ProjectPicker";
 import { fetchUrlTitle, isWebUrl, linkPill, linkSegments, pastedLink, pillMarkdown, StaticPill } from "./referencePill";
-import { ME, NEUTRAL_TAG, ProjectTag, Tag, TagPills } from "./TriageBoard";
+import TagEditor from "./TagEditor";
+import { ME, NEUTRAL_TAG, ProjectTag, Tag } from "./TriageBoard";
 
 type State = { state: "loading" } | { state: "ok"; task: TaskItem } | { state: "error"; message: string };
 
@@ -59,6 +62,14 @@ export default function TaskPanel({ taskId, onClose }: { taskId: number; onClose
   // A save can finish after another task was opened (blurring a field by clicking a card): don't show it then.
   const shownId = useRef(taskId);
   shownId.current = taskId;
+  // Each task opened (e.g. one just added on the board) takes the keyboard focus once it has loaded.
+  const section = useRef<HTMLElement>(null);
+  const focusedId = useRef<number | null>(null);
+  useEffect(() => {
+    if (state.state !== "ok" || focusedId.current === state.task.id) return;
+    focusedId.current = state.task.id;
+    section.current?.focus({ preventScroll: true });
+  }, [state]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -121,7 +132,7 @@ export default function TaskPanel({ taskId, onClose }: { taskId: number; onClose
   }
 
   return (
-    <section aria-label="Task details" className="flex h-full min-h-0 flex-col">
+    <section ref={section} tabIndex={-1} aria-label="Task details" className="flex h-full min-h-0 flex-col focus:outline-none">
       <div className="flex items-center justify-between gap-2 pb-2 pl-5 pr-3 pt-3.5">
         <span className="font-mono text-[13px] uppercase tracking-wider text-text-muted">Task #{taskId}</span>
         <button
@@ -210,7 +221,7 @@ function TaskFields({
           {colouredOptions(customFields, task.custom_fields).map(({ field }) => (
             <OptionPill key={field.id} field={field} value={task.custom_fields[field.id]} />
           ))}
-          <TagPills tags={task.tags} />
+          <TagEditor spaceId={task.space_id} tags={task.tags} onChange={(tags) => onPatch({ tags })} />
         </div>
       </div>
 
@@ -268,12 +279,12 @@ function TaskFields({
           />
         </label>
         <label className={`${label} col-span-2`}>
-          Assignee
-          <AssigneeSelect
-            value={task.assignee}
+          Assignees
+          <AssigneesSelect
+            value={taskAssignees(task)}
             people={people}
-            onChange={(assignee) => onPatch({ assignee })}
-            className="field py-1.5 text-[15px]"
+            onChange={(names) => onPatch(assigneesPatch(names))}
+            className="field min-h-[38px] py-1.5 text-[15px]"
           />
         </label>
         {customFields.map((field) => (

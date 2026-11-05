@@ -10,25 +10,30 @@ import { ProjectPicker, projectLabel } from "../components/ProjectPicker";
 import { postStatusComment, useStatusChangePrompt } from "../components/StatusChangeDialog";
 import {
   AddTaskButton,
+  ariaSort,
   ColumnPicker,
   customColumn,
   CustomFieldInput,
   formatCustomValue,
   NewTaskRow,
   newTaskDefaults,
+  SortHeader,
+  sortTasks,
   TITLE_COLUMN,
   useColumns,
   type Column,
   type NewTaskDraft,
+  type Sort,
 } from "../components/TaskTable";
 import { formatDay, ME, NEUTRAL_TAG, NoteLink, PRIORITY_TAG, ProjectTag, Tag, TagPills } from "../components/TriageBoard";
 import { getJson, message, sendJson } from "../lib/api";
-import { AssigneeSelect, personLabel, PersonBadge, usePeople, type Person } from "../lib/people";
+import { AssigneeSelect, AssigneesSelect, AvatarCluster, personLabel, usePeople, type Person } from "../lib/people";
 import { colouredOptions } from "../lib/colors";
 import { useSpace, type CustomFieldDef } from "../lib/space";
 import {
   allowedStatuses,
   announceTaskChange,
+  assigneesPatch,
   BOARD_COLUMNS,
   boardColumn,
   compareKanbanTasks,
@@ -36,6 +41,7 @@ import {
   isOverdue,
   PRIORITY_LABELS,
   STATUS_LABELS,
+  taskAssignees,
   taskQuery,
   updateTaskDates,
   useTaskChanges,
@@ -367,7 +373,7 @@ function TaskBoard({
   const me = people.find((p) => p.is_me)?.name ?? ME;
   const assignees = useMemo(() => {
     const names = new Set<string>([me, ...people.map((p) => p.name)]);
-    if (tasks.state === "ok") tasks.tasks.forEach((t) => t.assignee && names.add(t.assignee));
+    if (tasks.state === "ok") tasks.tasks.forEach((t) => taskAssignees(t).forEach((name) => names.add(name)));
     filters.assignee.forEach((name) => name && names.add(name));
     return [...names].sort((a, b) => Number(b === me) - Number(a === me) || a.localeCompare(b));
   }, [tasks, filters.assignee, people, me]);
@@ -386,6 +392,13 @@ function TaskBoard({
   const newTask = newTaskDefaults(filters, customFields, viewType === "kanban" ? "todo" : "backlog");
   const addTask = (task: TaskItem) =>
     setTasks((prev) => (prev.state === "ok" ? { ...prev, tasks: [...prev.tasks, task] } : prev));
+  // A task added on the Kanban or in the Backlog opens straight away in the task panel, to fill in its details
+  // (the List view does the same itself).
+  const { openTask } = useTaskPanel();
+  const addAndOpenTask = (task: TaskItem) => {
+    addTask(task);
+    openTask(task.id);
+  };
   const visible =
     tasks.state === "ok" ? (keepArchived ? tasks.tasks : tasks.tasks.filter((t) => t.status !== "archived")) : null;
 
@@ -460,7 +473,7 @@ function TaskBoard({
           spaceId={spaceId}
           projects={projects}
           newTaskDefaults={newTask}
-          onCreated={addTask}
+          onCreated={addAndOpenTask}
           tasks={visible}
           flow={flow}
           people={people}
@@ -478,7 +491,7 @@ function TaskBoard({
           flow={flow}
           customFields={customFields}
           newTask={newTask}
-          onCreated={addTask}
+          onCreated={addAndOpenTask}
           onPatch={patchTask}
           onStatus={changeStatus}
         />
@@ -764,7 +777,11 @@ function KanbanCard({ task, people, me, customFields }: { task: TaskItem } & Car
   const overdue = isOverdue(task);
   const { taskId, openTask } = useTaskPanel();
   const active = taskId === task.id;
-  const isUrgent = task.priority === "urgent";
+  // A done task is put away: greyed out, without the urgent highlight or the late warning.
+  const isDone = task.status === "done";
+  const isUrgent = task.priority === "urgent" && !isDone;
+  const late = overdue && !isDone;
+  const assignees = taskAssignees(task);
   const open = () => !active && openTask(task.id);
   return (
     <li
@@ -784,17 +801,19 @@ function KanbanCard({ task, people, me, customFields }: { task: TaskItem } & Car
         }
       }}
       className={`cursor-grab rounded-md border p-2.5 focus:outline-none focus-visible:border-accent/70 active:cursor-grabbing ${
-        isUrgent
-          ? active
-            ? "border-l-4 border-accent bg-accent/[0.10]"
-            : "border-l-4 border-accent/60 border-l-accent bg-accent/[0.06] hover:border-accent"
-          : active
-            ? "border-accent/70 bg-surface-raised"
-            : "border-border-default bg-surface-raised hover:border-border-light"
+        isDone
+          ? `bg-surface-panel/40 transition-opacity hover:opacity-90 ${active ? "border-accent/70 opacity-90" : "border-border-default/60 opacity-60"}`
+          : isUrgent
+            ? active
+              ? "border-l-4 border-accent bg-accent/[0.10]"
+              : "border-l-4 border-accent/60 border-l-accent bg-accent/[0.06] hover:border-accent"
+            : active
+              ? "border-accent/70 bg-surface-raised"
+              : "border-border-default bg-surface-raised hover:border-border-light"
       }`}
     >
-      <div className="text-[15px] text-text-primary">{task.title}</div>
-      <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+      <div className={`text-[15px] ${isDone ? "text-text-muted" : "text-text-primary"}`}>{task.title}</div>
+      <div className={`mt-1.5 flex flex-wrap items-center gap-1.5 ${isDone ? "saturate-0" : ""}`}>
         {task.project_code && <ProjectTag code={task.project_code} color={task.project_color} />}
         <Tag className={PRIORITY_TAG[task.priority]}>{PRIORITY_LABELS[task.priority]}</Tag>
         {task.status === "blocked" && <Tag className="border-accent bg-accent/15 text-accent">blocked</Tag>}
@@ -807,19 +826,15 @@ function KanbanCard({ task, people, me, customFields }: { task: TaskItem } & Car
       </div>
       <div className="mt-1.5 flex items-center justify-between gap-2 font-mono text-[13px]">
         <span
-          className={`whitespace-nowrap ${overdue ? "text-accent" : "text-text-muted"}`}
-          title={task.deadline ? `Due ${task.deadline}${overdue ? " (overdue)" : ""}` : undefined}
+          className={`whitespace-nowrap ${late ? "text-accent" : "text-text-muted"}`}
+          title={task.deadline ? `Due ${task.deadline}${late ? " (overdue)" : ""}` : undefined}
         >
-          {task.deadline ? `${formatDay(task.deadline)}${overdue ? " · late" : ""}` : "No due date"}
+          {task.deadline ? `${formatDay(task.deadline)}${late ? " · late" : ""}` : "No due date"}
         </span>
       </div>
-      {task.assignee && (
-        <div className="mt-1.5 text-[13px] text-text-muted">
-          {(() => {
-            const person = people.find((p) => p.name === task.assignee);
-            if (person) return <PersonBadge person={person} />;
-            return `👤 ${personLabel({ name: task.assignee, is_me: task.assignee === me })}`;
-          })()}
+      {assignees.length > 0 && (
+        <div className={`mt-1.5 text-[13px] text-text-muted ${isDone ? "saturate-0" : ""}`}>
+          <AvatarCluster names={assignees} people={people} me={me} withName={assignees.length === 1} />
         </div>
       )}
     </li>
@@ -836,10 +851,12 @@ const BACKLOG_COLUMNS: Column[] = [
   { id: "priority", label: "Priority" },
   { id: "start", label: "Start" },
   { id: "due", label: "Due" },
+  { id: "tags", label: "Tags" },
 ];
 
 // The dates are wide enough for the new task row's date inputs.
 const BACKLOG_WIDTHS: Record<string, string> = {
+  tags: "w-40",
   project: "w-28",
   status: "w-32",
   assignee: "w-32",
@@ -876,10 +893,12 @@ function Backlog({
   const { taskId, openTask } = useTaskPanel();
   const [hideDone, setHideDone] = useState(() => !tasks.some((t) => t.id === taskId && t.status === "done"));
   const [adding, setAdding] = useState(false);
-  const shown = hideDone ? tasks.filter((t) => t.status !== "done") : tasks;
+  // Clicking a column's header sorts by it; null keeps the view's order (earliest due date first).
+  const [sort, setSort] = useState<Sort>(null);
+  const shown = sortTasks(hideDone ? tasks.filter((t) => t.status !== "done") : tasks, sort, customFields);
   const allColumns = [...BACKLOG_COLUMNS, ...customFields.map(customColumn)];
-  // Priority and the custom fields are hidden until picked, so the table looks as it did.
-  const columns = useColumns("copilot:backlog-columns", allColumns, (id) => id === "priority" || id.startsWith("cf:"));
+  // Priority, Tags and the custom fields are hidden until picked, so the table looks as it did.
+  const columns = useColumns("copilot:backlog-columns", allColumns, (id) => id === "priority" || id === "tags" || id.startsWith("cf:"));
 
   return (
     <div className="flex flex-col gap-2">
@@ -899,9 +918,10 @@ function Backlog({
                 {columns.shown.map((column) => (
                   <th
                     key={column.id}
+                    aria-sort={ariaSort(sort, column.id)}
                     className={`${column.id === TITLE_COLUMN ? "px-4" : `${BACKLOG_WIDTHS[column.id] ?? "w-32"} truncate px-2`} py-2 font-medium`}
                   >
-                    {column.label}
+                    <SortHeader column={column} sort={sort} onSort={setSort} />
                   </th>
                 ))}
               </tr>
@@ -1029,12 +1049,13 @@ function BacklogRow({
       case "assignee":
         return (
           <td key={id} className="px-2 py-1.5">
-            <AssigneeSelect
-              ariaLabel={`Assignee of ${task.title}`}
-              value={task.assignee}
+            <AssigneesSelect
+              ariaLabel={`Assignees of ${task.title}`}
+              value={taskAssignees(task)}
               people={people}
               emptyLabel="—"
-              onChange={(assignee) => assignee !== task.assignee && onPatch(task, { assignee })}
+              compact
+              onChange={(names) => onPatch(task, assigneesPatch(names))}
               className={`${cell} w-full`}
             />
           </td>
@@ -1066,6 +1087,12 @@ function BacklogRow({
         return (
           <td key={id} className={`px-2 py-1.5 font-mono text-xs ${overdue ? "text-accent" : "text-text-muted"}`}>
             {task.deadline ? formatDay(task.deadline) : "—"}
+          </td>
+        );
+      case "tags":
+        return (
+          <td key={id} className="px-2 py-1.5">
+            <div className="flex flex-wrap items-center gap-1">{task.tags.length > 0 ? <TagPills tags={task.tags} /> : "—"}</div>
           </td>
         );
       default: {

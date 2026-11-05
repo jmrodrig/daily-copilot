@@ -6,7 +6,9 @@ import { AssigneeSelect, type Person } from "../lib/people";
 import type { CustomFieldDef } from "../lib/space";
 import {
   PRIORITY_LABELS,
+  PRIORITY_RANK,
   STATUS_LABELS,
+  taskAssignees,
   type CustomFieldValue,
   type ProjectOption,
   type TaskCreate,
@@ -84,6 +86,98 @@ export function ColumnPicker({ columns, isShown, onToggle }: { columns: Column[]
       ))}
     </Dropdown>
   );
+}
+
+// --- Sorting ----------------------------------------------------------------------
+
+export type SortDirection = "asc" | "desc";
+/** The column a table is sorted by, or null for its own order (earliest due date first, from the server). */
+export type Sort = { column: string; direction: SortDirection } | null;
+
+/** The next sort when a column's header is clicked: ascending, then descending, then back to the table's own order. */
+export function nextSort(sort: Sort, column: string): Sort {
+  if (!sort || sort.column !== column) return { column, direction: "asc" };
+  return sort.direction === "asc" ? { column, direction: "desc" } : null;
+}
+
+const STATUS_ORDER = Object.keys(STATUS_LABELS) as TaskStatus[];
+
+/** A task's value in a column, for sorting; null for none (always sorted last). */
+function sortValue(task: TaskItem, column: string, customFields: CustomFieldDef[]): string | number | null {
+  switch (column) {
+    case TITLE_COLUMN:
+      return task.title;
+    case "project":
+      return task.project_code || null;
+    case "status":
+      return STATUS_ORDER.indexOf(task.status);
+    case "assignee":
+      return taskAssignees(task).join(", ") || null;
+    case "priority":
+      // Ascending: most pressing (urgent) first, as on the Kanban.
+      return PRIORITY_RANK[task.priority];
+    case "start":
+      return task.start_date;
+    case "due":
+      return task.deadline;
+    case "tags":
+      return task.tags.join(", ") || null;
+    default: {
+      const field = customFields.find((f) => `cf:${f.id}` === column);
+      const value = field ? task.custom_fields[field.id] : undefined;
+      if (value === undefined || value === null || value === "") return null;
+      if (typeof value === "boolean") return value ? 1 : 0;
+      return value;
+    }
+  }
+}
+
+/**
+ * `tasks` sorted by a column (a copy; `tasks` itself when unsorted). Text sorts alphabetically (numbers within it by
+ * value), dates by day, status in workflow order and priority from urgent to low. Tasks without a value come last
+ * either way, and ties keep the table's own order.
+ */
+export function sortTasks(tasks: TaskItem[], sort: Sort, customFields: CustomFieldDef[]): TaskItem[] {
+  if (!sort) return tasks;
+  const sign = sort.direction === "asc" ? 1 : -1;
+  const keyed = tasks.map((task, index) => ({ task, index, value: sortValue(task, sort.column, customFields) }));
+  keyed.sort((a, b) => {
+    if (a.value === null || b.value === null) {
+      if (a.value === b.value) return a.index - b.index;
+      return a.value === null ? 1 : -1;
+    }
+    const order =
+      typeof a.value === "number" && typeof b.value === "number"
+        ? a.value - b.value
+        : String(a.value).localeCompare(String(b.value), undefined, { numeric: true, sensitivity: "base" });
+    return order * sign || a.index - b.index;
+  });
+  return keyed.map((k) => k.task);
+}
+
+/** A column header's label as a button that sorts the table by it, with ▲ / ▼ for the current direction. */
+export function SortHeader({ column, sort, onSort }: { column: Column; sort: Sort; onSort: (sort: Sort) => void }) {
+  const active = sort?.column === column.id ? sort.direction : null;
+  return (
+    <button
+      type="button"
+      onClick={() => onSort(nextSort(sort, column.id))}
+      title={active === "asc" ? "Sorted ascending: click for descending" : active === "desc" ? "Sorted descending: click to unsort" : `Sort by ${column.label}`}
+      className={`group/sort inline-flex max-w-full cursor-pointer select-none items-center gap-1 uppercase tracking-wider hover:text-text-primary ${
+        active ? "text-text-primary" : ""
+      }`}
+    >
+      <span className="truncate">{column.label}</span>
+      <span aria-hidden className={`shrink-0 text-[10px] ${active ? "" : "opacity-0 group-hover/sort:opacity-60"}`}>
+        {active === "asc" ? "▲" : active === "desc" ? "▼" : "↕"}
+      </span>
+    </button>
+  );
+}
+
+/** The `aria-sort` of a column's header. */
+export function ariaSort(sort: Sort, column: string): "ascending" | "descending" | undefined {
+  return sort?.column === column ? (sort.direction === "asc" ? "ascending" : "descending") : undefined;
 }
 
 // --- New task ---------------------------------------------------------------------

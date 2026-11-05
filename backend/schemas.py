@@ -61,6 +61,41 @@ def clean_tags(value: Any) -> list[str]:
     return list(dict.fromkeys(tag.strip() for tag in value if isinstance(tag, str) and tag.strip()))
 
 
+# A task's `assignee` (and each of its `assignees`) is at most this long, like a person's name.
+ASSIGNEE_MAX_LENGTH = 64
+
+
+def clean_assignees(value: Any) -> list[str]:
+    """Assignees: stripped, blanks and duplicates dropped, order kept (None means nobody).
+
+    A single string counts as one assignee. Names longer than `ASSIGNEE_MAX_LENGTH` are rejected.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("assignees must be a list of names")
+    names = [name.strip() for name in value if isinstance(name, str) and name.strip()]
+    if any(len(name) > ASSIGNEE_MAX_LENGTH for name in names):
+        raise ValueError(f"assignee names must be at most {ASSIGNEE_MAX_LENGTH} characters")
+    return list(dict.fromkeys(names))
+
+
+def sync_sent_assignees(model: BaseModel) -> None:
+    """In a create or PATCH body, keep `assignee` (the first assignee, for older clients and the Gantt)
+    and `assignees` in step: `assignees` wins when sent, otherwise a sent `assignee` becomes the only
+    assignee. The derived field is marked as sent, so `model_dump(exclude_unset=True)` carries both."""
+    sent = model.model_fields_set
+    if "assignees" in sent:
+        model.__dict__["assignees"] = model.assignees or []
+        model.__dict__["assignee"] = model.assignees[0] if model.assignees else None
+        sent.add("assignee")
+    elif "assignee" in sent:
+        model.__dict__["assignees"] = [model.assignee] if model.assignee else []
+        sent.add("assignees")
+
+
 # A colour as stored for projects and dropdown options: "#rrggbb", lower case.
 HEX_COLOR = r"#[0-9a-f]{6}"
 
@@ -181,7 +216,10 @@ class Task(BaseModel):
     rank: float | None = None
     is_gantt_task: bool = Field(default=False, description="True for shop floor Gantt tasks")
     is_milestone: bool = Field(default=False, description="Zero-duration Gantt event")
-    assignee: str | None = Field(default=None, description="Who has claimed the task; None if unclaimed")
+    assignee: str | None = Field(
+        default=None, description="Who has claimed the task (the first of `assignees`); None if unclaimed"
+    )
+    assignees: list[str] = Field(default_factory=list, description="Everyone working on the task, in order")
     tags: list[str] = Field(default_factory=list)
     note_path: str | None = Field(default=None, description="The linked note, relative to content/")
     comments: list[TaskComment] = Field(default_factory=list, description="Oldest first")
@@ -195,6 +233,20 @@ class Task(BaseModel):
     def _clean_tags(cls, value: Any) -> list[str]:
         return clean_tags(value)
 
+    @field_validator("assignees", mode="before")
+    @classmethod
+    def _clean_assignees(cls, value: Any) -> list[str]:
+        return clean_assignees(value)
+
+    @model_validator(mode="after")
+    def _sync_assignees(self) -> "Task":
+        """Rows from before multiple assignees only have `assignee`."""
+        if self.assignees:
+            self.__dict__["assignee"] = self.assignees[0]
+        elif self.assignee:
+            self.__dict__["assignees"] = [self.assignee]
+        return self
+
     @field_validator("comments", mode="before")
     @classmethod
     def _clean_comments(cls, value: Any) -> list[TaskComment]:
@@ -207,9 +259,13 @@ class Task(BaseModel):
 
 
 class TaskUpdate(BaseModel):
-    """`PATCH /api/tasks/{id}`: only the fields sent are changed; `assignee: null` unclaims."""
+    """`PATCH /api/tasks/{id}`: only the fields sent are changed; `assignee: null` (or `assignees: []`) unclaims.
 
-    assignee: str | None = Field(default=None, max_length=64)
+    `assignees` replaces everyone on the task; `assignee` alone makes that person the only assignee.
+    """
+
+    assignee: str | None = Field(default=None, max_length=ASSIGNEE_MAX_LENGTH)
+    assignees: list[str] | None = Field(default=None, description="Replaces the task's assignees; [] or null clears them")
     status: Status | None = None
     title: str | None = Field(default=None, min_length=1, max_length=500)
     description: str | None = None
@@ -231,10 +287,20 @@ class TaskUpdate(BaseModel):
     def _blank_is_unassigned(cls, value: str | None) -> str | None:
         return (value.strip() or None) if value is not None else None
 
+    @field_validator("assignees", mode="before")
+    @classmethod
+    def _clean_assignees(cls, value: Any) -> list[str]:
+        return clean_assignees(value)
+
     @field_validator("tags")
     @classmethod
     def _clean_tags(cls, value: list[str] | None) -> list[str]:
         return clean_tags(value)
+
+    @model_validator(mode="after")
+    def _sync_assignees(self) -> "TaskUpdate":
+        sync_sent_assignees(self)
+        return self
 
     @field_validator("status", "title", "description", "priority", "custom_fields", "is_gantt_task", "is_milestone")
     @classmethod
@@ -1096,7 +1162,8 @@ class TaskCreate(BaseModel):
     priority: Priority = Priority.NORMAL
     start_date: date | None = None
     deadline: date | None = Field(default=None, description="Due date")
-    assignee: str | None = Field(default=None, max_length=64)
+    assignee: str | None = Field(default=None, max_length=ASSIGNEE_MAX_LENGTH)
+    assignees: list[str] = Field(default_factory=list, description="Everyone on the task; overrides `assignee` when sent")
     tags: list[str] = Field(default_factory=list)
     note_path: str | None = Field(default=None, description="The note to link, relative to content/")
     custom_fields: dict[str, Any] = Field(default_factory=dict, description="Custom field id -> value")
@@ -1113,10 +1180,20 @@ class TaskCreate(BaseModel):
     def _blank_is_unassigned(cls, value: str | None) -> str | None:
         return (value.strip() or None) if value is not None else None
 
+    @field_validator("assignees", mode="before")
+    @classmethod
+    def _clean_assignees(cls, value: Any) -> list[str]:
+        return clean_assignees(value)
+
     @field_validator("tags")
     @classmethod
     def _clean_tags(cls, value: list[str]) -> list[str]:
         return clean_tags(value)
+
+    @model_validator(mode="after")
+    def _sync_assignees(self) -> "TaskCreate":
+        sync_sent_assignees(self)
+        return self
 
 
 class TaskItem(BaseModel):
@@ -1131,7 +1208,8 @@ class TaskItem(BaseModel):
     description: str
     status: Status
     priority: Priority
-    assignee: str | None
+    assignee: str | None = Field(description="The first of `assignees`; kept for older clients")
+    assignees: list[str] = Field(default_factory=list, description="Everyone working on the task, in order")
     start_date: date | None
     deadline: date | None
     completion_percent: float

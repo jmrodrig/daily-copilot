@@ -1,12 +1,15 @@
 import { useState, type FormEvent, type ReactNode } from "react";
 
-import { AssigneeSelect, type Person } from "../lib/people";
+import { AssigneeSelect, AssigneesSelect, type Person } from "../lib/people";
 import type { CustomFieldDef } from "../lib/space";
+import TagEditor from "./TagEditor";
 import {
   allowedStatuses,
+  assigneesPatch,
   PRIORITY_LABELS,
   STATUS_LABELS,
   STATUSES,
+  taskAssignees,
   type CustomFieldValue,
   type StatusFlow,
   type TaskItem,
@@ -16,12 +19,13 @@ import {
 } from "../lib/tasks";
 
 /**
- * The values being edited. A number field's value is kept as typed until applied; `null` clears a date or custom field
- * (and unassigns).
+ * The values being edited. A number field's value is kept as typed until applied; `null` clears a date or custom field.
+ * `assignees` and `tags` replace each task's own (empty unassigns, or clears the tags).
  */
 type Draft = {
   status: TaskStatus | null;
-  assignee: string | null;
+  assignees: string[];
+  tags: string[];
   priority: TaskPriority;
   start_date: string | null;
   deadline: string | null;
@@ -39,11 +43,18 @@ function common<T>(tasks: TaskItem[], get: (task: TaskItem) => T, fallback: T): 
   return tasks.every((t) => get(t) === first) ? first : fallback;
 }
 
+/** The list every task has in common (in the same order), or [] when they differ. */
+function commonList(tasks: TaskItem[], get: (task: TaskItem) => string[]): string[] {
+  const key = (task: TaskItem) => JSON.stringify(get(task));
+  return common(tasks, key, "[]") === "[]" ? [] : get(tasks[0]);
+}
+
 function initialDraft(tasks: TaskItem[], statuses: TaskStatus[], customFields: CustomFieldDef[]): Draft {
   const status = common<TaskStatus | null>(tasks, (t) => t.status, null);
   return {
     status: status !== null && statuses.includes(status) ? status : (statuses[0] ?? null),
-    assignee: common(tasks, (t) => t.assignee, null),
+    assignees: commonList(tasks, taskAssignees),
+    tags: commonList(tasks, (t) => t.tags),
     priority: common(tasks, (t) => t.priority, "normal"),
     start_date: common(tasks, (t) => t.start_date, null),
     deadline: common(tasks, (t) => t.deadline, null),
@@ -106,7 +117,8 @@ export default function BulkEditDialog({
   const patch: TaskPatch = {};
   let invalid = false;
   if (enabled.has("status") && draft.status !== null) patch.status = draft.status;
-  if (enabled.has("assignee")) patch.assignee = draft.assignee;
+  if (enabled.has("assignees")) Object.assign(patch, assigneesPatch(draft.assignees));
+  if (enabled.has("tags")) patch.tags = draft.tags;
   if (enabled.has("priority")) patch.priority = draft.priority;
   if (enabled.has("start_date")) patch.start_date = draft.start_date;
   if (enabled.has("deadline")) patch.deadline = draft.deadline;
@@ -166,16 +178,24 @@ export default function BulkEditDialog({
             statuses.length ? undefined : "The space's status flow allows no status for every selected task",
           )}
           {row(
-            "assignee",
-            "Assignee",
-            <AssigneeSelect
-              value={draft.assignee}
+            "assignees",
+            "Assignees",
+            <AssigneesSelect
+              value={draft.assignees}
               people={people}
-              onChange={(assignee) => set({ assignee })}
-              ariaLabel="New assignee"
+              onChange={(assignees) => set({ assignees })}
+              ariaLabel="New assignees"
               emptyLabel="Nobody (unassign)"
               className={input}
             />,
+          )}
+          {row(
+            "tags",
+            "Tags",
+            <div className="flex flex-col gap-1">
+              <TagEditor spaceId={tasks[0].space_id} label="New tags" tags={draft.tags} onChange={(tags) => set({ tags })} />
+              <span className="text-xs text-text-muted">Replaces each task&apos;s tags{draft.tags.length === 0 ? ": none clears them" : ""}.</span>
+            </div>,
           )}
           {row(
             "priority",

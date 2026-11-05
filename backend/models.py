@@ -134,8 +134,12 @@ class Task(Versioned, Base):
     rank: Mapped[float | None]
     is_gantt_task: Mapped[bool] = mapped_column(default=False, index=True)
     is_milestone: Mapped[bool] = mapped_column(default=False)
-    # Who is personally working on the task; None means nobody has claimed it.
+    # Who is personally working on the task; None means nobody has claimed it. Always the first of
+    # `assignees`, kept for older clients and the Gantt.
     assignee: Mapped[str | None] = mapped_column(String(64), default=None)
+    # Everyone working on the task, in order. None (or []) only for rows from before multiple assignees,
+    # which use `assignee`; see `schemas.Task`. Replace the list rather than mutating it.
+    assignees: Mapped[list[str] | None] = mapped_column(JSON, default=list)
     # Free-form labels, e.g. ["welding", "client"]; None only for rows from before Phase 10.
     tags: Mapped[list[str] | None] = mapped_column(JSON, default=list)
     # Discussion on the task, oldest first: `schemas.TaskComment` dicts. None only for rows from before

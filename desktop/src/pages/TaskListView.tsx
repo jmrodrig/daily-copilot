@@ -3,19 +3,23 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import BulkEditDialog from "../components/BulkEditDialog";
 import {
   AddTaskButton,
+  ariaSort,
   ColumnPicker,
   customColumn,
   formatCustomValue,
   NewTaskRow,
+  SortHeader,
+  sortTasks,
   TITLE_COLUMN,
   useColumns,
   type Column,
   type NewTaskDraft,
+  type Sort,
 } from "../components/TaskTable";
 import { formatDay, NEUTRAL_TAG, NoteLink, ProjectTag, Tag, TagPills } from "../components/TriageBoard";
 import { optionColor, tint } from "../lib/colors";
 import { message } from "../lib/api";
-import { personLabel, PersonBadge, usePeople, type Person } from "../lib/people";
+import { AvatarCluster, PersonBadge, usePeople, type Person } from "../lib/people";
 import { type CustomFieldDef } from "../lib/space";
 import {
   allowedStatuses,
@@ -23,6 +27,7 @@ import {
   isOverdue,
   PRIORITY_LABELS,
   STATUS_LABELS,
+  taskAssignees,
   useTaskPanel,
   type ProjectOption,
   type StatusFlow,
@@ -37,7 +42,7 @@ function matches(task: TaskItem, words: string[]): boolean {
     task.title,
     task.project_code,
     STATUS_LABELS[task.status],
-    task.assignee,
+    ...taskAssignees(task),
     ...task.tags.map((tag) => `#${tag}`),
     ...Object.values(task.custom_fields).map(String),
   ]
@@ -55,9 +60,11 @@ const LIST_COLUMNS: Column[] = [
   { id: "priority", label: "Priority" },
   { id: "start", label: "Start" },
   { id: "due", label: "Due" },
+  { id: "tags", label: "Tags" },
 ];
 
 const LIST_WIDTHS: Record<string, string> = {
+  tags: "w-40",
   project: "w-28",
   status: "w-32",
   assignee: "w-32",
@@ -102,11 +109,13 @@ export default function TaskListView({
   const [notice, setNotice] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const allColumns = [...LIST_COLUMNS, ...customFields.map(customColumn)];
-  // Priority and Start are hidden until picked, so the table looks as it did.
-  const columns = useColumns("copilot:list-columns", allColumns, (id) => id === "priority" || id === "start");
+  // Priority, Start and Tags are hidden until picked, so the table looks as it did.
+  const columns = useColumns("copilot:list-columns", allColumns, (id) => id === "priority" || id === "start" || id === "tags");
+  // Clicking a column's header sorts by it; null keeps the view's order (earliest due date first).
+  const [sort, setSort] = useState<Sort>(null);
 
   const words = filter.toLowerCase().split(/\s+/).filter(Boolean);
-  const shown = useMemo(() => tasks.filter((t) => matches(t, words)), [tasks, filter]);
+  const shown = useMemo(() => sortTasks(tasks.filter((t) => matches(t, words)), sort, customFields), [tasks, filter, sort, customFields]);
 
   // Tasks that left the list (archived, deleted, filtered out by the view) can't stay ticked.
   useEffect(() => {
@@ -210,13 +219,8 @@ export default function TaskListView({
         );
       case "assignee":
         return (
-          <td key={id} className="truncate px-2 py-1.5">
-            {(() => {
-              if (!task.assignee) return "—";
-              const person = people.find((p) => p.name === task.assignee);
-              if (person) return <PersonBadge person={person} />;
-              return task.assignee === me ? personLabel({ name: task.assignee, is_me: true }) : task.assignee;
-            })()}
+          <td key={id} className="max-w-[16rem] px-2 py-1.5">
+            {taskAssignees(task).length > 0 ? <AvatarCluster names={taskAssignees(task)} people={people} me={me} withName /> : "—"}
           </td>
         );
       case "priority":
@@ -235,6 +239,12 @@ export default function TaskListView({
         return (
           <td key={id} className={`px-2 py-1.5 font-mono text-xs ${isOverdue(task) ? "text-accent" : "text-text-muted"}`}>
             {task.deadline ? formatDay(task.deadline) : "—"}
+          </td>
+        );
+      case "tags":
+        return (
+          <td key={id} className="px-2 py-1.5">
+            <div className="flex flex-wrap items-center gap-1">{task.tags.length > 0 ? <TagPills tags={task.tags} /> : "—"}</div>
           </td>
         );
       default: {
@@ -307,8 +317,12 @@ export default function TaskListView({
                   <SelectAll checked={allShownSelected} indeterminate={chosen.length > 0 && !allShownSelected} onChange={toggleAll} />
                 </th>
                 {columns.shown.map((column) => (
-                  <th key={column.id} className={`${LIST_WIDTHS[column.id] ?? ""} whitespace-nowrap px-2 py-2 font-medium`}>
-                    {column.label}
+                  <th
+                    key={column.id}
+                    aria-sort={ariaSort(sort, column.id)}
+                    className={`${LIST_WIDTHS[column.id] ?? ""} whitespace-nowrap px-2 py-2 font-medium`}
+                  >
+                    <SortHeader column={column} sort={sort} onSort={setSort} />
                   </th>
                 ))}
               </tr>
@@ -338,7 +352,11 @@ export default function TaskListView({
                   projects={projects}
                   people={people}
                   customFields={customFields}
-                  onCreated={onCreated}
+                  onCreated={(task) => {
+                    onCreated(task);
+                    // Straight into its details, to fill them in.
+                    openTask(task.id);
+                  }}
                   onClose={() => setAdding(false)}
                 />
               )}
