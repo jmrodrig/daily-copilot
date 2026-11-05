@@ -642,3 +642,109 @@ def test_person_avatar_color(client):
     cleared = client.put(f"/api/people/{person['id']}", json={"space_id": 1, "name": "Zoe", "color": ""}).json()
     assert cleared["color"] is None
     assert client.get(f"/api/people/{person['id']}").json()["color"] is None
+
+
+# --- Multiple assignees and tags (phase 17) ------------------------------------------
+
+
+def test_create_task_with_several_assignees_keeps_assignee_in_sync(client):
+    task = new_task(client, "Fair", assignees=[" Ana ", "Bo", "", "Ana"])
+
+    assert task["assignees"] == ["Ana", "Bo"]
+    assert task["assignee"] == "Ana"
+
+
+def test_create_task_with_only_assignee_fills_assignees(client):
+    task = new_task(client, "Solo", assignee="Ana")
+
+    assert task["assignee"] == "Ana"
+    assert task["assignees"] == ["Ana"]
+    assert new_task(client, "Nobody")["assignees"] == []
+
+
+def test_patch_assignees_replaces_everyone_and_syncs_assignee(client):
+    task = new_task(client, "Rig", assignee="Ana")
+
+    response = client.patch(f"/api/tasks/{task['id']}", json={"assignees": ["Bo", "Cy"]})
+    assert response.status_code == 200, response.text
+    assert response.json()["assignees"] == ["Bo", "Cy"]
+    assert response.json()["assignee"] == "Bo"
+
+    item = client.get(f"/api/tasks/{task['id']}").json()
+    assert (item["assignee"], item["assignees"]) == ("Bo", ["Bo", "Cy"])
+
+    cleared = client.patch(f"/api/tasks/{task['id']}", json={"assignees": []}).json()
+    assert (cleared["assignee"], cleared["assignees"]) == (None, [])
+
+
+def test_patch_assignee_alone_makes_that_person_the_only_assignee(client):
+    task = new_task(client, "Rig", assignees=["Ana", "Bo"])
+
+    patched = client.patch(f"/api/tasks/{task['id']}", json={"assignee": "Cy"}).json()
+    assert (patched["assignee"], patched["assignees"]) == ("Cy", ["Cy"])
+
+    unclaimed = client.patch(f"/api/tasks/{task['id']}", json={"assignee": None}).json()
+    assert (unclaimed["assignee"], unclaimed["assignees"]) == (None, [])
+
+
+def test_patch_other_fields_leaves_assignees_alone(client):
+    task = new_task(client, "Rig", assignees=["Ana", "Bo"])
+
+    patched = client.patch(f"/api/tasks/{task['id']}", json={"title": "Rigging"}).json()
+    assert patched["assignees"] == ["Ana", "Bo"]
+
+
+def test_assignee_names_are_limited_in_length(client):
+    response = client.post("/api/tasks", json={"space_id": 1, "title": "Long", "assignees": ["x" * 65]})
+    assert response.status_code == 422
+
+
+def test_legacy_rows_with_only_assignee_list_that_assignee(client):
+    with database.SessionLocal() as db:
+        task = Task(space_id=1, title="Old", assignee="Ana", assignees=None)
+        db.add(task)
+        db.commit()
+        task_id = task.id
+
+    item = client.get(f"/api/tasks/{task_id}").json()
+    assert item["assignees"] == ["Ana"]
+    assert titles(client, assignee="Ana") == ["Old"]
+
+
+def test_assignee_filter_matches_any_of_the_assignees(client):
+    new_task(client, "Both", assignees=["Ana", "Bo"])
+    new_task(client, "Bo only", assignees=["Bo"])
+    new_task(client, "Nobody")
+
+    assert titles(client, assignee="Ana") == ["Both"]
+    assert sorted(titles(client, assignee="Bo")) == ["Bo only", "Both"]
+    assert titles(client, assignee="") == ["Nobody"]
+    assert sorted(titles(client, assignee=["Ana", ""])) == ["Both", "Nobody"]
+
+
+def test_bulk_update_sets_assignees_and_tags(client):
+    first = new_task(client, "One", tags=["old"])
+    second = new_task(client, "Two")
+
+    response = client.post(
+        "/api/tasks/bulk-update",
+        json={"task_ids": [first["id"], second["id"]], "updates": {"assignees": ["Ana", "Bo"], "tags": ["rig"]}},
+    )
+    assert response.status_code == 200, response.text
+    for item in response.json():
+        assert item["assignees"] == ["Ana", "Bo"]
+        assert item["assignee"] == "Ana"
+        assert item["tags"] == ["rig"]
+
+
+def test_task_tags_can_be_added_and_removed_and_are_suggested(client):
+    task = new_task(client, "Tagged")
+
+    added = client.patch(f"/api/tasks/{task['id']}", json={"tags": ["welding", " client ", "welding"]}).json()
+    assert added["tags"] == ["welding", "client"]
+    assert {"welding", "client"} <= set(client.get("/api/spaces/1/tags").json())
+
+    removed = client.patch(f"/api/tasks/{task['id']}", json={"tags": ["client"]}).json()
+    assert removed["tags"] == ["client"]
+    assert titles(client, tag="client") == ["Tagged"]
+    assert titles(client, tag="welding") == []

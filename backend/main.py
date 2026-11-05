@@ -554,6 +554,7 @@ def _check_task_update(db: Session, task: Task, changes: dict[str, Any]) -> dict
 def _apply_task_update(task: Task, changes: dict[str, Any]) -> None:
     keys = (
         "assignee",
+        "assignees",
         "title",
         "description",
         "priority",
@@ -576,7 +577,7 @@ def _apply_task_update(task: Task, changes: dict[str, Any]) -> None:
 
 @app.patch("/api/tasks/{task_id}")
 def update_task(task_id: int, request: TaskUpdate, db: Session = Depends(get_db)) -> schemas.Task:
-    """Change a task: claim or unclaim it (`assignee`), move it on the board (`status`), or edit its
+    """Change a task: claim or unclaim it (`assignee`, or everyone on it with `assignees`), move it on the board (`status`), or edit its
     title, dates, project, linked note (`note_path`; null unlinks), Gantt flags or custom fields
     (merged; a null value clears one). Unsent fields are left alone."""
     task = _get_task(db, task_id)
@@ -1812,6 +1813,12 @@ def _rename_note_tags(db: Session, old: str, new: str) -> None:
                 continue  # A hand-edited note with broken front-matter must not stop the rename.
 
 
+def _task_assignees(task: Task) -> list[str]:
+    """Everyone on a task; rows from before multiple assignees only have `assignee`."""
+    names = schemas.clean_assignees(task.assignees)
+    return names or ([task.assignee] if task.assignee else [])
+
+
 def _task_items(db: Session, tasks: list[Task]) -> list[TaskItem]:
     project_ids = {t.project_id for t in tasks if t.project_id is not None}
     projects = {
@@ -1833,7 +1840,8 @@ def _task_items(db: Session, tasks: list[Task]) -> list[TaskItem]:
             description=t.description,
             status=t.status,
             priority=t.priority,
-            assignee=t.assignee,
+            assignee=_task_assignees(t)[0] if _task_assignees(t) else None,
+            assignees=_task_assignees(t),
             start_date=t.start_date,
             deadline=t.deadline,
             completion_percent=t.completion_percent,
@@ -1929,7 +1937,8 @@ def list_tasks(
     """The tasks of a space for the Kanban, Backlog, Gantt and List views, earliest due date first.
 
     Filters: `project_id`, `status`, `note_path` (tasks linked to that note), `tag` (tasks with
-    that tag), and `assignee` (an empty `assignee=` means unassigned). `project_id`, `assignee`, `status`
+    that tag), and `assignee` (tasks with any of those people among their assignees; an empty `assignee=`
+    means unassigned). `project_id`, `assignee`, `status`
     and `priority` are repeatable and match any of the values given. Archived tasks are left out
     unless `include_archived` is set or `status=archived` asks for them.
 
@@ -1943,12 +1952,6 @@ def list_tasks(
     query = select(Task).where(_in_space(_space_id_or_404(db, space_id)))
     if project_id:
         query = query.where(Task.project_id.in_(project_id))
-    if assignee:
-        names = {name.strip() for name in assignee}
-        matches = [Task.assignee.in_(names - {""})]
-        if "" in names:
-            matches.append(Task.assignee.is_(None))
-        query = query.where(or_(*matches))
     if status:
         query = query.where(Task.status.in_(status))
     elif not include_archived:
@@ -1977,6 +1980,14 @@ def list_tasks(
         query = query.where(Task.note_path.is_not(None) if has_note else Task.note_path.is_(None))
     query = query.order_by(Task.deadline.is_(None), Task.deadline, Task.start_date.is_(None), Task.start_date, Task.id)
     tasks = list(db.scalars(query))
+    if assignee:
+        # Assignees are a JSON list, so match them here rather than in SQL.
+        names = {name.strip() for name in assignee}
+        tasks = [
+            t
+            for t in tasks
+            if (not _task_assignees(t) and "" in names) or any(name in names for name in _task_assignees(t))
+        ]
     if tag is not None and tag.strip():
         # Tags are a JSON list, so match them here rather than in SQL.
         tasks = [t for t in tasks if tag.strip() in schemas.clean_tags(t.tags)]

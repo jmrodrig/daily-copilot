@@ -19,7 +19,10 @@ export type TaskItem = {
   description: string;
   status: TaskStatus;
   priority: TaskPriority;
+  /** The first of `assignees`, kept for older code (pills, the Morning List); use `taskAssignees` for everyone. */
   assignee: string | null;
+  /** Everyone working on the task, in order; may be missing on copies made before multiple assignees. */
+  assignees?: string[];
   start_date: string | null;
   deadline: string | null;
   completion_percent: number;
@@ -53,6 +56,7 @@ export type TaskPatch = Partial<
     | "status"
     | "priority"
     | "assignee"
+    | "assignees"
     | "project_id"
     | "start_date"
     | "deadline"
@@ -65,6 +69,16 @@ export type TaskPatch = Partial<
   /** Merged into the task's custom fields; `null` clears a field. */
   custom_fields?: Record<string, CustomFieldValue | null>;
 };
+
+/** Everyone on a task: its `assignees`, or its lone `assignee` on a copy from before multiple assignees. */
+export function taskAssignees(task: Pick<TaskItem, "assignee" | "assignees">): string[] {
+  return task.assignees && task.assignees.length > 0 ? task.assignees : task.assignee ? [task.assignee] : [];
+}
+
+/** The patch giving a task exactly `names` as its assignees (the first is also its `assignee`). */
+export function assigneesPatch(names: string[]): Pick<TaskPatch, "assignee" | "assignees"> {
+  return { assignees: names, assignee: names[0] ?? null };
+}
 
 /** The Kanban columns, left to right. Blocked tasks sit in "In progress" with a tag. */
 export const BOARD_COLUMNS: { status: TaskStatus; label: string }[] = [

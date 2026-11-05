@@ -714,6 +714,7 @@ def test_task_crud_filters_and_links(client):
         "status": "backlog",
         "priority": "normal",
         "assignee": "Jose",
+        "assignees": ["Jose"],
         "start_date": None,
         "deadline": "2026-10-10",
         "completion_percent": 0.0,

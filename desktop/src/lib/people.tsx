@@ -271,3 +271,259 @@ export function AssigneeSelect({
     </div>
   );
 }
+
+const UNKNOWN_PERSON = { avatar_url: null, is_external: false, color: null };
+
+/** A person's medallion by name: their own when they're in People, else plain initials. */
+function NamedAvatar({ name, people }: { name: string; people: Person[] }) {
+  const person = people.find((p) => p.name === name) ?? { ...UNKNOWN_PERSON, name };
+  return <Avatar person={person} size="h-5 w-5 shrink-0 rounded-full" textClass="text-[9px]" />;
+}
+
+/** "Jose (Me)", a person's name, or a name that isn't in People as it is. */
+function nameLabel(name: string, people: Person[], me?: string): string {
+  const person = people.find((p) => p.name === name);
+  return personLabel({ name, is_me: person ? person.is_me : name === me });
+}
+
+/**
+ * A task's assignees as overlapping avatars (each naming its person on hover), at most `max` of them and a "+n" for
+ * the rest. `withName` adds everyone's names beside them.
+ */
+export function AvatarCluster({
+  names,
+  people,
+  me,
+  max = 4,
+  withName = false,
+}: {
+  names: string[];
+  people: Person[];
+  me?: string;
+  max?: number;
+  withName?: boolean;
+}) {
+  if (names.length === 0) return null;
+  const shown = names.slice(0, max);
+  const hidden = names.length - shown.length;
+  const all = names.map((name) => nameLabel(name, people, me)).join(", ");
+  return (
+    <span className="flex min-w-0 items-center gap-1.5" title={all}>
+      <span className="flex shrink-0 items-center">
+        {shown.map((name, i) => (
+          <span key={name} title={nameLabel(name, people, me)} className={`rounded-full ring-2 ring-surface-raised ${i > 0 ? "-ml-1.5" : ""}`}>
+            <NamedAvatar name={name} people={people} />
+          </span>
+        ))}
+      </span>
+      {hidden > 0 && <span className="shrink-0 font-mono text-[11px] text-text-muted">+{hidden}</span>}
+      {withName && <span className="truncate">{all}</span>}
+      <span className="sr-only">{withName ? "" : all}</span>
+    </span>
+  );
+}
+
+/** One choice of an `AssigneesSelect`: a person, a name that isn't in People, or a typed name to add (`isNew`). */
+type AssigneesChoice = { key: string; name: string; person?: Person; isNew?: boolean };
+
+/**
+ * Picks a task's assignees. The chosen ones show as avatar chips (× removes one; Backspace in the empty field removes
+ * the last). Typing filters the space's People ("Me" first) in a dropdown where a click or Enter ticks or unticks
+ * someone, and a typed name that isn't in People can be added too. `compact` shows the chips as avatars only, for
+ * table cells. `onChange` gets the new list of names, in the order they were picked.
+ */
+export function AssigneesSelect({
+  value,
+  people,
+  onChange,
+  ariaLabel = "Assignees",
+  emptyLabel = "Unassigned",
+  compact = false,
+  className = "",
+  disabled,
+}: {
+  value: string[];
+  people: Person[];
+  onChange: (assignees: string[]) => void;
+  ariaLabel?: string;
+  emptyLabel?: string;
+  compact?: boolean;
+  className?: string;
+  disabled?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [highlight, setHighlight] = useState(0);
+  const anchor = useRef<HTMLDivElement>(null);
+  const input = useRef<HTMLInputElement>(null);
+  const listId = useId();
+
+  const ordered = useMemo(() => [...people].sort((a, b) => Number(b.is_me) - Number(a.is_me) || byName(a, b)), [people]);
+  const typed = query.trim().slice(0, ASSIGNEE_MAX);
+  const needle = typed.toLowerCase();
+  const known = needle ? people.find((p) => p.name.toLowerCase() === needle || personLabel(p).toLowerCase() === needle) : undefined;
+  const chosen = new Set(value);
+
+  const choices: AssigneesChoice[] = [
+    ...ordered.filter((p) => !needle || personLabel(p).toLowerCase().includes(needle)).map((p) => ({ key: `p${p.id}`, name: p.name, person: p })),
+    // Assignees who aren't in People (typed before the directory existed) stay listed, so they can be unticked.
+    ...value
+      .filter((name) => !people.some((p) => p.name === name) && (!needle || name.toLowerCase().includes(needle)))
+      .map((name) => ({ key: `n:${name}`, name })),
+    ...(typed && !known && !value.some((name) => name.toLowerCase() === needle) ? [{ key: "new", name: typed, isNew: true }] : []),
+  ];
+
+  function show() {
+    if (disabled) return;
+    setHighlight(0);
+    setOpen(true);
+  }
+
+  function close() {
+    setOpen(false);
+    setQuery("");
+  }
+
+  function toggle(name: string) {
+    onChange(chosen.has(name) ? value.filter((n) => n !== name) : [...value, name]);
+    setQuery("");
+    setHighlight(0);
+    input.current?.focus();
+  }
+
+  function keys(e: KeyboardEvent<HTMLInputElement>) {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      if (!open) return show();
+      if (choices.length === 0) return;
+      const step = e.key === "ArrowDown" ? 1 : -1;
+      setHighlight((h) => (h + step + choices.length) % choices.length);
+    } else if (e.key === "Enter") {
+      // Ticks rather than submitting the form around it.
+      e.preventDefault();
+      e.stopPropagation();
+      const choice = open ? choices[highlight] : undefined;
+      if (choice) toggle(choice.name);
+      else if (!open) show();
+    } else if (e.key === "Backspace" && query === "" && value.length > 0) {
+      onChange(value.slice(0, -1));
+    } else if (e.key === "Escape" && (open || query)) {
+      e.stopPropagation();
+      close();
+    }
+  }
+
+  return (
+    <div
+      ref={anchor}
+      onClick={() => {
+        input.current?.focus();
+        if (!open) show();
+      }}
+      className={`flex min-w-0 cursor-text flex-wrap items-center gap-1 ${disabled ? "opacity-60" : ""} ${className}`}
+    >
+      {value.map((name) => {
+        const person = people.find((p) => p.name === name);
+        const label = person ? personLabel(person) : `${name} (not in People)`;
+        if (compact) {
+          return (
+            <span key={name} title={label} className="shrink-0 rounded-full">
+              <NamedAvatar name={name} people={people} />
+            </span>
+          );
+        }
+        return (
+          <span
+            key={name}
+            title={label}
+            className="inline-flex max-w-full items-center gap-1 rounded-full border border-border-default bg-surface-panel py-px pl-px pr-1.5 text-[13px] text-text-primary"
+          >
+            <NamedAvatar name={name} people={people} />
+            <span className="truncate">{person ? personLabel(person) : name}</span>
+            <button
+              type="button"
+              aria-label={`Remove ${name}`}
+              title={`Remove ${name}`}
+              disabled={disabled}
+              // Keep the focus where it is, so removing doesn't open the list.
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={(e) => {
+                e.stopPropagation();
+                onChange(value.filter((n) => n !== name));
+              }}
+              className="leading-none text-text-muted hover:text-accent"
+            >
+              ×
+            </button>
+          </span>
+        );
+      })}
+      <input
+        ref={input}
+        role="combobox"
+        aria-label={ariaLabel}
+        aria-expanded={open}
+        aria-controls={listId}
+        aria-autocomplete="list"
+        aria-activedescendant={open && choices[highlight] ? `${listId}-${choices[highlight].key}` : undefined}
+        value={query}
+        placeholder={value.length === 0 ? emptyLabel : compact ? "" : "Add…"}
+        disabled={disabled}
+        maxLength={ASSIGNEE_MAX}
+        autoComplete="off"
+        onFocus={show}
+        onChange={(e) => {
+          setQuery(e.target.value);
+          setHighlight(0);
+          setOpen(true);
+        }}
+        onBlur={close}
+        onKeyDown={keys}
+        className={`min-w-0 flex-1 bg-transparent text-text-primary placeholder:text-text-muted focus:outline-none ${compact && value.length > 0 ? "w-3" : "w-16"}`}
+      />
+      <Popover anchor={anchor} open={open} onClose={close} id={listId} label={ariaLabel}>
+        {choices.length === 0 && <div className="px-2 py-1.5 text-text-muted">No one in People yet: type a name</div>}
+        {choices.map((choice, index) => {
+          const ticked = chosen.has(choice.name);
+          return (
+            <div
+              key={choice.key}
+              id={`${listId}-${choice.key}`}
+              role="option"
+              aria-selected={ticked}
+              // Keep the focus in the input, so the list stays open for the next pick.
+              onMouseDown={(e) => e.preventDefault()}
+              onMouseEnter={() => setHighlight(index)}
+              onClick={() => toggle(choice.name)}
+              className={`flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 ${index === highlight ? "bg-surface-raised text-text-primary" : "text-text-secondary"}`}
+            >
+              {choice.isNew ? (
+                <span aria-hidden className="w-3.5 shrink-0 text-center font-mono text-text-muted">
+                  +
+                </span>
+              ) : (
+                <span
+                  aria-hidden
+                  className={`flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-sm border text-[10px] leading-none ${
+                    ticked ? "border-accent bg-accent text-white" : "border-border-strong"
+                  }`}
+                >
+                  {ticked ? "✓" : ""}
+                </span>
+              )}
+              {choice.person ? (
+                <span className={choice.person.is_me ? "font-semibold" : undefined}>
+                  <PersonBadge person={choice.person} />
+                </span>
+              ) : (
+                <span className="truncate">
+                  {choice.isNew ? `Assign “${choice.name}”` : choice.name} <span className="text-text-muted">(not in People)</span>
+                </span>
+              )}
+            </div>
+          );
+        })}
+      </Popover>
+    </div>
+  );
+}
