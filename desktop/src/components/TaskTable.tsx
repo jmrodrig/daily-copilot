@@ -268,7 +268,7 @@ export function NewTaskRow({
       onCreated(await sendJson<TaskItem>("POST", "/api/tasks", body));
       // Ready for the next one, with the same fields.
       set({ title: "" });
-      titleInput.current?.focus();
+      titleInput.current?.focus({ preventScroll: true });
     } catch (err: unknown) {
       setError(message(err));
     } finally {

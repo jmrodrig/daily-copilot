@@ -69,6 +69,7 @@ export default function TaskPanel({ taskId, onClose }: { taskId: number; onClose
     if (state.state !== "ok" || focusedId.current === state.task.id) return;
     focusedId.current = state.task.id;
     section.current?.focus({ preventScroll: true });
+    if (window.scrollY !== 0) window.scrollTo(0, 0);
   }, [state]);
 
   useEffect(() => {

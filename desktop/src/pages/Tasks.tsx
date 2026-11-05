@@ -640,7 +640,7 @@ function KanbanAddCard({
 
   // Disabling the input while saving drops its focus: take it back for the next task.
   useEffect(() => {
-    if (isEditing && !saving) input.current?.focus();
+    if (isEditing && !saving) input.current?.focus({ preventScroll: true });
   }, [isEditing, saving]);
 
   // A click outside the card (its dropdowns included) with nothing typed puts it away.

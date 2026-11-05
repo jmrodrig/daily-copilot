@@ -72,6 +72,7 @@ html,
 body,
 #root {
   height: 100%;
+  overflow: hidden;
 }
 
 body {
@@ -535,6 +536,7 @@ body {
   body,
   #root {
     height: auto;
+    overflow: visible;
     background: #fff !important;
     color: #000 !important;
   }

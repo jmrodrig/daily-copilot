@@ -186,12 +186,12 @@ export default function Layout() {
   const paneTransition = resizing ? "" : "transition-[width,min-width] duration-200 ease-out motion-reduce:transition-none";
 
   return (
-    <div ref={rootRef} className="flex h-full min-h-[720px] overflow-hidden text-sm leading-[1.45] print:block print:h-auto print:min-h-0 print:overflow-visible">
+    <div ref={rootRef} className="flex h-full min-h-0 w-full overflow-hidden text-sm leading-[1.45] print:block print:h-auto print:min-h-0 print:overflow-visible">
       <nav
         ref={leftRef}
         aria-label="Page tree"
         style={leftOpen ? paneStyle("left") : railStyle}
-        className={`flex flex-col overflow-hidden print:hidden bg-surface-panel ${leftOpen ? "" : "shrink-0 border-r border-border-default"} ${paneTransition}`}
+        className={`flex h-full min-h-0 flex-col overflow-hidden print:hidden bg-surface-panel ${leftOpen ? "" : "shrink-0 border-r border-border-default"} ${paneTransition}`}
       >
         {leftOpen ? (
           <Sidebar onCollapse={() => setLeftOpen(false)} />
@@ -211,7 +211,7 @@ export default function Layout() {
           onReset={() => reset("left")}
         />
       )}
-      <main ref={mainRef} className="min-w-[320px] flex-1 overflow-auto print:overflow-visible">
+      <main ref={mainRef} className="min-w-[320px] min-h-0 flex-1 overflow-auto print:overflow-visible">
         <Outlet />
       </main>
       {rightOfMain && (
@@ -228,7 +228,7 @@ export default function Layout() {
           ref={taskRef}
           aria-label="Task details"
           style={paneStyle("task")}
-          className="flex animate-pane-in flex-col overflow-hidden print:hidden bg-surface-panel motion-reduce:animate-none"
+          className="flex h-full min-h-0 animate-pane-in flex-col overflow-hidden print:hidden bg-surface-panel motion-reduce:animate-none"
         >
           <TaskPanel taskId={taskId} onClose={closeTask} />
         </aside>
@@ -246,7 +246,7 @@ export default function Layout() {
         ref={chatRef}
         aria-label="Co-pilot"
         style={chatOpen ? paneStyle("chat") : railStyle}
-        className={`flex flex-col overflow-hidden print:hidden bg-surface-panel ${
+        className={`flex h-full min-h-0 flex-col overflow-hidden print:hidden bg-surface-panel ${
           chatOpen ? "" : "shrink-0 items-center border-l border-border-default py-3.5"
         } ${paneTransition}`}
       >
